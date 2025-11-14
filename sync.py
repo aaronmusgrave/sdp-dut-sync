@@ -74,8 +74,7 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
     access_token = get_access_token()
     
     headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Content-Type': 'application/json'
+        'Authorization': f'Zoho-oauthtoken {access_token}'
     }
     
     list_info = {
@@ -88,20 +87,26 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
     if status_filter:
         list_info['filter_by'] = {'status': {'name': status_filter}}
     
-    params = {
-        'input_data': json.dumps({'list_info': list_info})
+    # Format the input_data correctly for SDPOnDemand API v3
+    input_data = json.dumps({'list_info': list_info})
+    
+    # Use form data instead of query params
+    data = {
+        'input_data': input_data
     }
     
     url = f"{SDP_API_BASE}/requests"
     print(f"   Calling: {url}")
+    print(f"   Input data: {input_data}")
     
-    response = requests.get(url, headers=headers, params=params)
+    # Use POST instead of GET for SDPOnDemand API v3
+    response = requests.post(url, headers=headers, data=data)
     
     print(f"   Response status: {response.status_code}")
     
     if response.status_code == 200:
-        data = response.json()
-        tickets = data.get('requests', [])
+        response_data = response.json()
+        tickets = response_data.get('requests', [])
         print(f"✅ Fetched {len(tickets)} tickets")
         return tickets
     else:
