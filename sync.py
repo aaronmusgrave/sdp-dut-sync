@@ -61,9 +61,9 @@ def get_access_token():
         raise Exception(f"Failed to get access token: {response.status_code} - {response.text}")
 
 
-def fetch_sdp_tickets(limit=100, status_filter=None):
-    """Fetch tickets from SDPOnDemand using GET request"""
-    print(f"📥 Fetching tickets from SDPOnDemand...")
+def fetch_sdp_tickets(limit=500, status_filter=None):
+    """Fetch tickets from SDPOnDemand with pagination"""
+    print(f"📥 Fetching up to {limit} tickets from SDPOnDemand...")
     
     access_token = get_access_token()
     
@@ -71,23 +71,55 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
         'Authorization': f'Zoho-oauthtoken {access_token}'
     }
     
-    # Try simple GET request without input_data
-    url = f"{SDP_API_BASE}/requests"
-    print(f"   Calling: {url}")
+    all_tickets = []
+    start_index = 1
+    page_size = 100  # Fetch 100 tickets per page
     
-    response = requests.get(url, headers=headers)
+    while len(all_tickets) < limit:
+        # Build the request with pagination
+        list_info = {
+            'row_count': min(page_size, limit - len(all_tickets)),
+            'start_index': start_index
+        }
+        
+        if status_filter:
+            list_info['filter_by'] = {'status': {'name': status_filter}}
+        
+        input_data = json.dumps({'list_info': list_info})
+        data = {'input_data': input_data}
+        
+        url = f"{SDP_API_BASE}/requests"
+        response = requests.post(url, headers=headers, data=data)
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            tickets = response_data.get('requests', [])
+            
+            if not tickets:
+                # No more tickets to fetch
+                break
+            
+            all_tickets.extend(tickets)
+            print(f"   Fetched page {start_index // page_size + 1}: {len(tickets)} tickets (total: {len(all_tickets)})")
+            
+            # If we got fewer tickets than requested, we've reached the end
+            if len(tickets) < page_size:
+                break
+            
+            start_index += page_size
+        else:
+            # If pagination fails, fall back to simple GET
+            print(f"   Pagination failed, trying simple GET...")
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                response_data = response.json()
+                all_tickets = response_data.get('requests', [])
+                break
+            else:
+                raise Exception(f"Failed to fetch tickets: {response.status_code} - {response.text}")
     
-    print(f"   Response status: {response.status_code}")
-    
-    if response.status_code == 200:
-        response_data = response.json()
-        tickets = response_data.get('requests', [])
-        print(f"✅ Fetched {len(tickets)} tickets")
-        # Limit tickets if needed
-        return tickets[:limit]
-    else:
-        print(f"   Response body: {response.text}")
-        raise Exception(f"Failed to fetch tickets: {response.status_code} - {response.text}")
+    print(f"✅ Fetched {len(all_tickets)} tickets total")
+    return all_tickets[:limit]
 
 
 def format_ticket_for_dust(ticket):
@@ -167,7 +199,7 @@ def upload_ticket_to_dust(ticket_id, ticket_text):
     return response.status_code == 200
 
 
-def sync_tickets(limit=100, status_filter=None):
+def sync_tickets(limit=500, status_filter=None):
     """Main sync function"""
     print("🚀 Starting SDPOnDemand → Dust sync")
     print("=" * 60)
@@ -184,52 +216,4 @@ def sync_tickets(limit=100, status_filter=None):
         
         print(f"✅ All required environment variables present")
         print(f"   SDP Domain: {SDP_DOMAIN}")
-        print(f"   Dust Workspace: {DUST_WORKSPACE_ID}")
-        print(f"   Dust Folder: {DUST_FOLDER_NAME}")
-        print()
-        
-        # Fetch tickets
-        tickets = fetch_sdp_tickets(limit=limit, status_filter=status_filter)
-        
-        if not tickets:
-            print("⚠️  No tickets to sync")
-            return
-        
-        print(f"\n📤 Uploading {len(tickets)} tickets to Dust...")
-        print("-" * 60)
-        
-        success_count = 0
-        failed_tickets = []
-        
-        for ticket in tickets:
-            ticket_id = ticket.get('id')
-            subject = ticket.get('subject', 'No subject')[:50]
-            
-            ticket_text = format_ticket_for_dust(ticket)
-            
-            if upload_ticket_to_dust(ticket_id, ticket_text):
-                success_count += 1
-                print(f"  ✅ #{ticket_id}: {subject}")
-            else:
-                failed_tickets.append(ticket_id)
-                print(f"  ❌ #{ticket_id}: {subject}")
-        
-        print("-" * 60)
-        print(f"\n🎉 Sync complete!")
-        print(f"   Successfully uploaded: {success_count}/{len(tickets)}")
-        
-        if failed_tickets:
-            print(f"   Failed tickets: {', '.join(map(str, failed_tickets))}")
-        
-        print("=" * 60)
-        
-    except Exception as e:
-        print(f"\n❌ Sync failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
-
-
-if __name__ == "__main__":
-    # Sync all tickets
-    sync_tickets(limit=100, status_filter=None)
+        print(f"   Dust
