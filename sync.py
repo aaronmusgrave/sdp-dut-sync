@@ -37,8 +37,6 @@ def get_access_token():
         return _access_token
     
     print("🔑 Getting access token...")
-    print(f"   Using Client ID: {SDP_CLIENT_ID[:20]}...")
-    print(f"   Using Refresh Token: {SDP_REFRESH_TOKEN[:20]}...")
     
     payload = {
         'refresh_token': SDP_REFRESH_TOKEN,
@@ -48,10 +46,6 @@ def get_access_token():
     }
     
     response = requests.post(ZOHO_TOKEN_URL, data=payload)
-    
-    # Print full response for debugging
-    print(f"   Response status: {response.status_code}")
-    print(f"   Response body: {response.text}")
     
     if response.status_code == 200:
         data = response.json()
@@ -77,11 +71,9 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
         'Authorization': f'Zoho-oauthtoken {access_token}'
     }
     
+    # Simplified list_info - only essential parameters
     list_info = {
-        'row_count': limit,
-        'start_index': 1,
-        'sort_field': 'created_time',
-        'sort_order': 'desc'
+        'row_count': limit
     }
     
     if status_filter:
@@ -90,7 +82,7 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
     # Format the input_data correctly for SDPOnDemand API v3
     input_data = json.dumps({'list_info': list_info})
     
-    # Use form data instead of query params
+    # Use form data
     data = {
         'input_data': input_data
     }
@@ -99,7 +91,7 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
     print(f"   Calling: {url}")
     print(f"   Input data: {input_data}")
     
-    # Use POST instead of GET for SDPOnDemand API v3
+    # Use POST for SDPOnDemand API v3
     response = requests.post(url, headers=headers, data=data)
     
     print(f"   Response status: {response.status_code}")
@@ -124,119 +116,4 @@ def format_ticket_for_dust(ticket):
     requester_email = ticket.get('requester', {}).get('email_id', '')
     technician = ticket.get('technician', {}).get('name', 'Unassigned')
     created_time = ticket.get('created_time', {}).get('display_value', 'Unknown')
-    due_by_time = ticket.get('due_by_time', {}).get('display_value', 'Not set')
-    category = ticket.get('category', {}).get('name', 'Uncategorized')
-    description = ticket.get('description', 'No description')
-    
-    # Basic HTML cleanup
-    description = description.replace('<br>', '\n').replace('</p>', '\n\n')
-    
-    text = f"""# Ticket #{ticket_id}: {subject}
-
-## Details
-- **Status**: {status}
-- **Priority**: {priority}
-- **Category**: {category}
-- **Created**: {created_time}
-- **Due By**: {due_by_time}
-
-## People
-- **Requester**: {requester} ({requester_email})
-- **Assigned To**: {technician}
-
-## Description
-{description}
-
----
-*Synced: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}*
-"""
-    return text
-
-
-def upload_ticket_to_dust(ticket_id, ticket_text):
-    """Upload a ticket to Dust"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    url = f"{DUST_API_BASE}/{ticket_id}"
-    payload = {
-        'text': ticket_text,
-        'source_url': f"https://{SDP_DOMAIN}/app/{ticket_id}"
-    }
-    
-    response = requests.post(url, headers=headers, json=payload)
-    
-    if response.status_code != 200:
-        print(f"      Dust API error: {response.status_code} - {response.text}")
-    
-    return response.status_code == 200
-
-
-def sync_tickets(limit=100, status_filter=None):
-    """Main sync function"""
-    print("🚀 Starting SDPOnDemand → Dust sync")
-    print("=" * 60)
-    
-    try:
-        # Validate environment variables
-        required_vars = [
-            'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
-            'SDP_REFRESH_TOKEN', 'DUST_API_KEY', 'DUST_WORKSPACE_ID'
-        ]
-        missing = [var for var in required_vars if not os.environ.get(var)]
-        if missing:
-            raise Exception(f"Missing required environment variables: {', '.join(missing)}")
-        
-        print(f"✅ All required environment variables present")
-        print(f"   SDP Domain: {SDP_DOMAIN}")
-        print(f"   Dust Workspace: {DUST_WORKSPACE_ID}")
-        print(f"   Dust Folder: {DUST_FOLDER_NAME}")
-        print()
-        
-        # Fetch tickets
-        tickets = fetch_sdp_tickets(limit=limit, status_filter=status_filter)
-        
-        if not tickets:
-            print("⚠️  No tickets to sync")
-            return
-        
-        print(f"\n📤 Uploading {len(tickets)} tickets to Dust...")
-        print("-" * 60)
-        
-        success_count = 0
-        failed_tickets = []
-        
-        for ticket in tickets:
-            ticket_id = ticket.get('id')
-            subject = ticket.get('subject', 'No subject')[:50]
-            
-            ticket_text = format_ticket_for_dust(ticket)
-            
-            if upload_ticket_to_dust(ticket_id, ticket_text):
-                success_count += 1
-                print(f"  ✅ #{ticket_id}: {subject}")
-            else:
-                failed_tickets.append(ticket_id)
-                print(f"  ❌ #{ticket_id}: {subject}")
-        
-        print("-" * 60)
-        print(f"\n🎉 Sync complete!")
-        print(f"   Successfully uploaded: {success_count}/{len(tickets)}")
-        
-        if failed_tickets:
-            print(f"   Failed tickets: {', '.join(map(str, failed_tickets))}")
-        
-        print("=" * 60)
-        
-    except Exception as e:
-        print(f"\n❌ Sync failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
-
-
-if __name__ == "__main__":
-    # Sync all tickets
-    sync_tickets(limit=100, status_filter=None)
+    due_by_time = ticket.get('due_by_time', {}).get('display_value',
