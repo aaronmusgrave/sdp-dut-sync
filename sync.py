@@ -37,6 +37,8 @@ def get_access_token():
         return _access_token
     
     print("🔑 Getting access token...")
+    print(f"   Using Client ID: {SDP_CLIENT_ID[:20]}...")
+    print(f"   Using Refresh Token: {SDP_REFRESH_TOKEN[:20]}...")
     
     payload = {
         'refresh_token': SDP_REFRESH_TOKEN,
@@ -47,15 +49,22 @@ def get_access_token():
     
     response = requests.post(ZOHO_TOKEN_URL, data=payload)
     
+    # Print full response for debugging
+    print(f"   Response status: {response.status_code}")
+    print(f"   Response body: {response.text}")
+    
     if response.status_code == 200:
         data = response.json()
+        if 'access_token' not in data:
+            raise Exception(f"No access_token in response: {data}")
+        
         _access_token = data['access_token']
         expires_in = data.get('expires_in', 3600)
         _token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
         print(f"✅ Access token obtained (valid for {expires_in}s)")
         return _access_token
     else:
-        raise Exception(f"Failed to get access token: {response.text}")
+        raise Exception(f"Failed to get access token: {response.status_code} - {response.text}")
 
 
 def fetch_sdp_tickets(limit=100, status_filter=None):
@@ -84,7 +93,11 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
     }
     
     url = f"{SDP_API_BASE}/requests"
+    print(f"   Calling: {url}")
+    
     response = requests.get(url, headers=headers, params=params)
+    
+    print(f"   Response status: {response.status_code}")
     
     if response.status_code == 200:
         data = response.json()
@@ -92,6 +105,7 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
         print(f"✅ Fetched {len(tickets)} tickets")
         return tickets
     else:
+        print(f"   Response body: {response.text}")
         raise Exception(f"Failed to fetch tickets: {response.status_code} - {response.text}")
 
 
@@ -148,6 +162,10 @@ def upload_ticket_to_dust(ticket_id, ticket_text):
     }
     
     response = requests.post(url, headers=headers, json=payload)
+    
+    if response.status_code != 200:
+        print(f"      Dust API error: {response.status_code} - {response.text}")
+    
     return response.status_code == 200
 
 
@@ -165,6 +183,12 @@ def sync_tickets(limit=100, status_filter=None):
         missing = [var for var in required_vars if not os.environ.get(var)]
         if missing:
             raise Exception(f"Missing required environment variables: {', '.join(missing)}")
+        
+        print(f"✅ All required environment variables present")
+        print(f"   SDP Domain: {SDP_DOMAIN}")
+        print(f"   Dust Workspace: {DUST_WORKSPACE_ID}")
+        print(f"   Dust Folder: {DUST_FOLDER_NAME}")
+        print()
         
         # Fetch tickets
         tickets = fetch_sdp_tickets(limit=limit, status_filter=status_filter)
@@ -203,6 +227,8 @@ def sync_tickets(limit=100, status_filter=None):
         
     except Exception as e:
         print(f"\n❌ Sync failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise
 
 
