@@ -55,14 +55,14 @@ def get_access_token():
         _access_token = data['access_token']
         expires_in = data.get('expires_in', 3600)
         _token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
-        print(f"✅ Access token obtained (valid for {expires_in}s)")
+        print(f"✅ Access token obtained (valid for 3600s)")
         return _access_token
     else:
         raise Exception(f"Failed to get access token: {response.status_code} - {response.text}")
 
 
 def fetch_sdp_tickets(limit=100, status_filter=None):
-    """Fetch tickets from SDPOnDemand"""
+    """Fetch tickets from SDPOnDemand using GET request"""
     print(f"📥 Fetching tickets from SDPOnDemand...")
     
     access_token = get_access_token()
@@ -71,28 +71,11 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
         'Authorization': f'Zoho-oauthtoken {access_token}'
     }
     
-    # Simplified list_info - only essential parameters
-    list_info = {
-        'row_count': limit
-    }
-    
-    if status_filter:
-        list_info['filter_by'] = {'status': {'name': status_filter}}
-    
-    # Format the input_data correctly for SDPOnDemand API v3
-    input_data = json.dumps({'list_info': list_info})
-    
-    # Use form data
-    data = {
-        'input_data': input_data
-    }
-    
+    # Try simple GET request without input_data
     url = f"{SDP_API_BASE}/requests"
     print(f"   Calling: {url}")
-    print(f"   Input data: {input_data}")
     
-    # Use POST for SDPOnDemand API v3
-    response = requests.post(url, headers=headers, data=data)
+    response = requests.get(url, headers=headers)
     
     print(f"   Response status: {response.status_code}")
     
@@ -100,7 +83,8 @@ def fetch_sdp_tickets(limit=100, status_filter=None):
         response_data = response.json()
         tickets = response_data.get('requests', [])
         print(f"✅ Fetched {len(tickets)} tickets")
-        return tickets
+        # Limit tickets if needed
+        return tickets[:limit]
     else:
         print(f"   Response body: {response.text}")
         raise Exception(f"Failed to fetch tickets: {response.status_code} - {response.text}")
