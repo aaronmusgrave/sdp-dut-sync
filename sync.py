@@ -94,31 +94,48 @@ def format_ticket_for_dust(ticket):
     """Format ticket as markdown for Dust"""
     ticket_id = ticket.get('id', 'Unknown')
     subject = ticket.get('subject', 'No Subject')
-    status = ticket.get('status', {}).get('name', 'Unknown')
-    priority = ticket.get('priority', {}).get('name', 'Unknown')
-    requester = ticket.get('requester', {}).get('name', 'Unknown')
-    requester_email = ticket.get('requester', {}).get('email_id', '')
-    technician = ticket.get('technician', {}).get('name', 'Unassigned')
-    created_time = ticket.get('created_time', {}).get('display_value', 'Unknown')
-    due_by_time = ticket.get('due_by_time', {}).get('display_value', 'Not set')
-    category = ticket.get('category', {}).get('name', 'Uncategorized')
+    
+    # Safely get nested values with None checks
+    status = ticket.get('status', {}) or {}
+    status_name = status.get('name', 'Unknown')
+    
+    priority = ticket.get('priority', {}) or {}
+    priority_name = priority.get('name', 'Unknown')
+    
+    requester = ticket.get('requester', {}) or {}
+    requester_name = requester.get('name', 'Unknown')
+    requester_email = requester.get('email_id', '')
+    
+    technician = ticket.get('technician', {}) or {}
+    technician_name = technician.get('name', 'Unassigned')
+    
+    created_time = ticket.get('created_time', {}) or {}
+    created_time_display = created_time.get('display_value', 'Unknown')
+    
+    due_by_time = ticket.get('due_by_time', {}) or {}
+    due_by_time_display = due_by_time.get('display_value', 'Not set')
+    
+    category = ticket.get('category', {}) or {}
+    category_name = category.get('name', 'Uncategorized')
+    
     description = ticket.get('description', 'No description')
     
     # Basic HTML cleanup
-    description = description.replace('<br>', '\n').replace('</p>', '\n\n')
+    if description:
+        description = description.replace('<br>', '\n').replace('</p>', '\n\n')
     
     text = f"""# Ticket #{ticket_id}: {subject}
 
 ## Details
-- **Status**: {status}
-- **Priority**: {priority}
-- **Category**: {category}
-- **Created**: {created_time}
-- **Due By**: {due_by_time}
+- **Status**: {status_name}
+- **Priority**: {priority_name}
+- **Category**: {category_name}
+- **Created**: {created_time_display}
+- **Due By**: {due_by_time_display}
 
 ## People
-- **Requester**: {requester} ({requester_email})
-- **Assigned To**: {technician}
+- **Requester**: {requester_name} ({requester_email})
+- **Assigned To**: {technician_name}
 
 ## Description
 {description}
