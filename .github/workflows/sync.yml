@@ -1,0 +1,37 @@
+name: Sync SDPOnDemand to Dust
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Run sync
+        env:
+          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+          DUST_FOLDER_NAME: ${{ secrets.DUST_FOLDER_NAME }}
+        run: python sync.py
