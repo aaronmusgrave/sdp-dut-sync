@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Sync ServiceDesk Plus On-Demand tickets to Dust
-First run: Full sync of all tickets
+First run: Full sync of all tickets (trying multiple API methods)
 Subsequent runs: Incremental sync of only new/updated tickets
 """
 import os
@@ -149,69 +149,165 @@ def fetch_ticket_conversations(ticket_id, access_token):
 
 
 def fetch_all_tickets(max_tickets=10000):
-    """Fetch ALL tickets for initial sync with proper pagination"""
-    print(f"Fetching ALL tickets (up to {max_tickets}) for initial sync...")
+    """Fetch ALL tickets using multiple API methods"""
+    print(f"Fetching ALL tickets (up to {max_tickets})...")
+    print("=" * 60)
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     
     all_tickets = []
-    page = 1
     
-    while len(all_tickets) < max_tickets:
-        # Calculate start index (1-based)
-        start_index = (page - 1) * 100 + 1
-        
-        input_data = json.dumps({
-            'list_info': {
-                'row_count': 100,
-                'start_index': start_index
+    # METHOD 1: Search API with GET parameters
+    print("\nMETHOD 1: Search API with GET parameters")
+    print("-" * 60)
+    
+    for start_index in range(1, max_tickets, 100):
+        search_criteria = {
+            "list_info": {
+                "row_count": 100,
+                "start_index": start_index,
+                "get_total_count": True
             }
-        })
+        }
         
-        data = {'input_data': input_data}
         url = f"{SDP_API_BASE}/requests"
+        params = {'input_data': json.dumps(search_criteria)}
         
-        print(f"Fetching page {page} (start_index: {start_index})...")
+        print(f"Fetching from index {start_index}...")
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            tickets = data.get('requests', [])
+            
+            if tickets:
+                all_tickets.extend(tickets)
+                print(f"  Got {len(tickets)} tickets (total: {len(all_tickets)})")
+                
+                response_status = data.get('response_status', {})
+                total_count = response_status.get('total_count')
+                if total_count:
+                    print(f"  API reports {total_count} total tickets available")
+                
+                if len(tickets) < 100:
+                    print(f"  Reached end of results")
+                    break
+            else:
+                print(f"  No more tickets")
+                break
+        else:
+            print(f"Method 1 failed: {response.status_code} - {response.text[:200]}")
+            break
+        
+        time.sleep(0.5)
+    
+    if all_tickets:
+        print(f"\nMETHOD 1 SUCCESS: Fetched {len(all_tickets)} tickets")
+        return all_tickets
+    
+    # METHOD 2: Direct query parameters
+    print("\nMETHOD 2: Direct query parameters")
+    print("-" * 60)
+    all_tickets = []
+    
+    for start_index in range(1, max_tickets, 100):
+        params = {
+            'row_count': 100,
+            'start_index': start_index
+        }
+        
+        url = f"{SDP_API_BASE}/requests"
+        print(f"Fetching from index {start_index}...")
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            tickets = data.get('requests', [])
+            
+            if tickets:
+                all_tickets.extend(tickets)
+                print(f"  Got {len(tickets)} tickets (total: {len(all_tickets)})")
+                
+                if len(tickets) < 100:
+                    break
+            else:
+                break
+        else:
+            print(f"Method 2 failed: {response.status_code}")
+            break
+        
+        time.sleep(0.5)
+    
+    if all_tickets:
+        print(f"\nMETHOD 2 SUCCESS: Fetched {len(all_tickets)} tickets")
+        return all_tickets
+    
+    # METHOD 3: Fetch by date ranges (30-day chunks)
+    print("\nMETHOD 3: Fetch by date ranges")
+    print("-" * 60)
+    
+    all_tickets = []
+    current_date = datetime.now()
+    
+    # Go back 2 years in 30-day chunks
+    for days_back in range(0, 730, 30):
+        start_date = current_date - timedelta(days=days_back + 30)
+        end_date = current_date - timedelta(days=days_back)
+        
+        start_timestamp = int(start_date.timestamp() * 1000)
+        end_timestamp = int(end_date.timestamp() * 1000)
+        
+        search_criteria = {
+            "list_info": {
+                "row_count": 100,
+                "filter_by": {
+                    "created_time": {
+                        "from": start_timestamp,
+                        "to": end_timestamp
+                    }
+                }
+            }
+        }
+        
+        url = f"{SDP_API_BASE}/requests"
+        data = {'input_data': json.dumps(search_criteria)}
+        
+        print(f"Fetching tickets from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}...")
         response = requests.post(url, headers=headers, data=data)
         
         if response.status_code == 200:
-            response_data = response.json()
-            tickets = response_data.get('requests', [])
+            tickets_data = response.json()
+            tickets = tickets_data.get('requests', [])
             
-            if not tickets:
-                print(f"No more tickets found")
-                break
-            
-            all_tickets.extend(tickets)
-            print(f"Page {page}: Got {len(tickets)} tickets (total so far: {len(all_tickets)})")
-            
-            # If we got fewer than 100, we've reached the end
-            if len(tickets) < 100:
-                print(f"Received fewer than 100 tickets, reached end")
-                break
-            
-            page += 1
-            
-            # Small delay to avoid rate limiting
-            time.sleep(0.5)
-            
-            # Safety limit
-            if page > 100:
-                print(f"Reached maximum page limit (100 pages)")
-                break
+            if tickets:
+                all_tickets.extend(tickets)
+                print(f"  Got {len(tickets)} tickets (total: {len(all_tickets)})")
         else:
-            print(f"Pagination failed: {response.status_code} - {response.text}")
-            # Fallback to simple GET
-            if page == 1:
-                print("Trying simple GET as fallback...")
-                response = requests.get(url, headers=headers)
-                if response.status_code == 200:
-                    all_tickets = response.json().get('requests', [])
-                    print(f"Fallback returned {len(all_tickets)} tickets")
+            print(f"  Date range failed: {response.status_code}")
+        
+        time.sleep(0.5)
+        
+        if len(all_tickets) >= max_tickets:
             break
     
-    print(f"TOTAL FETCHED: {len(all_tickets)} tickets")
+    if all_tickets:
+        print(f"\nMETHOD 3 SUCCESS: Fetched {len(all_tickets)} tickets")
+        return all_tickets
+    
+    # FALLBACK: Just get default tickets
+    print("\nAll methods failed, using default API call...")
+    print("-" * 60)
+    
+    url = f"{SDP_API_BASE}/requests"
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        all_tickets = response.json().get('requests', [])
+        print(f"Fallback: Got {len(all_tickets)} tickets")
+    
+    print(f"\nTOTAL FETCHED: {len(all_tickets)} tickets")
+    print("=" * 60)
     return all_tickets
 
 
@@ -223,48 +319,35 @@ def fetch_modified_tickets(since_timestamp, max_tickets=1000):
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     
     all_tickets = []
-    page = 1
     
-    while len(all_tickets) < max_tickets:
-        start_index = (page - 1) * 100 + 1
-        
-        input_data = json.dumps({
-            'list_info': {
-                'row_count': 100,
-                'start_index': start_index,
-                'filter_by': {
-                    'last_updated_time': {
-                        'from': since_timestamp
-                    }
+    # Try with modified date filter
+    search_criteria = {
+        "list_info": {
+            "row_count": 100,
+            "filter_by": {
+                "last_updated_time": {
+                    "from": since_timestamp
                 }
             }
-        })
-        
-        data = {'input_data': input_data}
-        url = f"{SDP_API_BASE}/requests"
-        
-        response = requests.post(url, headers=headers, data=data)
-        
-        if response.status_code == 200:
-            response_data = response.json()
-            tickets = response_data.get('requests', [])
-            
-            if not tickets:
-                break
-            
-            all_tickets.extend(tickets)
-            print(f"Page {page}: {len(tickets)} tickets")
-            
-            if len(tickets) < 100:
-                break
-            
-            page += 1
-            time.sleep(0.5)
-        else:
-            print("Modified-date filter may not be supported")
-            break
+        }
+    }
     
-    print(f"Found {len(all_tickets)} modified tickets")
+    url = f"{SDP_API_BASE}/requests"
+    data = {'input_data': json.dumps(search_criteria)}
+    
+    response = requests.post(url, headers=headers, data=data)
+    
+    if response.status_code == 200:
+        response_data = response.json()
+        all_tickets = response_data.get('requests', [])
+        print(f"Found {len(all_tickets)} modified tickets")
+    else:
+        print("Modified-date filter not supported, falling back to recent tickets")
+        # Fallback: just get recent tickets
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            all_tickets = response.json().get('requests', [])
+    
     return all_tickets
 
 
@@ -412,7 +495,7 @@ def sync_tickets(include_details=True):
         if not sync_state['initial_sync_complete']:
             print("INITIAL SYNC - Fetching ALL tickets")
             print()
-            tickets = fetch_all_tickets(max_tickets=10000)
+            tickets = fetch_all_tickets(max_tickets=5000)
             is_initial_sync = True
         else:
             print("INCREMENTAL SYNC")
