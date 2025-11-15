@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple ServiceDesk Plus to Dust Sync
-Fetches recent tickets and uploads to Dust
+Fetches tickets with proper pagination
 """
 import os
 import requests
@@ -55,23 +55,61 @@ def get_access_token():
         raise Exception(f"Token failed: {response.status_code}")
 
 
-def fetch_tickets():
-    """Fetch tickets from ServiceDesk Plus"""
+def fetch_all_tickets(max_tickets=5000):
+    """Fetch all tickets with pagination"""
     print("\nFetching tickets from ServiceDesk Plus...")
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests"
     
-    response = requests.get(url, headers=headers)
+    all_tickets = []
+    start_index = 1
+    page_size = 100  # Request 100 tickets per page
     
-    if response.status_code == 200:
-        tickets = response.json().get('requests', [])
-        print(f"✅ Found {len(tickets)} tickets")
-        return tickets
-    else:
-        print(f"❌ Failed: {response.status_code}")
-        return []
+    while len(all_tickets) < max_tickets:
+        # Build request with list_info
+        list_info = {
+            'row_count': page_size,
+            'start_index': start_index
+        }
+        
+        input_data = json.dumps({'list_info': list_info})
+        
+        print(f"  Fetching page starting at index {start_index}...")
+        
+        response = requests.get(
+            url,
+            headers=headers,
+            params={'input_data': input_data}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            tickets = data.get('requests', [])
+            
+            if not tickets:
+                print(f"  No more tickets found")
+                break
+            
+            all_tickets.extend(tickets)
+            print(f"  Got {len(tickets)} tickets (total: {len(all_tickets)})")
+            
+            # If we got fewer than page_size, we've reached the end
+            if len(tickets) < page_size:
+                print(f"  Reached end of results")
+                break
+            
+            start_index += page_size
+            time.sleep(0.3)  # Small delay between pages
+            
+        else:
+            print(f"  ❌ Request failed: {response.status_code}")
+            print(f"  Response: {response.text}")
+            break
+    
+    print(f"\n✅ Total tickets fetched: {len(all_tickets)}")
+    return all_tickets
 
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -125,7 +163,18 @@ def format_ticket(ticket, conversations):
     technician = (ticket.get('technician') or {}).get('name', 'Unassigned')
     
     created = (ticket.get('created_time') or {}).get('display_value', 'Unknown')
+    due_by = (ticket.get('due_by_time') or {}).get('display_value', 'Not set')
+    
+    category = (ticket.get('category') or {}).get('name', 'Uncategorized')
+    
     description = clean_html(ticket.get('description', 'No description'))
+    
+    # Resolution
+    resolution = ticket.get('resolution') or {}
+    resolution_content = clean_html(resolution.get('content', ''))
+    
+    # Attachments
+    attachments = ticket.get('attachments', []) or []
     
     # Build markdown
     text = f"""# Ticket #{display_id}: {subject}
@@ -133,13 +182,37 @@ def format_ticket(ticket, conversations):
 ## Details
 - **Status**: {status}
 - **Priority**: {priority}
+- **Category**: {category}
 - **Created**: {created}
+- **Due By**: {due_by}
+
+## People
 - **Requester**: {requester_name} ({requester_email})
 - **Assigned To**: {technician}
 
 ## Description
 {description}
 """
+    
+    # Add resolution
+    if resolution_content:
+        text += f"\n## Resolution\n{resolution_content}\n"
+    
+    # Add attachments
+    if attachments:
+        text += "\n## Attachments\n"
+        for att in attachments:
+            name = att.get('name', 'Unknown')
+            size_raw = att.get('size', 0)
+            try:
+                size_kb = float(size_raw) / 1024 if size_raw else 0
+            except:
+                size_kb = 0
+            
+            if size_kb > 0:
+                text += f"- {name} ({size_kb:.1f} KB)\n"
+            else:
+                text += f"- {name}\n"
     
     # Add comments
     if conversations:
@@ -177,13 +250,13 @@ def upload_to_dust(ticket_id, text):
 
 def main():
     """Main sync function"""
-    print("=" * 60)
-    print("ServiceDesk Plus → Dust Sync")
-    print("=" * 60)
+    print("=" * 70)
+    print("ServiceDesk Plus → Dust Full Sync")
+    print("=" * 70)
     
     try:
-        # Fetch tickets
-        tickets = fetch_tickets()
+        # Fetch all tickets with pagination
+        tickets = fetch_all_tickets(max_tickets=5000)
         
         if not tickets:
             print("\n⚠️  No tickets found")
@@ -193,6 +266,9 @@ def main():
         
         access_token = get_access_token()
         success = 0
+        failed = 0
+        
+        start_time = datetime.now()
         
         for i, ticket in enumerate(tickets, 1):
             ticket_id = ticket.get('id')
@@ -214,15 +290,33 @@ def main():
             
             if upload_to_dust(ticket_id, text):
                 success += 1
-                print(f"✅ [{i}/{len(tickets)}] #{display_id}: {subject}")
+                comment_count = len(conversations) if conversations else 0
+                percent = (i / len(tickets)) * 100
+                print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
             else:
+                failed += 1
                 print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
             
-            time.sleep(0.2)
+            # Progress update every 50 tickets
+            if i % 50 == 0:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                rate = i / elapsed if elapsed > 0 else 0
+                remaining = len(tickets) - i
+                eta_seconds = remaining / rate if rate > 0 else 0
+                eta_minutes = eta_seconds / 60
+                print(f"\n📊 Rate: {rate:.1f} tickets/sec | ETA: {eta_minutes:.0f} minutes\n")
+            
+            time.sleep(0.15)
         
-        print(f"\n{'=' * 60}")
-        print(f"✅ Complete: {success}/{len(tickets)} uploaded")
-        print(f"{'=' * 60}\n")
+        elapsed_time = datetime.now() - start_time
+        
+        print(f"\n{'=' * 70}")
+        print(f"✅ SYNC COMPLETE!")
+        print(f"{'=' * 70}")
+        print(f"Successfully uploaded: {success}/{len(tickets)}")
+        print(f"Failed: {failed}")
+        print(f"Time taken: {elapsed_time}")
+        print(f"{'=' * 70}\n")
         
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
