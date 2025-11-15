@@ -12,7 +12,7 @@ on:
           - regular
           - csv_import
   schedule:
-    - cron: '0 * * * *'  # Every hour
+    - cron: '0 * * * *'
 
 jobs:
   sync:
