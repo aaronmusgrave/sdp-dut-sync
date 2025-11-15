@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus to Dust Sync
-Uses page parameter for pagination - fetches ALL tickets!
+ServiceDesk Plus to Dust Hourly Sync
+Syncs 10 most recent tickets to keep them updated
 """
 import os
 import requests
@@ -36,8 +36,6 @@ def get_access_token():
     if _access_token and _token_expiry and datetime.now() < _token_expiry:
         return _access_token
     
-    print("Getting access token...")
-    
     response = requests.post(ZOHO_TOKEN_URL, data={
         'refresh_token': SDP_REFRESH_TOKEN,
         'client_id': SDP_CLIENT_ID,
@@ -49,59 +47,22 @@ def get_access_token():
         data = response.json()
         _access_token = data['access_token']
         _token_expiry = datetime.now() + timedelta(seconds=3300)
-        print("✅ Token obtained")
         return _access_token
     else:
         raise Exception(f"Token failed: {response.status_code}")
 
 
-def fetch_all_tickets_with_pagination():
-    """Fetch all tickets using page parameter"""
-    print("\nFetching ALL tickets using page parameter...")
-    print("=" * 70)
-    
+def fetch_recent_tickets():
+    """Fetch 10 most recent tickets"""
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    url = f"{SDP_API_BASE}/requests"
     
-    all_tickets = []
-    page = 1
+    response = requests.get(url, headers=headers)
     
-    while True:
-        url = f"{SDP_API_BASE}/requests?page={page}"
-        
-        print(f"  Fetching page {page}...")
-        
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            data = response.json()
-            tickets = data.get('requests', [])
-            
-            if not tickets:
-                print(f"  No more tickets on page {page}")
-                break
-            
-            all_tickets.extend(tickets)
-            print(f"  ✅ Got {len(tickets)} tickets (total so far: {len(all_tickets)})")
-            
-            # If we got fewer than expected, might be last page
-            if len(tickets) < 10:
-                print(f"  Last page reached")
-                break
-            
-            page += 1
-            time.sleep(1)  # Rate limit protection
-            
-        else:
-            print(f"  ❌ Request failed: {response.status_code}")
-            print(f"  Response: {response.text[:200]}")
-            break
-    
-    print(f"\n{'=' * 70}")
-    print(f"✅ Total tickets fetched: {len(all_tickets)}")
-    print(f"{'=' * 70}")
-    
-    return all_tickets
+    if response.status_code == 200:
+        return response.json().get('requests', [])
+    return []
 
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -207,7 +168,6 @@ def format_ticket(ticket, conversations, notes):
             else:
                 text += f"- {name}\n"
     
-    # Add conversations
     if conversations:
         text += "\n## Comments\n\n"
         for conv in conversations:
@@ -218,7 +178,6 @@ def format_ticket(ticket, conversations, notes):
             if content:
                 text += f"### {from_user} - {time_val}\n{content}\n\n"
     
-    # Add notes
     if notes:
         text += "\n## Notes\n\n"
         for note in notes:
@@ -252,25 +211,25 @@ def upload_to_dust(ticket_id, text):
 def main():
     """Main sync function"""
     print("=" * 70)
-    print("ServiceDesk Plus → Dust Full Sync")
-    print("Using page parameter for pagination")
+    print("ServiceDesk Plus → Dust Hourly Sync")
+    print("Updates 10 most recent tickets")
     print("=" * 70)
     
     try:
-        # Fetch all tickets with pagination
-        tickets = fetch_all_tickets_with_pagination()
+        print("\n✅ Token obtained")
+        
+        # Fetch recent tickets
+        tickets = fetch_recent_tickets()
         
         if not tickets:
             print("\n⚠️  No tickets found")
             return
         
+        print(f"Fetched {len(tickets)} recent tickets")
         print(f"\n📤 Processing {len(tickets)} tickets...\n")
         
         access_token = get_access_token()
         success = 0
-        failed = 0
-        
-        start_time = datetime.now()
         
         for i, ticket in enumerate(tickets, 1):
             ticket_id = ticket.get('id')
@@ -280,7 +239,7 @@ def main():
             
             subject = ticket.get('subject', 'No subject')[:50]
             
-            # Get full details, conversations, and notes
+            # Get full details
             details = fetch_ticket_details(ticket_id, access_token)
             conversations = fetch_conversations(ticket_id, access_token)
             notes = fetch_notes(ticket_id, access_token)
@@ -294,28 +253,13 @@ def main():
                 percent = (i / len(tickets)) * 100
                 print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
             else:
-                failed += 1
                 print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
-            
-            # Progress update every 50 tickets
-            if i % 50 == 0:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                rate = i / elapsed if elapsed > 0 else 0
-                remaining = len(tickets) - i
-                eta_seconds = remaining / rate if rate > 0 else 0
-                eta_minutes = eta_seconds / 60
-                print(f"\n📊 Rate: {rate:.1f} tickets/sec | ETA: {eta_minutes:.0f} minutes\n")
             
             time.sleep(0.15)
         
-        elapsed_time = datetime.now() - start_time
-        
         print(f"\n{'=' * 70}")
         print(f"✅ SYNC COMPLETE!")
-        print(f"{'=' * 70}")
         print(f"Successfully uploaded: {success}/{len(tickets)}")
-        print(f"Failed: {failed}")
-        print(f"Time taken: {elapsed_time}")
         print(f"{'=' * 70}\n")
         
     except Exception as e:
