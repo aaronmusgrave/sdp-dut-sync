@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Import tickets from CSV - Simplified version
+Import tickets from CSV - Verbose debug version
 """
 import os
 import sys
@@ -45,7 +45,7 @@ print(f"✅ File found! Size: {os.path.getsize(CSV_FILE)} bytes", flush=True)
 
 print(f"\nReading CSV file (simple method)...", flush=True)
 
-# Read CSV manually (no pandas)
+# Read CSV manually
 ticket_ids = []
 try:
     with open(CSV_FILE, 'r', encoding='utf-8', errors='ignore') as f:
@@ -222,18 +222,25 @@ not_found = 0
 start_time = datetime.now()
 
 for i, ticket_id in enumerate(ticket_ids, 1):
+    print(f"[{i}/{len(ticket_ids)}] Fetching ticket #{ticket_id}...", flush=True)
+    
     if datetime.now() >= _token_expiry:
         access_token = get_access_token()
     
     ticket = fetch_ticket_details(ticket_id, access_token)
     
     if not ticket:
+        print(f"  ⚠️  Not found in API", flush=True)
         not_found += 1
         continue
     
+    print(f"  ✅ Got details, fetching comments...", flush=True)
     conversations = fetch_conversations(ticket_id, access_token)
+    print(f"  ✅ Got {len(conversations)} comments, formatting...", flush=True)
+    
     text = format_ticket(ticket, conversations)
     
+    print(f"  ✅ Uploading to Dust...", flush=True)
     if upload_to_dust(ticket_id, text):
         success += 1
         display_id = ticket.get('display_id', {})
@@ -244,6 +251,8 @@ for i, ticket_id in enumerate(ticket_ids, 1):
         percent = (i / len(ticket_ids)) * 100
         
         print(f"✅ [{i}/{len(ticket_ids)}] ({percent:.1f}%) #{display_id}: {subject}", flush=True)
+    else:
+        print(f"  ❌ Upload failed", flush=True)
     
     if i % 100 == 0:
         elapsed = (datetime.now() - start_time).total_seconds()
