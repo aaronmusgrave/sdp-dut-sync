@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 ServiceDesk Plus to Dust Sync
-Uses 10-minute time chunks to work around 10-ticket API limit
+Uses Export API to fetch all tickets
 """
 import os
 import requests
 import json
 from datetime import datetime, timedelta
 import time
+import csv
+from io import StringIO
 
 # Configuration
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
@@ -24,9 +26,6 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
-# Progress tracking
-PROGRESS_DOC_ID = "sync_progress_time_based"
-
 # Token cache
 _access_token = None
 _token_expiry = None
@@ -39,6 +38,8 @@ def get_access_token():
     if _access_token and _token_expiry and datetime.now() < _token_expiry:
         return _access_token
     
+    print("Getting access token...")
+    
     response = requests.post(ZOHO_TOKEN_URL, data={
         'refresh_token': SDP_REFRESH_TOKEN,
         'client_id': SDP_CLIENT_ID,
@@ -50,77 +51,27 @@ def get_access_token():
         data = response.json()
         _access_token = data['access_token']
         _token_expiry = datetime.now() + timedelta(seconds=3300)
+        print("✅ Token obtained")
         return _access_token
     else:
         raise Exception(f"Token failed: {response.status_code}")
 
 
-def get_progress():
-    """Get last processed timestamp from Dust"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
+def create_export_job(access_token):
+    """Create an export job for all tickets"""
+    print("\nCreating export job...")
     
-    url = f"{DUST_API_BASE}/{PROGRESS_DOC_ID}"
-    
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            text = data.get('document', {}).get('text', '')
-            
-            if 'last_end_time:' in text:
-                timestamp_str = text.split('last_end_time:')[1].split('\n')[0].strip()
-                return int(timestamp_str)
-    except:
-        pass
-    
-    # Start from 2 years ago if no progress found
-    two_years_ago = datetime.now() - timedelta(days=730)
-    return int(two_years_ago.timestamp() * 1000)
-
-
-def save_progress(end_timestamp, total_synced):
-    """Save progress to Dust"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    url = f"{DUST_API_BASE}/{PROGRESS_DOC_ID}"
-    
-    text = f"""Time-Based Sync Progress
-last_end_time: {end_timestamp}
-last_end_date: {datetime.fromtimestamp(end_timestamp/1000).strftime('%Y-%m-%d %H:%M:%S UTC')}
-total_synced: {total_synced}
-last_updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
-"""
-    
-    payload = {'text': text}
-    
-    try:
-        requests.post(url, headers=headers, json=payload)
-    except:
-        pass
-
-
-def fetch_tickets_in_time_range(start_time, end_time, access_token):
-    """Fetch tickets created in a specific time range"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests"
+    url = f"{SDP_API_BASE}/export"
     
-    # Build filter for time range
-    list_info = {
-        "filter_by": {
-            "created_time": {
-                "from": start_time,
-                "to": end_time
-            }
-        }
+    # Request export of all requests
+    export_config = {
+        "module": "request",
+        "format": "csv",
+        "filter_by": {}  # No filter = all tickets
     }
     
-    input_data = json.dumps({"list_info": list_info})
+    input_data = json.dumps(export_config)
     
     response = requests.post(
         url,
@@ -129,86 +80,143 @@ def fetch_tickets_in_time_range(start_time, end_time, access_token):
     )
     
     if response.status_code == 200:
-        return response.json().get('requests', [])
+        data = response.json()
+        job_id = data.get('export', {}).get('id')
+        if job_id:
+            print(f"✅ Export job created: {job_id}")
+            return job_id
+        else:
+            print(f"Response: {data}")
+            return None
     else:
-        # Fallback: try without filter (returns most recent 10)
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            return response.json().get('requests', [])
+        print(f"❌ Failed to create export: {response.status_code}")
+        print(f"Response: {response.text}")
+        return None
+
+
+def check_export_status(job_id, access_token):
+    """Check status of export job"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    url = f"{SDP_API_BASE}/export/{job_id}"
     
-    return []
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        data = response.json()
+        export_info = data.get('export', {})
+        status = export_info.get('status', 'Unknown')
+        return status, export_info
+    else:
+        return None, None
 
 
-def fetch_all_tickets_time_based(max_tickets=5000):
-    """Fetch all tickets by iterating through 10-minute time ranges"""
-    print("\nFetching tickets using 10-minute time chunks...")
-    print("Working around 10-ticket API limit")
+def download_export(job_id, access_token):
+    """Download the exported CSV file"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    url = f"{SDP_API_BASE}/export/{job_id}/download"
+    
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        return response.text
+    else:
+        print(f"❌ Failed to download: {response.status_code}")
+        return None
+
+
+def fetch_all_tickets_via_export():
+    """Fetch all tickets using Export API"""
+    print("=" * 70)
+    print("Fetching ALL tickets using Export API")
     print("=" * 70)
     
     access_token = get_access_token()
     
-    # Get last processed time
-    last_end_time = get_progress()
-    current_time = int(datetime.now().timestamp() * 1000)
+    # Create export job
+    job_id = create_export_job(access_token)
     
-    all_tickets = {}  # Use dict to deduplicate by ID
+    if not job_id:
+        print("\n❌ Could not create export job")
+        print("Falling back to standard API (10 tickets)...")
+        return fetch_tickets_fallback(access_token)
     
-    # Time window: 10 minutes
-    time_window_minutes = 10
-    time_window_ms = time_window_minutes * 60 * 1000
+    # Poll for completion
+    print("\nWaiting for export to complete...")
+    max_wait = 300  # 5 minutes
+    start_time = time.time()
     
-    start_time = last_end_time
-    iteration = 0
+    while time.time() - start_time < max_wait:
+        status, export_info = check_export_status(job_id, access_token)
+        
+        if status == 'Finished' or status == 'Completed':
+            print(f"✅ Export completed!")
+            
+            # Download the file
+            print("\nDownloading export file...")
+            csv_data = download_export(job_id, access_token)
+            
+            if csv_data:
+                # Parse CSV
+                tickets = parse_csv_to_tickets(csv_data)
+                print(f"✅ Parsed {len(tickets)} tickets from export")
+                return tickets
+            else:
+                print("❌ Could not download export")
+                return []
+        
+        elif status == 'Failed':
+            print(f"❌ Export failed")
+            return []
+        
+        else:
+            print(f"  Status: {status}... waiting")
+            time.sleep(5)
     
-    print(f"\nStarting from: {datetime.fromtimestamp(start_time/1000).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Current time: {datetime.fromtimestamp(current_time/1000).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Time window: {time_window_minutes} minutes per chunk")
-    print()
+    print("❌ Export timed out")
+    return []
+
+
+def parse_csv_to_tickets(csv_data):
+    """Parse CSV data into ticket objects"""
+    tickets = []
     
-    while start_time < current_time and len(all_tickets) < max_tickets:
-        iteration += 1
-        end_time = min(start_time + time_window_ms, current_time)
-        
-        start_datetime = datetime.fromtimestamp(start_time/1000)
-        end_datetime = datetime.fromtimestamp(end_time/1000)
-        
-        start_str = start_datetime.strftime('%Y-%m-%d %H:%M')
-        end_str = end_datetime.strftime('%Y-%m-%d %H:%M')
-        
-        print(f"  Chunk {iteration}: {start_str} to {end_str}...")
-        
-        tickets = fetch_tickets_in_time_range(start_time, end_time, access_token)
-        
-        new_count = 0
-        for ticket in tickets:
-            ticket_id = ticket.get('id')
-            if ticket_id and ticket_id not in all_tickets:
-                all_tickets[ticket_id] = ticket
-                new_count += 1
-        
-        if len(tickets) > 0:
-            print(f"    ✅ Found {len(tickets)} tickets ({new_count} new, total: {len(all_tickets)})")
-        
-        # Save progress every 10 chunks
-        if iteration % 10 == 0:
-            save_progress(end_time, len(all_tickets))
-            print(f"\n    📊 Progress saved - {len(all_tickets)} tickets so far\n")
-        
-        start_time = end_time
-        time.sleep(0.3)  # Small delay between requests
-        
-        # Refresh token if needed
-        if datetime.now() >= _token_expiry:
-            access_token = get_access_token()
+    csv_reader = csv.DictReader(StringIO(csv_data))
     
-    # Final progress save
-    save_progress(end_time, len(all_tickets))
+    for row in csv_reader:
+        # Map CSV columns to ticket structure
+        ticket = {
+            'id': row.get('Request ID') or row.get('ID') or row.get('id'),
+            'display_id': {'display_value': row.get('Request ID') or row.get('ID')},
+            'subject': row.get('Subject') or row.get('subject'),
+            'status': {'name': row.get('Status') or row.get('status')},
+            'priority': {'name': row.get('Priority') or row.get('priority')},
+            'requester': {
+                'name': row.get('Requester') or row.get('requester'),
+                'email_id': row.get('Requester Email') or ''
+            },
+            'technician': {'name': row.get('Technician') or row.get('technician') or 'Unassigned'},
+            'created_time': {'display_value': row.get('Created Time') or row.get('created_time')},
+            'due_by_time': {'display_value': row.get('Due By Time') or ''},
+            'category': {'name': row.get('Category') or 'Uncategorized'},
+            'description': row.get('Description') or row.get('description') or 'No description',
+            'resolution': {'content': row.get('Resolution') or ''},
+        }
+        
+        tickets.append(ticket)
     
-    print(f"\n{'=' * 70}")
-    print(f"✅ Total unique tickets fetched: {len(all_tickets)}")
-    print(f"{'=' * 70}")
+    return tickets
+
+
+def fetch_tickets_fallback(access_token):
+    """Fallback: fetch 10 tickets via standard API"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    url = f"{SDP_API_BASE}/requests"
     
-    return list(all_tickets.values())
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        return response.json().get('requests', [])
+    return []
 
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -243,7 +251,7 @@ def clean_html(text):
     return text.strip()
 
 
-def format_ticket(ticket, conversations):
+def format_ticket(ticket, conversations=None):
     """Format ticket as markdown"""
     display_id = ticket.get('display_id', {})
     if isinstance(display_id, dict):
@@ -266,8 +274,6 @@ def format_ticket(ticket, conversations):
     resolution = ticket.get('resolution') or {}
     resolution_content = clean_html(resolution.get('content', ''))
     
-    attachments = ticket.get('attachments', []) or []
-    
     text = f"""# Ticket #{display_id}: {subject}
 
 ## Details
@@ -287,21 +293,6 @@ def format_ticket(ticket, conversations):
     
     if resolution_content:
         text += f"\n## Resolution\n{resolution_content}\n"
-    
-    if attachments:
-        text += "\n## Attachments\n"
-        for att in attachments:
-            name = att.get('name', 'Unknown')
-            size_raw = att.get('size', 0)
-            try:
-                size_kb = float(size_raw) / 1024 if size_raw else 0
-            except:
-                size_kb = 0
-            
-            if size_kb > 0:
-                text += f"- {name} ({size_kb:.1f} KB)\n"
-            else:
-                text += f"- {name}\n"
     
     if conversations:
         text += "\n## Comments\n\n"
@@ -336,19 +327,16 @@ def upload_to_dust(ticket_id, text):
 def main():
     """Main sync function"""
     print("=" * 70)
-    print("ServiceDesk Plus → Dust Time-Based Sync")
-    print("Using 10-minute chunks")
+    print("ServiceDesk Plus → Dust Full Sync")
+    print("Using Export API")
     print("=" * 70)
     
     try:
-        print("\n✅ Token obtained")
-        
-        # Fetch tickets using 10-minute time chunks
-        tickets = fetch_all_tickets_time_based(max_tickets=5000)
+        # Fetch all tickets via Export API
+        tickets = fetch_all_tickets_via_export()
         
         if not tickets:
-            print("\n⚠️  No new tickets found in this time range")
-            print("✅ All tickets may already be synced!")
+            print("\n⚠️  No tickets found")
             return
         
         print(f"\n📤 Processing {len(tickets)} tickets...\n")
@@ -367,12 +355,10 @@ def main():
             
             subject = ticket.get('subject', 'No subject')[:50]
             
-            # Get full details
-            details = fetch_ticket_details(ticket_id, access_token)
-            conversations = fetch_conversations(ticket_id, access_token)
+            # Optionally fetch conversations for each ticket
+            conversations = fetch_conversations(ticket_id, access_token) if ticket_id else None
             
-            ticket_data = details if details else ticket
-            text = format_ticket(ticket_data, conversations)
+            text = format_ticket(ticket, conversations)
             
             if upload_to_dust(ticket_id, text):
                 success += 1
@@ -383,7 +369,7 @@ def main():
                 failed += 1
                 print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
             
-            if i % 25 == 0:
+            if i % 50 == 0:
                 elapsed = (datetime.now() - start_time).total_seconds()
                 rate = i / elapsed if elapsed > 0 else 0
                 remaining = len(tickets) - i
@@ -402,8 +388,6 @@ def main():
         print(f"Failed: {failed}")
         print(f"Time taken: {elapsed_time}")
         print(f"{'=' * 70}\n")
-        print("💡 TIP: Schedule this to run hourly to gradually fetch all tickets")
-        print("   Each run will process the next time range automatically")
         
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
