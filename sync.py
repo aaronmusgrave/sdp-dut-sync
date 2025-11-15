@@ -1,43 +1,19 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus to Dust Sync
-Final test: row_count only (no start_index)
+Test ManageEngine Reports API
 """
 import os
 import requests
-import json
 from datetime import datetime, timedelta
-import time
 
-# Configuration
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
 SDP_CLIENT_ID = os.environ.get('SDP_CLIENT_ID')
 SDP_CLIENT_SECRET = os.environ.get('SDP_CLIENT_SECRET')
 SDP_REFRESH_TOKEN = os.environ.get('SDP_REFRESH_TOKEN')
 
-DUST_API_KEY = os.environ.get('DUST_API_KEY')
-DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
-DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk')
-
-# API Endpoints
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
-SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
-DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
-
-# Token cache
-_access_token = None
-_token_expiry = None
-
 
 def get_access_token():
-    """Get OAuth access token"""
-    global _access_token, _token_expiry
-    
-    if _access_token and _token_expiry and datetime.now() < _token_expiry:
-        return _access_token
-    
-    print("Getting access token...")
-    
     response = requests.post(ZOHO_TOKEN_URL, data={
         'refresh_token': SDP_REFRESH_TOKEN,
         'client_id': SDP_CLIENT_ID,
@@ -46,249 +22,39 @@ def get_access_token():
     })
     
     if response.status_code == 200:
-        data = response.json()
-        _access_token = data['access_token']
-        _token_expiry = datetime.now() + timedelta(seconds=3300)
-        print("✅ Token obtained")
-        return _access_token
-    else:
-        raise Exception(f"Token failed: {response.status_code}")
+        return response.json()['access_token']
+    raise Exception(f"Token failed: {response.status_code}")
 
 
-def fetch_tickets():
-    """Fetch tickets - test row_count only"""
-    print("\nFetching tickets from ServiceDesk Plus...")
-    print("Testing: row_count only (no start_index)")
+def test_reports_api():
+    print("Testing ManageEngine Reports API")
     print("=" * 70)
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests"
     
-    # Try different row_count values
-    for row_count in [250, 100, 50, 10]:
-        print(f"\n  Trying row_count={row_count}...")
-        
-        list_info = {"row_count": row_count}
-        input_data = json.dumps({"list_info": list_info})
-        
-        response = requests.post(
-            url,
-            headers=headers,
-            data={'input_data': input_data}
-        )
+    # Test different Reports API endpoints
+    endpoints = [
+        f"https://{SDP_DOMAIN}/api/v3/reports",
+        f"https://{SDP_DOMAIN}/api/v3/reports/requests",
+        f"https://{SDP_DOMAIN}/api/v3/analytics/requests",
+        f"https://{SDP_DOMAIN}/sdpapi/request",  # Legacy API
+        f"https://{SDP_DOMAIN}/api/cmdb/ci",
+    ]
+    
+    for endpoint in endpoints:
+        print(f"\nTrying: {endpoint}")
+        response = requests.get(endpoint, headers=headers)
+        print(f"  Status: {response.status_code}")
         
         if response.status_code == 200:
-            data = response.json()
-            tickets = data.get('requests', [])
-            print(f"  ✅ SUCCESS: Got {len(tickets)} tickets with row_count={row_count}")
-            
-            if len(tickets) > 10:
-                print(f"\n  🎉 Found a working row_count! Using {row_count}")
-                return tickets
-            elif row_count == 10:
-                print(f"\n  ⚠️  Even with row_count=10, only got {len(tickets)} tickets")
-                return tickets
+            print(f"  ✅ SUCCESS!")
+            print(f"  Response preview: {response.text[:500]}")
+        elif response.status_code == 404:
+            print(f"  ❌ Not found")
         else:
-            print(f"  ❌ Failed with row_count={row_count}: {response.status_code}")
-            print(f"     {response.text[:150]}")
-    
-    # Fallback: no parameters
-    print(f"\n  Trying with NO parameters...")
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        tickets = response.json().get('requests', [])
-        print(f"  ✅ Got {len(tickets)} tickets (no parameters)")
-        return tickets
-    
-    return []
-
-
-def fetch_ticket_details(ticket_id, access_token):
-    """Fetch full details for a ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}"
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get('request', {})
-    return None
-
-
-def fetch_conversations(ticket_id, access_token):
-    """Fetch comments for a ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get('conversations', [])
-    return []
-
-
-def clean_html(text):
-    """Remove HTML tags"""
-    if not text:
-        return ""
-    import re
-    text = text.replace('<br>', '\n').replace('</p>', '\n\n').replace('<p>', '')
-    text = re.sub('<[^<]+?>', '', text)
-    return text.strip()
-
-
-def format_ticket(ticket, conversations):
-    """Format ticket as markdown"""
-    display_id = ticket.get('display_id', {})
-    if isinstance(display_id, dict):
-        display_id = display_id.get('display_value', 'Unknown')
-    
-    subject = ticket.get('subject', 'No Subject')
-    status = (ticket.get('status') or {}).get('name', 'Unknown')
-    priority = (ticket.get('priority') or {}).get('name', 'Unknown')
-    
-    requester = ticket.get('requester') or {}
-    requester_name = requester.get('name', 'Unknown')
-    requester_email = requester.get('email_id', '')
-    
-    technician = (ticket.get('technician') or {}).get('name', 'Unassigned')
-    created = (ticket.get('created_time') or {}).get('display_value', 'Unknown')
-    due_by = (ticket.get('due_by_time') or {}).get('display_value', 'Not set')
-    category = (ticket.get('category') or {}).get('name', 'Uncategorized')
-    description = clean_html(ticket.get('description', 'No description'))
-    
-    resolution = ticket.get('resolution') or {}
-    resolution_content = clean_html(resolution.get('content', ''))
-    
-    attachments = ticket.get('attachments', []) or []
-    
-    text = f"""# Ticket #{display_id}: {subject}
-
-## Details
-- **Status**: {status}
-- **Priority**: {priority}
-- **Category**: {category}
-- **Created**: {created}
-- **Due By**: {due_by}
-
-## People
-- **Requester**: {requester_name} ({requester_email})
-- **Assigned To**: {technician}
-
-## Description
-{description}
-"""
-    
-    if resolution_content:
-        text += f"\n## Resolution\n{resolution_content}\n"
-    
-    if attachments:
-        text += "\n## Attachments\n"
-        for att in attachments:
-            name = att.get('name', 'Unknown')
-            size_raw = att.get('size', 0)
-            try:
-                size_kb = float(size_raw) / 1024 if size_raw else 0
-            except:
-                size_kb = 0
-            
-            if size_kb > 0:
-                text += f"- {name} ({size_kb:.1f} KB)\n"
-            else:
-                text += f"- {name}\n"
-    
-    if conversations:
-        text += "\n## Comments\n\n"
-        for conv in conversations:
-            from_user = (conv.get('from') or {}).get('name', 'Unknown')
-            time_val = (conv.get('created_time') or {}).get('display_value', 'Unknown')
-            content = clean_html(conv.get('description', '') or conv.get('reply_content', ''))
-            
-            if content:
-                text += f"### {from_user} - {time_val}\n{content}\n\n"
-    
-    text += f"\n---\n*Synced: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n"
-    return text
-
-
-def upload_to_dust(ticket_id, text):
-    """Upload ticket to Dust"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    response = requests.post(
-        f"{DUST_API_BASE}/{ticket_id}",
-        headers=headers,
-        json={'text': text, 'source_url': f"https://{SDP_DOMAIN}/app/{ticket_id}"}
-    )
-    
-    return response.status_code == 200
-
-
-def main():
-    """Main sync function"""
-    print("=" * 70)
-    print("ServiceDesk Plus → Dust Sync")
-    print("Final API Test")
-    print("=" * 70)
-    
-    try:
-        tickets = fetch_tickets()
-        
-        if not tickets:
-            print("\n⚠️  No tickets found")
-            print("\n💡 CONCLUSION: SDPOnDemand API v3 does not support:")
-            print("   - start_index parameter")
-            print("   - row_count parameter")
-            print("   - Any form of pagination")
-            print("\n   Only solution: CSV export + import")
-            return
-        
-        print(f"\n{'=' * 70}")
-        print(f"✅ Total tickets available via API: {len(tickets)}")
-        print(f"{'=' * 70}")
-        
-        print(f"\n📤 Processing {len(tickets)} tickets...\n")
-        
-        access_token = get_access_token()
-        success = 0
-        
-        for i, ticket in enumerate(tickets, 1):
-            ticket_id = ticket.get('id')
-            display_id = ticket.get('display_id', {})
-            if isinstance(display_id, dict):
-                display_id = display_id.get('display_value', ticket_id)
-            
-            subject = ticket.get('subject', 'No subject')[:50]
-            
-            details = fetch_ticket_details(ticket_id, access_token)
-            conversations = fetch_conversations(ticket_id, access_token)
-            
-            ticket_data = details if details else ticket
-            text = format_ticket(ticket_data, conversations)
-            
-            if upload_to_dust(ticket_id, text):
-                success += 1
-                comment_count = len(conversations) if conversations else 0
-                percent = (i / len(tickets)) * 100
-                print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
-            else:
-                print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
-            
-            time.sleep(0.15)
-        
-        print(f"\n{'=' * 70}")
-        print(f"✅ Uploaded: {success}/{len(tickets)}")
-        print(f"{'=' * 70}\n")
-        
-    except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
+            print(f"  Response: {response.text[:200]}")
 
 
 if __name__ == "__main__":
-    main()
+    test_reports_api()
