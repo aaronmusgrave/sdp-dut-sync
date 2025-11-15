@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ServiceDesk Plus to Dust Sync
-Uses proper start_index pagination with 10-ticket pages
+Final test: row_count only (no start_index)
 """
 import os
 import requests
@@ -55,33 +55,23 @@ def get_access_token():
         raise Exception(f"Token failed: {response.status_code}")
 
 
-def fetch_all_tickets(max_tickets=5000):
-    """Fetch all tickets using start_index pagination (10 tickets per page)"""
+def fetch_tickets():
+    """Fetch tickets - test row_count only"""
     print("\nFetching tickets from ServiceDesk Plus...")
-    print("Using list_info with start_index pagination (10 tickets per page)")
+    print("Testing: row_count only (no start_index)")
     print("=" * 70)
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests"
     
-    all_tickets = []
-    start_index = 1  # API uses 1-based indexing
-    row_count = 10   # API returns 10 tickets per page
-    
-    while len(all_tickets) < max_tickets:
-        # Build list_info with proper pagination
-        list_info = {
-            "row_count": row_count,
-            "start_index": start_index
-        }
+    # Try different row_count values
+    for row_count in [250, 100, 50, 10]:
+        print(f"\n  Trying row_count={row_count}...")
         
+        list_info = {"row_count": row_count}
         input_data = json.dumps({"list_info": list_info})
         
-        page_num = ((start_index - 1) // row_count) + 1
-        print(f"  Page {page_num}: start_index={start_index}, row_count={row_count}...")
-        
-        # Use POST with form data
         response = requests.post(
             url,
             headers=headers,
@@ -91,32 +81,28 @@ def fetch_all_tickets(max_tickets=5000):
         if response.status_code == 200:
             data = response.json()
             tickets = data.get('requests', [])
+            print(f"  ✅ SUCCESS: Got {len(tickets)} tickets with row_count={row_count}")
             
-            if not tickets:
-                print(f"  No more tickets found")
-                break
-            
-            all_tickets.extend(tickets)
-            print(f"  ✅ Got {len(tickets)} tickets (total so far: {len(all_tickets)})")
-            
-            # If we got fewer than row_count, we've reached the end
-            if len(tickets) < row_count:
-                print(f"  Reached end of results")
-                break
-            
-            # Increment start_index for next page
-            start_index += row_count
-            time.sleep(0.5)  # Be gentle with API
-            
+            if len(tickets) > 10:
+                print(f"\n  🎉 Found a working row_count! Using {row_count}")
+                return tickets
+            elif row_count == 10:
+                print(f"\n  ⚠️  Even with row_count=10, only got {len(tickets)} tickets")
+                return tickets
         else:
-            print(f"  ❌ Request failed: {response.status_code}")
-            print(f"  Response: {response.text[:200]}")
-            break
+            print(f"  ❌ Failed with row_count={row_count}: {response.status_code}")
+            print(f"     {response.text[:150]}")
     
-    print(f"\n{'=' * 70}")
-    print(f"✅ Total tickets fetched: {len(all_tickets)}")
-    print(f"{'=' * 70}")
-    return all_tickets
+    # Fallback: no parameters
+    print(f"\n  Trying with NO parameters...")
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        tickets = response.json().get('requests', [])
+        print(f"  ✅ Got {len(tickets)} tickets (no parameters)")
+        return tickets
+    
+    return []
 
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -244,24 +230,30 @@ def upload_to_dust(ticket_id, text):
 def main():
     """Main sync function"""
     print("=" * 70)
-    print("ServiceDesk Plus → Dust Full Sync")
+    print("ServiceDesk Plus → Dust Sync")
+    print("Final API Test")
     print("=" * 70)
     
     try:
-        # Fetch all tickets with pagination (10 per page)
-        tickets = fetch_all_tickets(max_tickets=5000)
+        tickets = fetch_tickets()
         
         if not tickets:
             print("\n⚠️  No tickets found")
+            print("\n💡 CONCLUSION: SDPOnDemand API v3 does not support:")
+            print("   - start_index parameter")
+            print("   - row_count parameter")
+            print("   - Any form of pagination")
+            print("\n   Only solution: CSV export + import")
             return
+        
+        print(f"\n{'=' * 70}")
+        print(f"✅ Total tickets available via API: {len(tickets)}")
+        print(f"{'=' * 70}")
         
         print(f"\n📤 Processing {len(tickets)} tickets...\n")
         
         access_token = get_access_token()
         success = 0
-        failed = 0
-        
-        start_time = datetime.now()
         
         for i, ticket in enumerate(tickets, 1):
             ticket_id = ticket.get('id')
@@ -271,7 +263,6 @@ def main():
             
             subject = ticket.get('subject', 'No subject')[:50]
             
-            # Get full details
             details = fetch_ticket_details(ticket_id, access_token)
             conversations = fetch_conversations(ticket_id, access_token)
             
@@ -284,28 +275,12 @@ def main():
                 percent = (i / len(tickets)) * 100
                 print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
             else:
-                failed += 1
                 print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
-            
-            # Progress update every 50 tickets
-            if i % 50 == 0:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                rate = i / elapsed if elapsed > 0 else 0
-                remaining = len(tickets) - i
-                eta_seconds = remaining / rate if rate > 0 else 0
-                eta_minutes = eta_seconds / 60
-                print(f"\n📊 Rate: {rate:.1f} tickets/sec | ETA: {eta_minutes:.0f} minutes\n")
             
             time.sleep(0.15)
         
-        elapsed_time = datetime.now() - start_time
-        
         print(f"\n{'=' * 70}")
-        print(f"✅ SYNC COMPLETE!")
-        print(f"{'=' * 70}")
-        print(f"Successfully uploaded: {success}/{len(tickets)}")
-        print(f"Failed: {failed}")
-        print(f"Time taken: {elapsed_time}")
+        print(f"✅ Uploaded: {success}/{len(tickets)}")
         print(f"{'=' * 70}\n")
         
     except Exception as e:
