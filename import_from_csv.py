@@ -55,9 +55,25 @@ def get_access_token():
 
 def read_ticket_ids_from_csv():
     """Read ticket IDs from Excel file"""
-    print(f"Reading ticket IDs from {CSV_FILE}...")
+    print(f"\n🔍 DEBUG INFO:")
+    print(f"Current directory: {os.getcwd()}")
+    print(f"Files in current directory:")
+    for f in os.listdir('.'):
+        print(f"  - {f}")
+    print(f"\nLooking for file: {CSV_FILE}")
     
-    df = pd.read_excel(CSV_FILE)
+    if not os.path.exists(CSV_FILE):
+        raise Exception(f"❌ File not found: {CSV_FILE}")
+    
+    print(f"✅ File exists! Size: {os.path.getsize(CSV_FILE)} bytes")
+    print(f"\nReading ticket IDs from {CSV_FILE}...")
+    
+    try:
+        df = pd.read_excel(CSV_FILE)
+        print(f"✅ Excel file loaded successfully")
+        print(f"Columns found: {list(df.columns)}")
+    except Exception as e:
+        raise Exception(f"Failed to read Excel file: {str(e)}")
     
     # Find ID column
     id_column = None
@@ -74,6 +90,8 @@ def read_ticket_ids_from_csv():
     
     if not id_column:
         raise Exception(f"Could not find ID column. Available columns: {list(df.columns)}")
+    
+    print(f"✅ Using column: '{id_column}' for ticket IDs")
     
     ticket_ids = df[id_column].dropna().astype(int).tolist()
     
