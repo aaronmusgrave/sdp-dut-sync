@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple ServiceDesk Plus to Dust Sync
-Fetches tickets with proper pagination
+Fetches tickets with proper pagination using POST
 """
 import os
 import requests
@@ -65,7 +65,7 @@ def fetch_all_tickets(max_tickets=5000):
     
     all_tickets = []
     start_index = 1
-    page_size = 100  # Request 100 tickets per page
+    page_size = 100
     
     while len(all_tickets) < max_tickets:
         # Build request with list_info
@@ -78,10 +78,11 @@ def fetch_all_tickets(max_tickets=5000):
         
         print(f"  Fetching page starting at index {start_index}...")
         
-        response = requests.get(
+        # Use POST with form data
+        response = requests.post(
             url,
             headers=headers,
-            params={'input_data': input_data}
+            data={'input_data': input_data}  # Send as form data, not JSON
         )
         
         if response.status_code == 200:
@@ -93,7 +94,7 @@ def fetch_all_tickets(max_tickets=5000):
                 break
             
             all_tickets.extend(tickets)
-            print(f"  Got {len(tickets)} tickets (total: {len(all_tickets)})")
+            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
             
             # If we got fewer than page_size, we've reached the end
             if len(tickets) < page_size:
@@ -101,7 +102,7 @@ def fetch_all_tickets(max_tickets=5000):
                 break
             
             start_index += page_size
-            time.sleep(0.3)  # Small delay between pages
+            time.sleep(0.3)
             
         else:
             print(f"  ❌ Request failed: {response.status_code}")
