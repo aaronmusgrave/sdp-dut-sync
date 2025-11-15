@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Sync ServiceDesk Plus On-Demand tickets to Dust
-Fetches tickets individually by ID from 1662 to 15666
+ONE-TIME Initial Sync - Fetch all tickets by display ID
+Run this ONCE to import all historical tickets
 """
 import os
 import requests
@@ -19,7 +19,7 @@ DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
 DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk-tickets')
 
-# Ticket ID range
+# Ticket ID range (display IDs from ServiceDesk)
 START_TICKET_ID = 1662
 END_TICKET_ID = 15666
 
@@ -113,27 +113,45 @@ progress: {last_id - START_TICKET_ID + 1}/{END_TICKET_ID - START_TICKET_ID + 1}
         pass
 
 
-def fetch_ticket_by_id(ticket_id, access_token):
-    """Fetch a single ticket by its display ID"""
+def fetch_ticket_by_display_id(display_id, access_token):
+    """Fetch a single ticket by its display ID (the ticket number shown in UI)"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    
+    # Try to fetch by display_id - the API might accept it directly
+    url = f"{SDP_API_BASE}/requests/{display_id}"
     
     try:
         response = requests.get(url, headers=headers)
+        
         if response.status_code == 200:
-            return response.json().get('request', {})
+            ticket_data = response.json().get('request', {})
+            # Verify this is the right ticket by checking display_id
+            ticket_display_id = ticket_data.get('display_id', {})
+            if isinstance(ticket_display_id, dict):
+                actual_display_id = ticket_display_id.get('display_value', '')
+            else:
+                actual_display_id = str(ticket_display_id)
+            
+            # Return ticket if display_id matches
+            if actual_display_id == str(display_id):
+                return ticket_data
+            
+            # If display_id doesn't match, ticket not found
+            return None
+            
         elif response.status_code == 404:
             return None  # Ticket doesn't exist
         else:
             return None
-    except:
+    except Exception as e:
+        print(f"      Error fetching ticket {display_id}: {str(e)}")
         return None
 
 
-def fetch_ticket_conversations(ticket_id, access_token):
-    """Fetch conversations for a ticket"""
+def fetch_ticket_conversations(internal_ticket_id, access_token):
+    """Fetch conversations for a ticket using internal ID"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
+    url = f"{SDP_API_BASE}/requests/{internal_ticket_id}/conversations"
     
     try:
         response = requests.get(url, headers=headers)
@@ -160,8 +178,14 @@ def clean_html(text):
 
 def format_ticket_for_dust(ticket, conversations=None):
     """Format ticket as markdown for Dust"""
-    ticket_id = ticket.get('id', 'Unknown')
-    display_id = ticket.get('display_id', {}).get('display_value', 'Unknown')
+    internal_id = ticket.get('id', 'Unknown')
+    
+    display_id = ticket.get('display_id', {})
+    if isinstance(display_id, dict):
+        display_id_value = display_id.get('display_value', 'Unknown')
+    else:
+        display_id_value = str(display_id)
+    
     subject = ticket.get('subject', 'No Subject')
     
     status = ticket.get('status', {}) or {}
@@ -193,7 +217,7 @@ def format_ticket_for_dust(ticket, conversations=None):
     
     attachments = ticket.get('attachments', []) or []
     
-    text = f"""# Ticket #{display_id}: {subject}
+    text = f"""# Ticket #{display_id_value}: {subject}
 
 ## Details
 - **Status**: {status_name}
@@ -242,17 +266,17 @@ def format_ticket_for_dust(ticket, conversations=None):
     return text
 
 
-def upload_ticket_to_dust(ticket_id, ticket_text):
-    """Upload a ticket to Dust"""
+def upload_ticket_to_dust(internal_ticket_id, ticket_text):
+    """Upload a ticket to Dust using internal ticket ID"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
     }
     
-    url = f"{DUST_API_BASE}/{ticket_id}"
+    url = f"{DUST_API_BASE}/{internal_ticket_id}"
     payload = {
         'text': ticket_text,
-        'source_url': f"https://{SDP_DOMAIN}/app/{ticket_id}"
+        'source_url': f"https://{SDP_DOMAIN}/app/{internal_ticket_id}"
     }
     
     response = requests.post(url, headers=headers, json=payload)
@@ -260,10 +284,10 @@ def upload_ticket_to_dust(ticket_id, ticket_text):
 
 
 def sync_all_tickets():
-    """Fetch all tickets by ID range"""
+    """Fetch all tickets by display ID range"""
     print("=" * 70)
     print("SDPOnDemand → Dust Full Sync")
-    print("Fetching tickets individually by ID")
+    print("Fetching tickets individually by Display ID")
     print("=" * 70)
     
     try:
@@ -275,8 +299,8 @@ def sync_all_tickets():
         already_processed = start_from - START_TICKET_ID
         remaining = END_TICKET_ID - start_from + 1
         
-        print(f"\nTicket ID Range: {START_TICKET_ID} to {END_TICKET_ID}")
-        print(f"Total tickets to process: {total_tickets}")
+        print(f"\nTicket Display ID Range: {START_TICKET_ID} to {END_TICKET_ID}")
+        print(f"Total IDs to check: {total_tickets}")
         
         if already_processed > 0:
             print(f"Already processed: {already_processed}")
@@ -293,50 +317,53 @@ def sync_all_tickets():
         
         start_time = datetime.now()
         
-        for ticket_id in range(start_from, END_TICKET_ID + 1):
+        for display_id in range(start_from, END_TICKET_ID + 1):
             # Refresh token if needed
             if datetime.now() >= _token_expiry:
                 access_token = get_access_token()
             
-            # Fetch ticket
-            ticket = fetch_ticket_by_id(ticket_id, access_token)
+            # Fetch ticket by display ID
+            ticket = fetch_ticket_by_display_id(display_id, access_token)
             
             if ticket is None:
                 not_found_count += 1
                 continue
             
-            # Fetch conversations
-            conversations = fetch_ticket_conversations(ticket_id, access_token)
+            # Get internal ID for fetching conversations
+            internal_id = ticket.get('id')
+            
+            # Fetch conversations using internal ID
+            conversations = fetch_ticket_conversations(internal_id, access_token)
             
             # Format and upload
             ticket_text = format_ticket_for_dust(ticket, conversations)
-            display_id = ticket.get('display_id', {}).get('display_value', ticket_id)
             subject = ticket.get('subject', 'No subject')[:50]
             
-            if upload_ticket_to_dust(ticket.get('id'), ticket_text):
+            if upload_ticket_to_dust(internal_id, ticket_text):
                 success_count += 1
                 comment_count = len(conversations) if conversations else 0
                 
                 # Progress indicator
-                processed = ticket_id - START_TICKET_ID + 1
+                processed = display_id - START_TICKET_ID + 1
                 percent = (processed / total_tickets) * 100
                 
                 print(f"✅ [{processed}/{total_tickets}] ({percent:.1f}%) "
                       f"Ticket #{display_id}: {subject} ({comment_count} comments)")
             else:
                 failed_count += 1
-                print(f"❌ [{processed}/{total_tickets}] Failed: Ticket #{display_id}")
+                print(f"❌ [{processed}/{total_tickets}] Failed to upload: Ticket #{display_id}")
             
             # Save progress every 50 tickets
-            if ticket_id % 50 == 0:
-                save_progress(ticket_id, success_count, failed_count)
+            if display_id % 50 == 0:
+                save_progress(display_id, success_count, failed_count)
                 elapsed = (datetime.now() - start_time).total_seconds()
-                rate = (ticket_id - start_from + 1) / elapsed if elapsed > 0 else 0
-                remaining_tickets = END_TICKET_ID - ticket_id
-                eta_seconds = remaining_tickets / rate if rate > 0 else 0
+                rate = (display_id - start_from + 1) / elapsed if elapsed > 0 else 0
+                remaining_ids = END_TICKET_ID - display_id
+                eta_seconds = remaining_ids / rate if rate > 0 else 0
                 eta_minutes = eta_seconds / 60
                 
-                print(f"\n📊 Progress saved | Rate: {rate:.1f} tickets/sec | ETA: {eta_minutes:.0f} minutes\n")
+                print(f"\n📊 Progress saved | Rate: {rate:.1f} IDs/sec | "
+                      f"Found: {success_count} | Not found: {not_found_count} | ETA: {eta_minutes:.0f} min\n")
             
             # Small delay to avoid rate limiting
             time.sleep(0.1)
