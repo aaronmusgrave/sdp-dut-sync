@@ -18,7 +18,7 @@ DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
 DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk')
 
-CSV_FILE = 'Copy of Requests_1.xlsx'
+CSV_FILE = 'requests.csv'
 
 # API Endpoints
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
@@ -54,7 +54,7 @@ def get_access_token():
 
 
 def read_ticket_ids_from_csv():
-    """Read ticket IDs from Excel file"""
+    """Read ticket IDs from CSV file"""
     print(f"\n🔍 DEBUG INFO:")
     print(f"Current directory: {os.getcwd()}")
     print(f"Files in current directory:")
@@ -69,22 +69,24 @@ def read_ticket_ids_from_csv():
     print(f"\nReading ticket IDs from {CSV_FILE}...")
     
     try:
-        df = pd.read_excel(CSV_FILE)
-        print(f"✅ Excel file loaded successfully")
+        df = pd.read_csv(CSV_FILE)
+        print(f"✅ CSV file loaded successfully")
+        print(f"Rows: {len(df)}")
         print(f"Columns found: {list(df.columns)}")
     except Exception as e:
-        raise Exception(f"Failed to read Excel file: {str(e)}")
+        raise Exception(f"Failed to read CSV file: {str(e)}")
     
     # Find ID column
     id_column = None
     for col in df.columns:
-        if 'request' in col.lower() and 'id' in col.lower():
+        col_lower = str(col).lower()
+        if 'request' in col_lower and 'id' in col_lower:
             id_column = col
             break
     
     if not id_column:
         for col in df.columns:
-            if col.lower() == 'id':
+            if str(col).lower() == 'id':
                 id_column = col
                 break
     
@@ -96,7 +98,8 @@ def read_ticket_ids_from_csv():
     ticket_ids = df[id_column].dropna().astype(int).tolist()
     
     print(f"✅ Found {len(ticket_ids)} ticket IDs")
-    print(f"   ID range: {min(ticket_ids)} to {max(ticket_ids)}")
+    if ticket_ids:
+        print(f"   ID range: {min(ticket_ids)} to {max(ticket_ids)}")
     
     return ticket_ids
 
@@ -267,6 +270,10 @@ def main():
     
     try:
         ticket_ids = read_ticket_ids_from_csv()
+        
+        if not ticket_ids:
+            print("\n⚠️  No ticket IDs found in CSV")
+            return
         
         print(f"\n📤 Processing {len(ticket_ids)} tickets...\n")
         
