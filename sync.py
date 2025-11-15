@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ServiceDesk Plus to Dust Sync
-Testing different pagination parameter formats
+Fetches 10 tickets at a time using Range header pagination
 """
 import os
 import requests
@@ -56,141 +56,56 @@ def get_access_token():
 
 
 def fetch_all_tickets(max_tickets=5000):
-    """Fetch all tickets using offset/limit pagination - try multiple methods"""
+    """Fetch all tickets using Range header, 10 at a time"""
     print("\nFetching tickets from ServiceDesk Plus...")
+    print("Using Range header pagination (10 tickets per request)")
+    print("=" * 70)
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests"
     
     all_tickets = []
-    offset = 0
-    limit = 100
-    
-    print("\n🔄 METHOD 1: offset/limit as query parameters")
-    print("=" * 70)
-    
-    while len(all_tickets) < max_tickets:
-        print(f"  Fetching: offset={offset}, limit={limit}...")
-        
-        response = requests.get(
-            url,
-            headers=headers,
-            params={'offset': offset, 'limit': limit}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            tickets = data.get('requests', [])
-            
-            if not tickets:
-                print(f"  No more tickets")
-                break
-            
-            all_tickets.extend(tickets)
-            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
-            
-            if len(tickets) < limit:
-                break
-            
-            offset += limit
-            time.sleep(0.3)
-        else:
-            print(f"  ❌ Method 1 failed: {response.status_code}")
-            break
-    
-    # If Method 1 got results, return them
-    if all_tickets:
-        print(f"\n✅ Method 1 SUCCESS: {len(all_tickets)} tickets")
-        return all_tickets
-    
-    # Try Method 2: URL-encoded parameters
-    print("\n🔄 METHOD 2: URL with $limit and $skip")
-    print("=" * 70)
-    
-    all_tickets = []
-    skip = 0
-    
-    while len(all_tickets) < max_tickets:
-        print(f"  Fetching: $skip={skip}, $limit={limit}...")
-        
-        response = requests.get(
-            f"{url}?$skip={skip}&$limit={limit}",
-            headers=headers
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            tickets = data.get('requests', [])
-            
-            if not tickets:
-                break
-            
-            all_tickets.extend(tickets)
-            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
-            
-            if len(tickets) < limit:
-                break
-            
-            skip += limit
-            time.sleep(0.3)
-        else:
-            print(f"  ❌ Method 2 failed: {response.status_code}")
-            break
-    
-    if all_tickets:
-        print(f"\n✅ Method 2 SUCCESS: {len(all_tickets)} tickets")
-        return all_tickets
-    
-    # Try Method 3: Range header
-    print("\n🔄 METHOD 3: Range header")
-    print("=" * 70)
-    
-    all_tickets = []
     start = 0
+    page_size = 10  # API limit is 10
     
     while len(all_tickets) < max_tickets:
-        end = start + limit - 1
-        print(f"  Fetching: Range {start}-{end}...")
+        end = start + page_size - 1
         
         headers_with_range = headers.copy()
         headers_with_range['Range'] = f'items={start}-{end}'
         
+        print(f"  Page {(start // page_size) + 1}: Fetching items {start}-{end}...")
+        
         response = requests.get(url, headers=headers_with_range)
         
-        if response.status_code in [200, 206]:  # 206 = Partial Content
+        if response.status_code in [200, 206]:  # 200 or 206 Partial Content
             data = response.json()
             tickets = data.get('requests', [])
             
             if not tickets:
+                print(f"  No more tickets found")
                 break
             
             all_tickets.extend(tickets)
-            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
+            print(f"  ✅ Got {len(tickets)} tickets (total so far: {len(all_tickets)})")
             
-            if len(tickets) < limit:
+            # If we got fewer than page_size, we've reached the end
+            if len(tickets) < page_size:
+                print(f"  Reached end of results")
                 break
             
-            start += limit
-            time.sleep(0.3)
+            start += page_size
+            time.sleep(0.5)  # Be gentle with API
+            
         else:
-            print(f"  ❌ Method 3 failed: {response.status_code}")
+            print(f"  ❌ Request failed: {response.status_code}")
+            print(f"  Response: {response.text}")
             break
     
-    if all_tickets:
-        print(f"\n✅ Method 3 SUCCESS: {len(all_tickets)} tickets")
-        return all_tickets
-    
-    # Fallback: Just get the 10 default tickets
-    print("\n🔄 FALLBACK: Default request (no pagination)")
-    print("=" * 70)
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        all_tickets = response.json().get('requests', [])
-        print(f"  Got {len(all_tickets)} tickets (API default)")
-    
-    print(f"\n✅ Total tickets fetched: {len(all_tickets)}")
+    print(f"\n{'=' * 70}")
+    print(f"✅ Total tickets fetched: {len(all_tickets)}")
+    print(f"{'=' * 70}")
     return all_tickets
 
 
@@ -319,11 +234,12 @@ def upload_to_dust(ticket_id, text):
 def main():
     """Main sync function"""
     print("=" * 70)
-    print("ServiceDesk Plus → Dust Sync")
-    print("Testing Multiple Pagination Methods")
+    print("ServiceDesk Plus → Dust Full Sync")
+    print("Fetching ALL tickets (10 at a time)")
     print("=" * 70)
     
     try:
+        # Fetch all tickets with pagination
         tickets = fetch_all_tickets(max_tickets=5000)
         
         if not tickets:
@@ -334,6 +250,7 @@ def main():
         
         access_token = get_access_token()
         success = 0
+        failed = 0
         
         start_time = datetime.now()
         
@@ -345,6 +262,7 @@ def main():
             
             subject = ticket.get('subject', 'No subject')[:50]
             
+            # Get full details
             details = fetch_ticket_details(ticket_id, access_token)
             conversations = fetch_conversations(ticket_id, access_token)
             
@@ -357,7 +275,17 @@ def main():
                 percent = (i / len(tickets)) * 100
                 print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
             else:
+                failed += 1
                 print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
+            
+            # Progress update every 50 tickets
+            if i % 50 == 0:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                rate = i / elapsed if elapsed > 0 else 0
+                remaining = len(tickets) - i
+                eta_seconds = remaining / rate if rate > 0 else 0
+                eta_minutes = eta_seconds / 60
+                print(f"\n📊 Rate: {rate:.1f} tickets/sec | ETA: {eta_minutes:.0f} minutes\n")
             
             time.sleep(0.15)
         
@@ -365,7 +293,9 @@ def main():
         
         print(f"\n{'=' * 70}")
         print(f"✅ SYNC COMPLETE!")
+        print(f"{'=' * 70}")
         print(f"Successfully uploaded: {success}/{len(tickets)}")
+        print(f"Failed: {failed}")
         print(f"Time taken: {elapsed_time}")
         print(f"{'=' * 70}\n")
         
