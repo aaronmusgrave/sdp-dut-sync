@@ -69,10 +69,25 @@ def read_ticket_ids_from_csv():
     print(f"\nReading ticket IDs from {CSV_FILE}...")
     
     try:
-        df = pd.read_csv(CSV_FILE)
-        print(f"✅ CSV file loaded successfully")
-        print(f"Rows: {len(df)}")
-        print(f"Columns found: {list(df.columns)}")
+        # Try different encodings
+        encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+        df = None
+        
+        for encoding in encodings:
+            try:
+                print(f"  Trying encoding: {encoding}...")
+                df = pd.read_csv(CSV_FILE, encoding=encoding, on_bad_lines='skip')
+                print(f"  ✅ CSV file loaded successfully with {encoding} encoding")
+                break
+            except (UnicodeDecodeError, Exception) as e:
+                print(f"  ❌ Failed with {encoding}")
+                continue
+        
+        if df is None:
+            raise Exception("Could not read CSV with any encoding")
+            
+        print(f"✅ Rows: {len(df)}")
+        print(f"✅ Columns found: {list(df.columns)}")
     except Exception as e:
         raise Exception(f"Failed to read CSV file: {str(e)}")
     
