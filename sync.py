@@ -8,6 +8,7 @@ import os
 import requests
 import json
 from datetime import datetime, timedelta
+import time
 
 # Configuration from environment variables
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
@@ -148,26 +149,30 @@ def fetch_ticket_conversations(ticket_id, access_token):
 
 
 def fetch_all_tickets(max_tickets=10000):
-    """Fetch ALL tickets for initial sync"""
+    """Fetch ALL tickets for initial sync with proper pagination"""
     print(f"Fetching ALL tickets (up to {max_tickets}) for initial sync...")
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     
     all_tickets = []
-    start_index = 1
-    page_size = 100
+    page = 1
     
     while len(all_tickets) < max_tickets:
-        list_info = {
-            'row_count': min(page_size, max_tickets - len(all_tickets)),
-            'start_index': start_index
-        }
+        # Calculate start index (1-based)
+        start_index = (page - 1) * 100 + 1
         
-        input_data = json.dumps({'list_info': list_info})
+        input_data = json.dumps({
+            'list_info': {
+                'row_count': 100,
+                'start_index': start_index
+            }
+        })
+        
         data = {'input_data': input_data}
-        
         url = f"{SDP_API_BASE}/requests"
+        
+        print(f"Fetching page {page} (start_index: {start_index})...")
         response = requests.post(url, headers=headers, data=data)
         
         if response.status_code == 200:
@@ -175,22 +180,38 @@ def fetch_all_tickets(max_tickets=10000):
             tickets = response_data.get('requests', [])
             
             if not tickets:
+                print(f"No more tickets found")
                 break
             
             all_tickets.extend(tickets)
-            print(f"Fetched page {start_index // page_size + 1}: {len(tickets)} tickets (total: {len(all_tickets)})")
+            print(f"Page {page}: Got {len(tickets)} tickets (total so far: {len(all_tickets)})")
             
-            if len(tickets) < page_size:
+            # If we got fewer than 100, we've reached the end
+            if len(tickets) < 100:
+                print(f"Received fewer than 100 tickets, reached end")
                 break
             
-            start_index += page_size
+            page += 1
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.5)
+            
+            # Safety limit
+            if page > 100:
+                print(f"Reached maximum page limit (100 pages)")
+                break
         else:
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                all_tickets = response.json().get('requests', [])
+            print(f"Pagination failed: {response.status_code} - {response.text}")
+            # Fallback to simple GET
+            if page == 1:
+                print("Trying simple GET as fallback...")
+                response = requests.get(url, headers=headers)
+                if response.status_code == 200:
+                    all_tickets = response.json().get('requests', [])
+                    print(f"Fallback returned {len(all_tickets)} tickets")
             break
     
-    print(f"Fetched {len(all_tickets)} total tickets")
+    print(f"TOTAL FETCHED: {len(all_tickets)} tickets")
     return all_tickets
 
 
@@ -202,24 +223,26 @@ def fetch_modified_tickets(since_timestamp, max_tickets=1000):
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     
     all_tickets = []
-    start_index = 1
-    page_size = 100
+    page = 1
     
     while len(all_tickets) < max_tickets:
-        list_info = {
-            'row_count': min(page_size, max_tickets - len(all_tickets)),
-            'start_index': start_index,
-            'filter_by': {
-                'last_updated_time': {
-                    'from': since_timestamp
+        start_index = (page - 1) * 100 + 1
+        
+        input_data = json.dumps({
+            'list_info': {
+                'row_count': 100,
+                'start_index': start_index,
+                'filter_by': {
+                    'last_updated_time': {
+                        'from': since_timestamp
+                    }
                 }
             }
-        }
+        })
         
-        input_data = json.dumps({'list_info': list_info})
         data = {'input_data': input_data}
-        
         url = f"{SDP_API_BASE}/requests"
+        
         response = requests.post(url, headers=headers, data=data)
         
         if response.status_code == 200:
@@ -230,12 +253,13 @@ def fetch_modified_tickets(since_timestamp, max_tickets=1000):
                 break
             
             all_tickets.extend(tickets)
-            print(f"Fetched page {start_index // page_size + 1}: {len(tickets)} tickets")
+            print(f"Page {page}: {len(tickets)} tickets")
             
-            if len(tickets) < page_size:
+            if len(tickets) < 100:
                 break
             
-            start_index += page_size
+            page += 1
+            time.sleep(0.5)
         else:
             print("Modified-date filter may not be supported")
             break
