@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Simple ServiceDesk Plus to Dust Sync
-Fetches tickets with row_count only
+ServiceDesk Plus to Dust Sync
+Testing different pagination parameter formats
 """
 import os
 import requests
@@ -55,47 +55,143 @@ def get_access_token():
         raise Exception(f"Token failed: {response.status_code}")
 
 
-def fetch_tickets():
-    """Fetch tickets - try with just row_count"""
+def fetch_all_tickets(max_tickets=5000):
+    """Fetch all tickets using offset/limit pagination - try multiple methods"""
     print("\nFetching tickets from ServiceDesk Plus...")
     
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests"
     
-    # Try with row_count only
-    list_info = {
-        'row_count': 250  # Maximum allowed
-    }
+    all_tickets = []
+    offset = 0
+    limit = 100
     
-    input_data = json.dumps({'list_info': list_info})
+    print("\n🔄 METHOD 1: offset/limit as query parameters")
+    print("=" * 70)
     
-    print(f"  Requesting up to 250 tickets...")
-    
-    response = requests.post(
-        url,
-        headers=headers,
-        data={'input_data': input_data}
-    )
-    
-    if response.status_code == 200:
-        data = response.json()
-        tickets = data.get('requests', [])
-        print(f"✅ Got {len(tickets)} tickets")
-        return tickets
-    else:
-        print(f"❌ Request failed: {response.status_code}")
-        print(f"Response: {response.text}")
+    while len(all_tickets) < max_tickets:
+        print(f"  Fetching: offset={offset}, limit={limit}...")
         
-        # Fallback to no parameters
-        print("\n  Trying without parameters...")
-        response = requests.get(url, headers=headers)
+        response = requests.get(
+            url,
+            headers=headers,
+            params={'offset': offset, 'limit': limit}
+        )
+        
         if response.status_code == 200:
-            tickets = response.json().get('requests', [])
-            print(f"✅ Got {len(tickets)} tickets (fallback)")
-            return tickets
+            data = response.json()
+            tickets = data.get('requests', [])
+            
+            if not tickets:
+                print(f"  No more tickets")
+                break
+            
+            all_tickets.extend(tickets)
+            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
+            
+            if len(tickets) < limit:
+                break
+            
+            offset += limit
+            time.sleep(0.3)
+        else:
+            print(f"  ❌ Method 1 failed: {response.status_code}")
+            break
+    
+    # If Method 1 got results, return them
+    if all_tickets:
+        print(f"\n✅ Method 1 SUCCESS: {len(all_tickets)} tickets")
+        return all_tickets
+    
+    # Try Method 2: URL-encoded parameters
+    print("\n🔄 METHOD 2: URL with $limit and $skip")
+    print("=" * 70)
+    
+    all_tickets = []
+    skip = 0
+    
+    while len(all_tickets) < max_tickets:
+        print(f"  Fetching: $skip={skip}, $limit={limit}...")
         
-        return []
+        response = requests.get(
+            f"{url}?$skip={skip}&$limit={limit}",
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            tickets = data.get('requests', [])
+            
+            if not tickets:
+                break
+            
+            all_tickets.extend(tickets)
+            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
+            
+            if len(tickets) < limit:
+                break
+            
+            skip += limit
+            time.sleep(0.3)
+        else:
+            print(f"  ❌ Method 2 failed: {response.status_code}")
+            break
+    
+    if all_tickets:
+        print(f"\n✅ Method 2 SUCCESS: {len(all_tickets)} tickets")
+        return all_tickets
+    
+    # Try Method 3: Range header
+    print("\n🔄 METHOD 3: Range header")
+    print("=" * 70)
+    
+    all_tickets = []
+    start = 0
+    
+    while len(all_tickets) < max_tickets:
+        end = start + limit - 1
+        print(f"  Fetching: Range {start}-{end}...")
+        
+        headers_with_range = headers.copy()
+        headers_with_range['Range'] = f'items={start}-{end}'
+        
+        response = requests.get(url, headers=headers_with_range)
+        
+        if response.status_code in [200, 206]:  # 206 = Partial Content
+            data = response.json()
+            tickets = data.get('requests', [])
+            
+            if not tickets:
+                break
+            
+            all_tickets.extend(tickets)
+            print(f"  ✅ Got {len(tickets)} tickets (total: {len(all_tickets)})")
+            
+            if len(tickets) < limit:
+                break
+            
+            start += limit
+            time.sleep(0.3)
+        else:
+            print(f"  ❌ Method 3 failed: {response.status_code}")
+            break
+    
+    if all_tickets:
+        print(f"\n✅ Method 3 SUCCESS: {len(all_tickets)} tickets")
+        return all_tickets
+    
+    # Fallback: Just get the 10 default tickets
+    print("\n🔄 FALLBACK: Default request (no pagination)")
+    print("=" * 70)
+    
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        all_tickets = response.json().get('requests', [])
+        print(f"  Got {len(all_tickets)} tickets (API default)")
+    
+    print(f"\n✅ Total tickets fetched: {len(all_tickets)}")
+    return all_tickets
 
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -132,12 +228,10 @@ def clean_html(text):
 
 def format_ticket(ticket, conversations):
     """Format ticket as markdown"""
-    # Get display ID
     display_id = ticket.get('display_id', {})
     if isinstance(display_id, dict):
         display_id = display_id.get('display_value', 'Unknown')
     
-    # Get basic fields
     subject = ticket.get('subject', 'No Subject')
     status = (ticket.get('status') or {}).get('name', 'Unknown')
     priority = (ticket.get('priority') or {}).get('name', 'Unknown')
@@ -147,22 +241,16 @@ def format_ticket(ticket, conversations):
     requester_email = requester.get('email_id', '')
     
     technician = (ticket.get('technician') or {}).get('name', 'Unassigned')
-    
     created = (ticket.get('created_time') or {}).get('display_value', 'Unknown')
     due_by = (ticket.get('due_by_time') or {}).get('display_value', 'Not set')
-    
     category = (ticket.get('category') or {}).get('name', 'Uncategorized')
-    
     description = clean_html(ticket.get('description', 'No description'))
     
-    # Resolution
     resolution = ticket.get('resolution') or {}
     resolution_content = clean_html(resolution.get('content', ''))
     
-    # Attachments
     attachments = ticket.get('attachments', []) or []
     
-    # Build markdown
     text = f"""# Ticket #{display_id}: {subject}
 
 ## Details
@@ -180,11 +268,9 @@ def format_ticket(ticket, conversations):
 {description}
 """
     
-    # Add resolution
     if resolution_content:
         text += f"\n## Resolution\n{resolution_content}\n"
     
-    # Add attachments
     if attachments:
         text += "\n## Attachments\n"
         for att in attachments:
@@ -200,7 +286,6 @@ def format_ticket(ticket, conversations):
             else:
                 text += f"- {name}\n"
     
-    # Add comments
     if conversations:
         text += "\n## Comments\n\n"
         for conv in conversations:
@@ -225,10 +310,7 @@ def upload_to_dust(ticket_id, text):
     response = requests.post(
         f"{DUST_API_BASE}/{ticket_id}",
         headers=headers,
-        json={
-            'text': text,
-            'source_url': f"https://{SDP_DOMAIN}/app/{ticket_id}"
-        }
+        json={'text': text, 'source_url': f"https://{SDP_DOMAIN}/app/{ticket_id}"}
     )
     
     return response.status_code == 200
@@ -238,11 +320,11 @@ def main():
     """Main sync function"""
     print("=" * 70)
     print("ServiceDesk Plus → Dust Sync")
+    print("Testing Multiple Pagination Methods")
     print("=" * 70)
     
     try:
-        # Fetch tickets
-        tickets = fetch_tickets()
+        tickets = fetch_all_tickets(max_tickets=5000)
         
         if not tickets:
             print("\n⚠️  No tickets found")
@@ -252,7 +334,6 @@ def main():
         
         access_token = get_access_token()
         success = 0
-        failed = 0
         
         start_time = datetime.now()
         
@@ -264,14 +345,10 @@ def main():
             
             subject = ticket.get('subject', 'No subject')[:50]
             
-            # Get full details
             details = fetch_ticket_details(ticket_id, access_token)
             conversations = fetch_conversations(ticket_id, access_token)
             
-            # Use details if available, otherwise use summary
             ticket_data = details if details else ticket
-            
-            # Format and upload
             text = format_ticket(ticket_data, conversations)
             
             if upload_to_dust(ticket_id, text):
@@ -280,7 +357,6 @@ def main():
                 percent = (i / len(tickets)) * 100
                 print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
             else:
-                failed += 1
                 print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
             
             time.sleep(0.15)
@@ -289,17 +365,9 @@ def main():
         
         print(f"\n{'=' * 70}")
         print(f"✅ SYNC COMPLETE!")
-        print(f"{'=' * 70}")
         print(f"Successfully uploaded: {success}/{len(tickets)}")
-        print(f"Failed: {failed}")
         print(f"Time taken: {elapsed_time}")
         print(f"{'=' * 70}\n")
-        
-        if len(tickets) < 100:
-            print("⚠️  NOTE: API limitations prevent fetching all 4,000+ tickets.")
-            print("   This sync retrieved the most recent tickets available via API.")
-            print("   For complete historical data, consider CSV export + import.")
-            print(f"{'=' * 70}\n")
         
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
