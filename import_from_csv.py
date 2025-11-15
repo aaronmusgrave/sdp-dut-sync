@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Import tickets from CSV, fetch full details + comments from API
+Import tickets from CSV - Simplified version
 """
 import os
+import sys
 import requests
-import pandas as pd
 from datetime import datetime, timedelta
 import time
+
+print("=" * 70, flush=True)
+print("ServiceDesk Plus → Dust CSV Import", flush=True)
+print("=" * 70, flush=True)
 
 # Configuration
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
@@ -29,9 +33,64 @@ DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUS
 _access_token = None
 _token_expiry = None
 
+print(f"\n🔍 Checking for CSV file...", flush=True)
+print(f"Current directory: {os.getcwd()}", flush=True)
+print(f"Looking for: {CSV_FILE}", flush=True)
+
+if not os.path.exists(CSV_FILE):
+    print(f"❌ File not found!", flush=True)
+    sys.exit(1)
+
+print(f"✅ File found! Size: {os.path.getsize(CSV_FILE)} bytes", flush=True)
+
+print(f"\nReading CSV file (simple method)...", flush=True)
+
+# Read CSV manually (no pandas)
+ticket_ids = []
+try:
+    with open(CSV_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
+        print(f"✅ Read {len(lines)} lines", flush=True)
+        
+        # Find ID column
+        header = lines[0].strip().split(',')
+        print(f"Columns: {header}", flush=True)
+        
+        id_col_index = None
+        for i, col in enumerate(header):
+            if 'id' in col.lower() or 'request' in col.lower():
+                id_col_index = i
+                print(f"✅ Using column {i}: '{col}'", flush=True)
+                break
+        
+        if id_col_index is None:
+            print("❌ Could not find ID column", flush=True)
+            sys.exit(1)
+        
+        # Extract IDs
+        for line in lines[1:]:
+            parts = line.strip().split(',')
+            if len(parts) > id_col_index:
+                try:
+                    tid = int(parts[id_col_index].strip('"'))
+                    ticket_ids.append(tid)
+                except:
+                    pass
+        
+        print(f"✅ Found {len(ticket_ids)} ticket IDs", flush=True)
+        if ticket_ids:
+            print(f"   Range: {min(ticket_ids)} to {max(ticket_ids)}", flush=True)
+
+except Exception as e:
+    print(f"❌ Error reading CSV: {e}", flush=True)
+    sys.exit(1)
+
+if not ticket_ids:
+    print("❌ No ticket IDs found", flush=True)
+    sys.exit(1)
+
 
 def get_access_token():
-    """Get OAuth access token"""
     global _access_token, _token_expiry
     
     if _access_token and _token_expiry and datetime.now() < _token_expiry:
@@ -53,74 +112,7 @@ def get_access_token():
         raise Exception(f"Token failed: {response.status_code}")
 
 
-def read_ticket_ids_from_csv():
-    """Read ticket IDs from CSV file"""
-    print(f"\n🔍 DEBUG INFO:")
-    print(f"Current directory: {os.getcwd()}")
-    print(f"Files in current directory:")
-    for f in os.listdir('.'):
-        print(f"  - {f}")
-    print(f"\nLooking for file: {CSV_FILE}")
-    
-    if not os.path.exists(CSV_FILE):
-        raise Exception(f"❌ File not found: {CSV_FILE}")
-    
-    print(f"✅ File exists! Size: {os.path.getsize(CSV_FILE)} bytes")
-    print(f"\nReading ticket IDs from {CSV_FILE}...")
-    
-    try:
-        # Try different encodings
-        encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
-        df = None
-        
-        for encoding in encodings:
-            try:
-                print(f"  Trying encoding: {encoding}...")
-                df = pd.read_csv(CSV_FILE, encoding=encoding, on_bad_lines='skip')
-                print(f"  ✅ CSV file loaded successfully with {encoding} encoding")
-                break
-            except (UnicodeDecodeError, Exception) as e:
-                print(f"  ❌ Failed with {encoding}")
-                continue
-        
-        if df is None:
-            raise Exception("Could not read CSV with any encoding")
-            
-        print(f"✅ Rows: {len(df)}")
-        print(f"✅ Columns found: {list(df.columns)}")
-    except Exception as e:
-        raise Exception(f"Failed to read CSV file: {str(e)}")
-    
-    # Find ID column
-    id_column = None
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if 'request' in col_lower and 'id' in col_lower:
-            id_column = col
-            break
-    
-    if not id_column:
-        for col in df.columns:
-            if str(col).lower() == 'id':
-                id_column = col
-                break
-    
-    if not id_column:
-        raise Exception(f"Could not find ID column. Available columns: {list(df.columns)}")
-    
-    print(f"✅ Using column: '{id_column}' for ticket IDs")
-    
-    ticket_ids = df[id_column].dropna().astype(int).tolist()
-    
-    print(f"✅ Found {len(ticket_ids)} ticket IDs")
-    if ticket_ids:
-        print(f"   ID range: {min(ticket_ids)} to {max(ticket_ids)}")
-    
-    return ticket_ids
-
-
 def fetch_ticket_details(ticket_id, access_token):
-    """Fetch full details for a ticket"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests/{ticket_id}"
     
@@ -128,16 +120,12 @@ def fetch_ticket_details(ticket_id, access_token):
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             return response.json().get('request', {})
-        elif response.status_code == 404:
-            return None
-        else:
-            return None
     except:
-        return None
+        pass
+    return None
 
 
 def fetch_conversations(ticket_id, access_token):
-    """Fetch comments for a ticket"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
     
@@ -150,22 +138,7 @@ def fetch_conversations(ticket_id, access_token):
     return []
 
 
-def fetch_notes(ticket_id, access_token):
-    """Fetch notes for a ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/notes"
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json().get('notes', [])
-    except:
-        pass
-    return []
-
-
 def clean_html(text):
-    """Remove HTML tags"""
     if not text:
         return ""
     import re
@@ -174,8 +147,7 @@ def clean_html(text):
     return text.strip()
 
 
-def format_ticket(ticket, conversations, notes):
-    """Format ticket as markdown"""
+def format_ticket(ticket, conversations):
     display_id = ticket.get('display_id', {})
     if isinstance(display_id, dict):
         display_id = display_id.get('display_value', 'Unknown')
@@ -192,14 +164,8 @@ def format_ticket(ticket, conversations, notes):
     
     technician = (ticket.get('technician') or {}).get('name', 'Unassigned')
     created = (ticket.get('created_time') or {}).get('display_value', 'Unknown')
-    due_by = (ticket.get('due_by_time') or {}).get('display_value', 'Not set')
     category = (ticket.get('category') or {}).get('name', 'Uncategorized')
     description = clean_html(ticket.get('description', 'No description'))
-    
-    resolution = ticket.get('resolution') or {}
-    resolution_content = clean_html(resolution.get('content', ''))
-    
-    attachments = ticket.get('attachments', []) or []
     
     text = f"""# Ticket #{display_id}: {subject}
 
@@ -208,7 +174,6 @@ def format_ticket(ticket, conversations, notes):
 - **Priority**: {priority}
 - **Category**: {category}
 - **Created**: {created}
-- **Due By**: {due_by}
 
 ## People
 - **Requester**: {requester_name} ({requester_email})
@@ -217,24 +182,6 @@ def format_ticket(ticket, conversations, notes):
 ## Description
 {description}
 """
-    
-    if resolution_content:
-        text += f"\n## Resolution\n{resolution_content}\n"
-    
-    if attachments:
-        text += "\n## Attachments\n"
-        for att in attachments:
-            name = att.get('name', 'Unknown')
-            size_raw = att.get('size', 0)
-            try:
-                size_kb = float(size_raw) / 1024 if size_raw else 0
-            except:
-                size_kb = 0
-            
-            if size_kb > 0:
-                text += f"- {name} ({size_kb:.1f} KB)\n"
-            else:
-                text += f"- {name}\n"
     
     if conversations:
         text += "\n## Comments\n\n"
@@ -246,22 +193,11 @@ def format_ticket(ticket, conversations, notes):
             if content:
                 text += f"### {from_user} - {time_val}\n{content}\n\n"
     
-    if notes:
-        text += "\n## Notes\n\n"
-        for note in notes:
-            from_user = (note.get('added_by') or {}).get('name', 'Unknown')
-            time_val = (note.get('added_time') or {}).get('display_value', 'Unknown')
-            content = clean_html(note.get('description', ''))
-            
-            if content:
-                text += f"### {from_user} - {time_val}\n{content}\n\n"
-    
     text += f"\n---\n*Synced: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n"
     return text
 
 
 def upload_to_dust(ticket_id, text):
-    """Upload ticket to Dust"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
@@ -276,91 +212,54 @@ def upload_to_dust(ticket_id, text):
     return response.status_code == 200
 
 
-def main():
-    """Main import function"""
-    print("=" * 70)
-    print("ServiceDesk Plus → Dust CSV Import")
-    print("Imports all tickets from CSV with full details from API")
-    print("=" * 70)
-    
-    try:
-        ticket_ids = read_ticket_ids_from_csv()
-        
-        if not ticket_ids:
-            print("\n⚠️  No ticket IDs found in CSV")
-            return
-        
-        print(f"\n📤 Processing {len(ticket_ids)} tickets...\n")
-        
+print(f"\n📤 Processing {len(ticket_ids)} tickets...\n", flush=True)
+
+access_token = get_access_token()
+print("✅ Access token obtained\n", flush=True)
+
+success = 0
+not_found = 0
+start_time = datetime.now()
+
+for i, ticket_id in enumerate(ticket_ids, 1):
+    if datetime.now() >= _token_expiry:
         access_token = get_access_token()
-        print("✅ Access token obtained\n")
+    
+    ticket = fetch_ticket_details(ticket_id, access_token)
+    
+    if not ticket:
+        not_found += 1
+        continue
+    
+    conversations = fetch_conversations(ticket_id, access_token)
+    text = format_ticket(ticket, conversations)
+    
+    if upload_to_dust(ticket_id, text):
+        success += 1
+        display_id = ticket.get('display_id', {})
+        if isinstance(display_id, dict):
+            display_id = display_id.get('display_value', ticket_id)
         
-        success = 0
-        not_found = 0
-        failed = 0
+        subject = ticket.get('subject', 'No subject')[:50]
+        percent = (i / len(ticket_ids)) * 100
         
-        start_time = datetime.now()
-        
-        for i, ticket_id in enumerate(ticket_ids, 1):
-            if datetime.now() >= _token_expiry:
-                access_token = get_access_token()
-            
-            ticket = fetch_ticket_details(ticket_id, access_token)
-            
-            if not ticket:
-                not_found += 1
-                if i % 100 == 0:
-                    print(f"⚠️  [{i}/{len(ticket_ids)}] Ticket #{ticket_id}: Not found in API")
-                continue
-            
-            conversations = fetch_conversations(ticket_id, access_token)
-            notes = fetch_notes(ticket_id, access_token)
-            
-            text = format_ticket(ticket, conversations, notes)
-            
-            if upload_to_dust(ticket_id, text):
-                success += 1
-                
-                display_id = ticket.get('display_id', {})
-                if isinstance(display_id, dict):
-                    display_id = display_id.get('display_value', ticket_id)
-                
-                subject = ticket.get('subject', 'No subject')[:50]
-                comment_count = len(conversations) + len(notes)
-                percent = (i / len(ticket_ids)) * 100
-                
-                print(f"✅ [{i}/{len(ticket_ids)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
-            else:
-                failed += 1
-                print(f"❌ [{i}/{len(ticket_ids)}] Ticket #{ticket_id}: Upload failed")
-            
-            if i % 100 == 0:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                rate = i / elapsed if elapsed > 0 else 0
-                remaining = len(ticket_ids) - i
-                eta_seconds = remaining / rate if rate > 0 else 0
-                eta_minutes = eta_seconds / 60
-                print(f"\n📊 Rate: {rate:.1f} tickets/sec | Processed: {success} | Not found: {not_found} | ETA: {eta_minutes:.0f} min\n")
-            
-            time.sleep(0.2)
-        
-        elapsed_time = datetime.now() - start_time
-        
-        print(f"\n{'=' * 70}")
-        print(f"✅ IMPORT COMPLETE!")
-        print(f"{'=' * 70}")
-        print(f"Successfully uploaded: {success}")
-        print(f"Not found in API: {not_found}")
-        print(f"Failed: {failed}")
-        print(f"Time taken: {elapsed_time}")
-        print(f"{'=' * 70}\n")
-        
-    except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
+        print(f"✅ [{i}/{len(ticket_ids)}] ({percent:.1f}%) #{display_id}: {subject}", flush=True)
+    
+    if i % 100 == 0:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        rate = i / elapsed if elapsed > 0 else 0
+        remaining = len(ticket_ids) - i
+        eta_min = (remaining / rate / 60) if rate > 0 else 0
+        print(f"\n📊 Rate: {rate:.1f}/sec | Success: {success} | Not found: {not_found} | ETA: {eta_min:.0f}min\n", flush=True)
+    
+    time.sleep(0.2)
 
+elapsed = datetime.now() - start_time
 
-if __name__ == "__main__":
-    main()
+print(f"\n{'=' * 70}", flush=True)
+print(f"✅ IMPORT COMPLETE!", flush=True)
+print(f"{'=' * 70}", flush=True)
+print(f"Successfully uploaded: {success}", flush=True)
+print(f"Not found in API: {not_found}", flush=True)
+print(f"Time taken: {elapsed}", flush=True)
+print(f"{'=' * 70}\n", flush=True)
