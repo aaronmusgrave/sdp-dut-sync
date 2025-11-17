@@ -78,7 +78,6 @@ def fetch_all_tickets():
             'Accept': 'application/vnd.manageengine.sdp.v3+json'
         }
         
-        # Build list_info according to official documentation
         list_info = {
             "list_info": {
                 "row_count": TICKETS_PER_PAGE,
@@ -86,7 +85,6 @@ def fetch_all_tickets():
             }
         }
         
-        # Use params= with json.dumps as per documentation
         params = {
             'input_data': json.dumps(list_info)
         }
@@ -94,7 +92,6 @@ def fetch_all_tickets():
         url = f"{SDP_API_BASE}/requests"
         
         try:
-            # Use params= for URL parameters (not data=)
             response = requests.get(url, headers=headers, params=params)
             
             if response.status_code == 200:
@@ -105,7 +102,6 @@ def fetch_all_tickets():
                     print(f"  No more tickets. Total unique: {len(all_tickets)}")
                     break
                 
-                # Track new vs duplicate tickets
                 new_tickets = []
                 duplicate_count = 0
                 ticket_ids_in_batch = []
@@ -127,7 +123,6 @@ def fetch_all_tickets():
                 
                 all_tickets.extend(new_tickets)
                 
-                # Check API response for more rows
                 response_list_info = result.get('list_info', {})
                 has_more = response_list_info.get('has_more_rows', False)
                 
@@ -135,12 +130,10 @@ def fetch_all_tickets():
                     print(f"  API says no more rows. Total unique: {len(all_tickets)}")
                     break
                 
-                # If no new tickets, we're done
                 if len(new_tickets) == 0:
                     print(f"  No new tickets found. Total unique: {len(all_tickets)}")
                     break
                 
-                # Move to next batch - increment by row_count, not by tickets received
                 start_index += TICKETS_PER_PAGE
                 time.sleep(0.5)
                 
@@ -232,7 +225,7 @@ def format_ticket_for_dust(ticket, details, conversations):
     
     return {
         "document_id": f"ticket-{ticket.get('id')}",
-        "timestamp": int(time.time()),
+        "timestamp": int(time.time() * 1000),
         "tags": [
             f"status:{status.lower().replace(' ', '-')}",
             f"priority:{priority.lower().replace(' ', '-')}"
