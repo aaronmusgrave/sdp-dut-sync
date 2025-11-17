@@ -26,7 +26,7 @@ DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUS
 
 # Pagination settings
 TICKETS_PER_PAGE = 100
-MAX_TICKETS = 4000
+MAX_TICKETS = 5000
 
 # Token cache
 _access_token = None
@@ -64,11 +64,8 @@ def get_access_token():
         raise Exception(f"Failed to get access token: {response.status_code}")
 
 def fetch_all_tickets():
-    """Fetch all tickets with pagination"""
+    """Fetch all tickets with pagination using list_info parameter"""
     access_token = get_access_token()
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}'
-    }
     
     all_tickets = []
     start_index = 1
@@ -76,57 +73,67 @@ def fetch_all_tickets():
     print(f"Fetching tickets in batches of {TICKETS_PER_PAGE}...")
     
     while len(all_tickets) < MAX_TICKETS:
-        input_data = {
-            "list_info": {
-                "row_count": TICKETS_PER_PAGE,
-                "start_index": start_index
-            }
+        headers = {
+            'Authorization': f'Zoho-oauthtoken {access_token}',
+            'Accept': 'application/vnd.manageengine.sdp.v3+json'
         }
         
-        params = {
-            'input_data': json.dumps(input_data)
+        # Try using list_info in the URL path
+        list_info = {
+            "row_count": TICKETS_PER_PAGE,
+            "start_index": start_index,
+            "sort_field": "id",
+            "sort_order": "desc"
         }
         
-        url = f"{SDP_API_BASE}/requests"
+        url = f"{SDP_API_BASE}/requests?list_info={json.dumps(list_info)}"
         
         try:
-            response = requests.get(url, headers=headers, params=params)
+            response = requests.get(url, headers=headers)
+            
+            print(f"  Attempt with start_index={start_index}, status={response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
                 tickets = data.get('requests', [])
                 
                 if not tickets:
-                    print(f"No more tickets found. Total fetched: {len(all_tickets)}")
+                    print(f"  No more tickets found. Total fetched: {len(all_tickets)}")
                     break
                 
                 all_tickets.extend(tickets)
-                print(f"  Fetched {len(tickets)} tickets (total: {len(all_tickets)})")
+                print(f"  ✓ Fetched {len(tickets)} tickets (total: {len(all_tickets)})")
                 
-                list_info = data.get('list_info', {})
-                has_more = list_info.get('has_more_rows', False)
+                # Check if there are more rows
+                response_list_info = data.get('list_info', {})
+                has_more = response_list_info.get('has_more_rows', False)
+                total_count = response_list_info.get('row_count', 0)
                 
-                if not has_more:
-                    print(f"Reached end of tickets. Total: {len(all_tickets)}")
+                print(f"  API says: has_more={has_more}, row_count={total_count}")
+                
+                if not has_more or len(tickets) < TICKETS_PER_PAGE:
+                    print(f"  Reached end of tickets. Total: {len(all_tickets)}")
                     break
                 
-                start_index += TICKETS_PER_PAGE
-                time.sleep(0.5)
+                start_index += len(tickets)
+                time.sleep(1)
                 
-            elif response.status_code == 415:
-                print("Pagination not supported, fetching without parameters...")
-                response = requests.get(f"{SDP_API_BASE}/requests", headers=headers)
-                if response.status_code == 200:
-                    tickets = response.json().get('requests', [])
-                    all_tickets.extend(tickets)
-                break
             else:
-                print(f"Failed to fetch tickets: {response.status_code}")
-                print(f"Response: {response.text}")
+                print(f"  Failed with status {response.status_code}")
+                print(f"  Response: {response.text[:200]}")
+                
+                # If pagination fails, try to get at least the first batch
+                if len(all_tickets) == 0:
+                    print("  Trying simple request as fallback...")
+                    response = requests.get(f"{SDP_API_BASE}/requests", headers={'Authorization': f'Zoho-oauthtoken {access_token}'})
+                    if response.status_code == 200:
+                        tickets = response.json().get('requests', [])
+                        all_tickets.extend(tickets)
+                        print(f"  Got {len(tickets)} tickets via fallback")
                 break
                 
         except Exception as e:
-            print(f"Error fetching tickets: {e}")
+            print(f"  Error: {e}")
             break
     
     return all_tickets
