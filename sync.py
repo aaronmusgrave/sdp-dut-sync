@@ -25,7 +25,7 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
 # Pagination settings
-TICKETS_PER_PAGE = 10  # API seems to return 10 per page
+TICKETS_PER_PAGE = 10
 MAX_TICKETS = 5000
 
 # Token cache
@@ -99,7 +99,6 @@ def fetch_all_tickets():
                 result = response.json()
                 tickets = result.get('requests', [])
                 
-                # Debug: print the list_info from response
                 response_list_info = result.get('list_info', {})
                 print(f"  Page {start_index}: got {len(tickets)} tickets")
                 print(f"    Response list_info: {response_list_info}")
@@ -110,18 +109,15 @@ def fetch_all_tickets():
                 
                 all_tickets.extend(tickets)
                 
-                # Check pagination info
                 has_more = response_list_info.get('has_more_rows', False)
                 total_count = response_list_info.get('row_count', 0)
                 
                 print(f"    Total so far: {len(all_tickets)}, has_more: {has_more}, total_count: {total_count}")
                 
-                # If no more rows or we got fewer tickets than requested
                 if not has_more:
                     print(f"  API says no more rows. Total: {len(all_tickets)}")
                     break
                 
-                # Move to next page
                 start_index += len(tickets)
                 time.sleep(0.5)
                 
@@ -135,6 +131,16 @@ def fetch_all_tickets():
             import traceback
             traceback.print_exc()
             break
+    
+    # Check for duplicates
+    ticket_ids = [t.get('id') for t in all_tickets]
+    unique_ids = set(ticket_ids)
+    if len(ticket_ids) != len(unique_ids):
+        duplicates_count = len(ticket_ids) - len(unique_ids)
+        print(f"\n  ⚠️  WARNING: Found {duplicates_count} duplicate tickets!")
+        print(f"  Total fetched: {len(ticket_ids)}, Unique: {len(unique_ids)}")
+    else:
+        print(f"\n  ✓ All {len(ticket_ids)} tickets are unique (no duplicates)")
     
     return all_tickets
 
@@ -173,137 +179,4 @@ def safe_get_display_value(obj, default=''):
     if obj is None:
         return default
     if isinstance(obj, dict):
-        return obj.get('display_value', default)
-    return default
-
-def format_ticket_for_dust(ticket, details, conversations):
-    conversation_text = ""
-    if conversations:
-        conversation_text = "\n\n## Conversations\n\n"
-        for conv in conversations:
-            from_user = safe_get_name(conv.get('from'))
-            created_time = safe_get_display_value(conv.get('created_time'))
-            description = conv.get('description', '')
-            conversation_text += f"**{from_user}** ({created_time}):\n{description}\n\n"
-    
-    subject = details.get('subject', ticket.get('subject', 'No Subject'))
-    status = safe_get_name(details.get('status'))
-    priority = safe_get_name(details.get('priority'))
-    requester = safe_get_name(details.get('requester'))
-    technician = safe_get_name(details.get('technician'), 'Unassigned')
-    created_time = safe_get_display_value(details.get('created_time'))
-    description = details.get('description', '')
-    
-    document_text = f"""# {subject}
-
-**Ticket ID:** {ticket.get('id')}
-**Status:** {status}
-**Priority:** {priority}
-**Requester:** {requester}
-**Technician:** {technician}
-**Created:** {created_time}
-
-## Description
-
-{description}
-
-{conversation_text}
-"""
-    
-    return {
-        "document_id": f"ticket-{ticket.get('id')}",
-        "timestamp": int(time.time()),
-        "tags": [
-            f"status:{status.lower().replace(' ', '-')}",
-            f"priority:{priority.lower().replace(' ', '-')}"
-        ],
-        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{ticket.get('id')}",
-        "text": document_text
-    }
-
-def upload_to_dust(document):
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    url = f"{DUST_API_BASE}/{document['document_id']}"
-    try:
-        response = requests.post(url, headers=headers, json=document)
-        if response.status_code in [200, 201]:
-            return True
-        return False
-    except:
-        return False
-
-def main():
-    print("=" * 60)
-    print(f"FULL SYNC - Starting at {datetime.now()}")
-    print("=" * 60)
-    
-    required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
-                     'SDP_REFRESH_TOKEN', 'DUST_API_KEY', 'DUST_WORKSPACE_ID']
-    missing_vars = [var for var in required_vars if not os.environ.get(var)]
-    
-    if missing_vars:
-        print(f"ERROR: Missing: {', '.join(missing_vars)}")
-        return
-    
-    print(f"Configuration:")
-    print(f"  SDP Domain: {SDP_DOMAIN}")
-    print(f"  Dust Workspace: {DUST_WORKSPACE_ID}")
-    print(f"  Dust Data Source: {DUST_FOLDER_NAME}")
-    print()
-    
-    tickets = fetch_all_tickets()
-    print(f"\n{'='*60}")
-    print(f"Total tickets to process: {len(tickets)}")
-    print(f"{'='*60}\n")
-    
-    if not tickets:
-        print("No tickets to process")
-        return
-    
-    access_token = get_access_token()
-    success_count = 0
-    error_count = 0
-    
-    for idx, ticket in enumerate(tickets, 1):
-        ticket_id = ticket.get('id')
-        
-        if idx % 50 == 0 or idx == 1:
-            print(f"[{idx}/{len(tickets)}] Processing tickets...")
-        
-        details = fetch_ticket_details(ticket_id, access_token)
-        if not details:
-            error_count += 1
-            continue
-        
-        conversations = fetch_ticket_conversations(ticket_id, access_token)
-        document = format_ticket_for_dust(ticket, details, conversations)
-        
-        if upload_to_dust(document):
-            success_count += 1
-            if idx % 50 == 0:
-                print(f"  ✓ {success_count} uploaded, {error_count} errors")
-        else:
-            error_count += 1
-        
-        time.sleep(0.2)
-        
-        if idx % 500 == 0:
-            access_token = get_access_token()
-    
-    print(f"\n{'='*60}")
-    print(f"SYNC COMPLETED")
-    print(f"  Success: {success_count}/{len(tickets)} tickets")
-    print(f"  Errors: {error_count}")
-    print(f"  Finished at: {datetime.now()}")
-    print(f"{'='*60}")
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"FATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+        return obj.get('display_value', default
