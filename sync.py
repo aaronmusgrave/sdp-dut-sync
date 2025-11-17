@@ -1,271 +1,287 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus to Dust Hourly Sync
-Updates 10 most recent tickets
+ServiceDesk Plus Ticket Sync
+- Initial run: Full sync with rate limiting (75 tickets/minute max)
+- Subsequent runs: Incremental sync of recent tickets
 """
+
 import os
 import requests
 import json
 from datetime import datetime, timedelta
 import time
 
-# Configuration
+# Configuration from environment variables
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
 SDP_CLIENT_ID = os.environ.get('SDP_CLIENT_ID')
 SDP_CLIENT_SECRET = os.environ.get('SDP_CLIENT_SECRET')
 SDP_REFRESH_TOKEN = os.environ.get('SDP_REFRESH_TOKEN')
-
 DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
-DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk')
+DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk-tickets')
+
+# Sync state file to track if initial sync is complete
+SYNC_STATE_FILE = 'sync_state.json'
 
 # API Endpoints
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
+# Rate limiting
+MAX_TICKETS_PER_MINUTE = 75
+DELAY_BETWEEN_TICKETS = 60.0 / MAX_TICKETS_PER_MINUTE  # ~0.8 seconds
+
 # Token cache
 _access_token = None
 _token_expiry = None
 
-
 def get_access_token():
-    """Get OAuth access token"""
+    """Get a valid access token using refresh token"""
     global _access_token, _token_expiry
     
     if _access_token and _token_expiry and datetime.now() < _token_expiry:
         return _access_token
     
-    response = requests.post(ZOHO_TOKEN_URL, data={
+    print("Getting access token...")
+    
+    payload = {
         'refresh_token': SDP_REFRESH_TOKEN,
         'client_id': SDP_CLIENT_ID,
         'client_secret': SDP_CLIENT_SECRET,
         'grant_type': 'refresh_token'
-    })
+    }
+    
+    response = requests.post(ZOHO_TOKEN_URL, data=payload)
     
     if response.status_code == 200:
         data = response.json()
+        if 'access_token' not in data:
+            raise Exception(f"No access_token in response")
+        
         _access_token = data['access_token']
-        _token_expiry = datetime.now() + timedelta(seconds=3300)
+        expires_in = data.get('expires_in', 3600)
+        _token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
+        print("Access token obtained")
         return _access_token
     else:
-        raise Exception(f"Token failed: {response.status_code}")
+        raise Exception(f"Failed to get access token: {response.status_code}")
 
+def load_sync_state():
+    """Load sync state from file"""
+    if os.path.exists(SYNC_STATE_FILE):
+        with open(SYNC_STATE_FILE, 'r') as f:
+            return json.load(f)
+    return {'initial_sync_complete': False, 'last_sync_time': None}
 
-def fetch_recent_tickets():
-    """Fetch 10 most recent tickets"""
-    access_token = get_access_token()
+def save_sync_state(state):
+    """Save sync state to file"""
+    with open(SYNC_STATE_FILE, 'w') as f:
+        json.dump(state, f)
+
+def fetch_all_tickets_paginated(access_token):
+    """Fetch all tickets with pagination"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    all_tickets = []
+    start_index = 1
+    page_size = 100  # Max per page
+    
+    while True:
+        input_data = {
+            "list_info": {
+                "row_count": page_size,
+                "start_index": start_index
+            }
+        }
+        params = {"input_data": json.dumps(input_data)}
+        url = f"{SDP_API_BASE}/requests"
+        
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                tickets = data.get('requests', [])
+                
+                if not tickets:
+                    break
+                
+                all_tickets.extend(tickets)
+                print(f"Fetched {len(all_tickets)} tickets so far...")
+                
+                # Check if there are more pages
+                list_info = data.get('list_info', {})
+                has_more = list_info.get('has_more_rows', False)
+                
+                if not has_more:
+                    break
+                
+                start_index += page_size
+            else:
+                print(f"Error fetching tickets: {response.status_code}")
+                break
+        except Exception as e:
+            print(f"Exception fetching tickets: {e}")
+            break
+    
+    return all_tickets
+
+def fetch_recent_tickets(access_token):
+    """Fetch the most recent tickets for incremental sync"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    input_data = {
+        "list_info": {
+            "row_count": 50
+        }
+    }
+    params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests"
     
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        return response.json().get('requests', [])
-    return []
-
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            return response.json().get('requests', [])
+        return []
+    except:
+        return []
 
 def fetch_ticket_details(ticket_id, access_token):
-    """Fetch full details for a ticket"""
+    """Fetch detailed information for a single ticket"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    input_data = {"list_info": {"row_count": 50}}
+    params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests/{ticket_id}"
     
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get('request', {})
-    return None
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            return response.json().get('request', {})
+        return None
+    except:
+        return None
 
-
-def fetch_conversations(ticket_id, access_token):
-    """Fetch comments for a ticket"""
+def fetch_ticket_conversations(ticket_id, access_token):
+    """Fetch conversations for a ticket"""
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    input_data = {"list_info": {"row_count": 50}}
+    params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
     
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get('conversations', [])
-    return []
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            return response.json().get('conversations', [])
+        return []
+    except:
+        return []
 
-
-def fetch_notes(ticket_id, access_token):
-    """Fetch notes for a ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/notes"
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get('notes', [])
-    return []
-
-
-def clean_html(text):
-    """Remove HTML tags"""
-    if not text:
-        return ""
-    import re
-    text = text.replace('<br>', '\n').replace('</p>', '\n\n').replace('<p>', '')
-    text = re.sub('<[^<]+?>', '', text)
-    return text.strip()
-
-
-def format_ticket(ticket, conversations, notes):
-    """Format ticket as markdown"""
-    display_id = ticket.get('display_id', {})
-    if isinstance(display_id, dict):
-        display_id = display_id.get('display_value', 'Unknown')
-    
-    subject = ticket.get('subject', 'No Subject')
-    status = (ticket.get('status') or {}).get('name', 'Unknown')
-    priority = (ticket.get('priority') or {}).get('name', 'Unknown')
-    
-    requester = ticket.get('requester') or {}
-    requester_name = requester.get('name', 'Unknown')
-    requester_email = requester.get('email_id', '')
-    
-    technician = (ticket.get('technician') or {}).get('name', 'Unassigned')
-    created = (ticket.get('created_time') or {}).get('display_value', 'Unknown')
-    due_by = (ticket.get('due_by_time') or {}).get('display_value', 'Not set')
-    category = (ticket.get('category') or {}).get('name', 'Uncategorized')
-    description = clean_html(ticket.get('description', 'No description'))
-    
-    resolution = ticket.get('resolution') or {}
-    resolution_content = clean_html(resolution.get('content', ''))
-    
-    attachments = ticket.get('attachments', []) or []
-    
-    text = f"""# Ticket #{display_id}: {subject}
-
-## Details
-- **Status**: {status}
-- **Priority**: {priority}
-- **Category**: {category}
-- **Created**: {created}
-- **Due By**: {due_by}
-
-## People
-- **Requester**: {requester_name} ({requester_email})
-- **Assigned To**: {technician}
-
-## Description
-{description}
-"""
-    
-    if resolution_content:
-        text += f"\n## Resolution\n{resolution_content}\n"
-    
-    if attachments:
-        text += "\n## Attachments\n"
-        for att in attachments:
-            name = att.get('name', 'Unknown')
-            size_raw = att.get('size', 0)
-            try:
-                size_kb = float(size_raw) / 1024 if size_raw else 0
-            except:
-                size_kb = 0
-            
-            if size_kb > 0:
-                text += f"- {name} ({size_kb:.1f} KB)\n"
-            else:
-                text += f"- {name}\n"
-    
-    if conversations:
-        text += "\n## Comments\n\n"
-        for conv in conversations:
-            from_user = (conv.get('from') or {}).get('name', 'Unknown')
-            time_val = (conv.get('created_time') or {}).get('display_value', 'Unknown')
-            content = clean_html(conv.get('description', '') or conv.get('reply_content', ''))
-            
-            if content:
-                text += f"### {from_user} - {time_val}\n{content}\n\n"
-    
-    if notes:
-        text += "\n## Notes\n\n"
-        for note in notes:
-            from_user = (note.get('added_by') or {}).get('name', 'Unknown')
-            time_val = (note.get('added_time') or {}).get('display_value', 'Unknown')
-            content = clean_html(note.get('description', ''))
-            
-            if content:
-                text += f"### {from_user} - {time_val}\n{content}\n\n"
-    
-    text += f"\n---\n*Synced: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n"
-    return text
-
-
-def upload_to_dust(ticket_id, text):
-    """Upload ticket to Dust"""
+def upload_to_dust(ticket_data, ticket_id):
+    """Upload a ticket to Dust"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
     }
     
-    response = requests.post(
-        f"{DUST_API_BASE}/{ticket_id}",
-        headers=headers,
-        json={'text': text, 'source_url': f"https://{SDP_DOMAIN}/app/{ticket_id}"}
-    )
+    url = f"{DUST_API_BASE}/{ticket_id}"
     
-    return response.status_code == 200
-
-
-def main():
-    """Main sync function"""
-    print("=" * 70)
-    print("ServiceDesk Plus → Dust Hourly Sync")
-    print("Updates 10 most recent tickets")
-    print("=" * 70)
+    payload = {
+        "document_id": str(ticket_id),
+        "text": json.dumps(ticket_data, indent=2),
+        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{ticket_id}",
+        "timestamp": int(time.time())
+    }
     
     try:
-        print("\n✅ Token obtained")
-        
-        tickets = fetch_recent_tickets()
-        
-        if not tickets:
-            print("\n⚠️  No tickets found")
-            return
-        
-        print(f"Fetched {len(tickets)} recent tickets")
-        print(f"\n📤 Processing {len(tickets)} tickets...\n")
-        
-        access_token = get_access_token()
-        success = 0
-        
-        for i, ticket in enumerate(tickets, 1):
-            ticket_id = ticket.get('id')
-            display_id = ticket.get('display_id', {})
-            if isinstance(display_id, dict):
-                display_id = display_id.get('display_value', ticket_id)
-            
-            subject = ticket.get('subject', 'No subject')[:50]
-            
-            details = fetch_ticket_details(ticket_id, access_token)
-            conversations = fetch_conversations(ticket_id, access_token)
-            notes = fetch_notes(ticket_id, access_token)
-            
-            ticket_data = details if details else ticket
-            text = format_ticket(ticket_data, conversations, notes)
-            
-            if upload_to_dust(ticket_id, text):
-                success += 1
-                comment_count = len(conversations) + len(notes)
-                percent = (i / len(tickets)) * 100
-                print(f"✅ [{i}/{len(tickets)}] ({percent:.1f}%) #{display_id}: {subject} ({comment_count} comments)")
-            else:
-                print(f"❌ [{i}/{len(tickets)}] #{display_id}: Failed")
-            
-            time.sleep(0.15)
-        
-        print(f"\n{'=' * 70}")
-        print(f"✅ SYNC COMPLETE!")
-        print(f"Successfully uploaded: {success}/{len(tickets)}")
-        print(f"{'=' * 70}\n")
-        
+        response = requests.post(url, headers=headers, json=payload)
+        return response.status_code in [200, 201]
     except Exception as e:
-        print(f"\n❌ Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
+        print(f"Error uploading ticket {ticket_id}: {e}")
+        return False
 
+def sync_ticket(ticket, access_token):
+    """Sync a single ticket with full details and conversations"""
+    ticket_id = ticket.get('id')
+    
+    # Fetch full details
+    details = fetch_ticket_details(ticket_id, access_token)
+    if not details:
+        print(f"Could not fetch details for ticket {ticket_id}")
+        return False
+    
+    # Fetch conversations
+    conversations = fetch_ticket_conversations(ticket_id, access_token)
+    
+    # Combine all data
+    full_ticket_data = {
+        **details,
+        'conversations': conversations
+    }
+    
+    # Upload to Dust
+    success = upload_to_dust(full_ticket_data, ticket_id)
+    
+    if success:
+        print(f"✓ Synced ticket {ticket_id}")
+    else:
+        print(f"✗ Failed to sync ticket {ticket_id}")
+    
+    return success
+
+def main():
+    """Main sync logic"""
+    print("Starting ServiceDesk Plus sync...")
+    
+    # Load sync state
+    state = load_sync_state()
+    access_token = get_access_token()
+    
+    if not state['initial_sync_complete']:
+        print("\n=== INITIAL FULL SYNC ===")
+        print("Fetching all tickets...")
+        
+        # Fetch all tickets
+        all_tickets = fetch_all_tickets_paginated(access_token)
+        total = len(all_tickets)
+        print(f"Found {total} total tickets to sync")
+        
+        # Sync with rate limiting
+        for i, ticket in enumerate(all_tickets, 1):
+            print(f"Processing {i}/{total}...")
+            
+            # Refresh token if needed
+            access_token = get_access_token()
+            
+            # Sync ticket
+            sync_ticket(ticket, access_token)
+            
+            # Rate limiting: wait between tickets
+            if i < total:  # Don't wait after the last ticket
+                time.sleep(DELAY_BETWEEN_TICKETS)
+        
+        # Mark initial sync as complete
+        state['initial_sync_complete'] = True
+        state['last_sync_time'] = datetime.now().isoformat()
+        save_sync_state(state)
+        
+        print("\n✓ Initial sync complete!")
+    
+    else:
+        print("\n=== INCREMENTAL SYNC ===")
+        print("Fetching recent tickets...")
+        
+        # Fetch recent tickets
+        recent_tickets = fetch_recent_tickets(access_token)
+        print(f"Found {len(recent_tickets)} recent tickets to check")
+        
+        # Sync recent tickets (no rate limiting needed for small batches)
+        for ticket in recent_tickets:
+            access_token = get_access_token()
+            sync_ticket(ticket, access_token)
+        
+        # Update last sync time
+        state['last_sync_time'] = datetime.now().isoformat()
+        save_sync_state(state)
+        
+        print("\n✓ Incremental sync complete!")
 
 if __name__ == "__main__":
     main()
