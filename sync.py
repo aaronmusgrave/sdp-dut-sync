@@ -25,6 +25,7 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
 # Pagination settings
+TICKETS_PER_PAGE = 100
 MAX_TICKETS = 5000
 
 # Token cache
@@ -63,48 +64,48 @@ def get_access_token():
         raise Exception(f"Failed to get access token: {response.status_code}")
 
 def fetch_all_tickets():
-    """Fetch all tickets with pagination and duplicate detection"""
+    """Fetch all tickets with pagination using start_index"""
     access_token = get_access_token()
     all_tickets = []
     seen_ticket_ids = set()
     start_index = 1
-    consecutive_duplicate_pages = 0
     
-    print(f"Fetching all tickets with pagination...")
+    print(f"Fetching all tickets with pagination (batches of {TICKETS_PER_PAGE})...")
     
     while len(all_tickets) < MAX_TICKETS:
         headers = {
             'Authorization': f'Zoho-oauthtoken {access_token}',
-            'Content-Type': 'application/x-www-form-urlencoded'
+            'Accept': 'application/vnd.manageengine.sdp.v3+json'
         }
         
+        # Build list_info according to official documentation
         list_info = {
             "list_info": {
-                "row_count": 100,
-                "start_index": start_index,
-                "sort_field": "id",
-                "sort_order": "asc"
+                "row_count": TICKETS_PER_PAGE,
+                "start_index": start_index
             }
         }
         
-        data = {
+        # Use params= with json.dumps as per documentation
+        params = {
             'input_data': json.dumps(list_info)
         }
         
         url = f"{SDP_API_BASE}/requests"
         
         try:
-            response = requests.get(url, headers=headers, data=data)
+            # Use params= for URL parameters (not data=)
+            response = requests.get(url, headers=headers, params=params)
             
             if response.status_code == 200:
                 result = response.json()
                 tickets = result.get('requests', [])
                 
                 if not tickets:
-                    print(f"  No more tickets returned. Total unique: {len(all_tickets)}")
+                    print(f"  No more tickets. Total unique: {len(all_tickets)}")
                     break
                 
-                # Check for duplicates in this batch
+                # Track new vs duplicate tickets
                 new_tickets = []
                 duplicate_count = 0
                 ticket_ids_in_batch = []
@@ -118,22 +119,11 @@ def fetch_all_tickets():
                     else:
                         duplicate_count += 1
                 
-                # Show first and last ticket ID in batch for debugging
                 if ticket_ids_in_batch:
                     first_id = ticket_ids_in_batch[0]
                     last_id = ticket_ids_in_batch[-1]
-                    print(f"  Page {start_index}: got {len(tickets)} tickets (IDs: {first_id} to {last_id})")
+                    print(f"  Batch at index {start_index}: got {len(tickets)} tickets (IDs: {first_id} to {last_id})")
                     print(f"    New: {len(new_tickets)}, Duplicates: {duplicate_count}, Total unique: {len(all_tickets) + len(new_tickets)}")
-                
-                # If entire batch was duplicates, stop
-                if duplicate_count == len(tickets):
-                    consecutive_duplicate_pages += 1
-                    print(f"    ⚠️  All tickets in this page were duplicates (page {consecutive_duplicate_pages})")
-                    if consecutive_duplicate_pages >= 3:
-                        print(f"  Stopping: 3 consecutive pages of duplicates")
-                        break
-                else:
-                    consecutive_duplicate_pages = 0
                 
                 all_tickets.extend(new_tickets)
                 
@@ -145,12 +135,13 @@ def fetch_all_tickets():
                     print(f"  API says no more rows. Total unique: {len(all_tickets)}")
                     break
                 
-                # If no new tickets were added, stop
+                # If no new tickets, we're done
                 if len(new_tickets) == 0:
-                    print(f"  No new tickets found. Stopping.")
+                    print(f"  No new tickets found. Total unique: {len(all_tickets)}")
                     break
                 
-                start_index += len(tickets)
+                # Move to next batch - increment by row_count, not by tickets received
+                start_index += TICKETS_PER_PAGE
                 time.sleep(0.5)
                 
             else:
@@ -336,4 +327,3 @@ if __name__ == "__main__":
         print(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
-        
