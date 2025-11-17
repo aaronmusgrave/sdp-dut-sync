@@ -25,8 +25,8 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
 # Pagination settings
-TICKETS_PER_PAGE = 100  # Fetch 100 tickets per request
-MAX_TICKETS = 4000  # Safety limit
+TICKETS_PER_PAGE = 100
+MAX_TICKETS = 4000
 
 # Token cache
 _access_token = None
@@ -76,7 +76,6 @@ def fetch_all_tickets():
     print(f"Fetching tickets in batches of {TICKETS_PER_PAGE}...")
     
     while len(all_tickets) < MAX_TICKETS:
-        # Prepare pagination parameters
         input_data = {
             "list_info": {
                 "row_count": TICKETS_PER_PAGE,
@@ -102,4 +101,212 @@ def fetch_all_tickets():
                     break
                 
                 all_tickets.extend(tickets)
-                print(f"  Fetched {len(tickets)} tickets (total
+                print(f"  Fetched {len(tickets)} tickets (total: {len(all_tickets)})")
+                
+                list_info = data.get('list_info', {})
+                has_more = list_info.get('has_more_rows', False)
+                
+                if not has_more:
+                    print(f"Reached end of tickets. Total: {len(all_tickets)}")
+                    break
+                
+                start_index += TICKETS_PER_PAGE
+                time.sleep(0.5)
+                
+            elif response.status_code == 415:
+                print("Pagination not supported, fetching without parameters...")
+                response = requests.get(f"{SDP_API_BASE}/requests", headers=headers)
+                if response.status_code == 200:
+                    tickets = response.json().get('requests', [])
+                    all_tickets.extend(tickets)
+                break
+            else:
+                print(f"Failed to fetch tickets: {response.status_code}")
+                print(f"Response: {response.text}")
+                break
+                
+        except Exception as e:
+            print(f"Error fetching tickets: {e}")
+            break
+    
+    return all_tickets
+
+def fetch_ticket_details(ticket_id, access_token):
+    """Fetch detailed information for a single ticket"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('request', {})
+        return None
+    except Exception as e:
+        return None
+
+def fetch_ticket_conversations(ticket_id, access_token):
+    """Fetch conversations for a ticket"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get('conversations', [])
+        return []
+    except Exception as e:
+        return []
+
+def safe_get_name(obj, default='Unknown'):
+    """Safely extract name from an object that might be None or a dict"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get('name', default)
+    return default
+
+def safe_get_display_value(obj, default=''):
+    """Safely extract display_value from an object that might be None or a dict"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get('display_value', default)
+    return default
+
+def format_ticket_for_dust(ticket, details, conversations):
+    """Format ticket data into a document for Dust"""
+    
+    conversation_text = ""
+    if conversations:
+        conversation_text = "\n\n## Conversations\n\n"
+        for conv in conversations:
+            from_user = safe_get_name(conv.get('from'))
+            created_time = safe_get_display_value(conv.get('created_time'))
+            description = conv.get('description', '')
+            conversation_text += f"**{from_user}** ({created_time}):\n{description}\n\n"
+    
+    subject = details.get('subject', ticket.get('subject', 'No Subject'))
+    status = safe_get_name(details.get('status'))
+    priority = safe_get_name(details.get('priority'))
+    requester = safe_get_name(details.get('requester'))
+    technician = safe_get_name(details.get('technician'), 'Unassigned')
+    created_time = safe_get_display_value(details.get('created_time'))
+    description = details.get('description', '')
+    
+    document_text = f"""# {subject}
+
+**Ticket ID:** {ticket.get('id')}
+**Status:** {status}
+**Priority:** {priority}
+**Requester:** {requester}
+**Technician:** {technician}
+**Created:** {created_time}
+
+## Description
+
+{description}
+
+{conversation_text}
+"""
+    
+    return {
+        "document_id": f"ticket-{ticket.get('id')}",
+        "timestamp": int(time.time()),
+        "tags": [
+            f"status:{status.lower().replace(' ', '-')}",
+            f"priority:{priority.lower().replace(' ', '-')}"
+        ],
+        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{ticket.get('id')}",
+        "text": document_text
+    }
+
+def upload_to_dust(document):
+    """Upload a single document to Dust"""
+    headers = {
+        'Authorization': f'Bearer {DUST_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    
+    url = f"{DUST_API_BASE}/{document['document_id']}"
+    
+    try:
+        response = requests.post(url, headers=headers, json=document)
+        if response.status_code in [200, 201]:
+            return True
+        return False
+    except Exception as e:
+        return False
+
+def main():
+    """Main sync function"""
+    print("=" * 60)
+    print(f"FULL SYNC - Starting at {datetime.now()}")
+    print("=" * 60)
+    
+    required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
+                     'SDP_REFRESH_TOKEN', 'DUST_API_KEY', 'DUST_WORKSPACE_ID']
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    
+    if missing_vars:
+        print(f"ERROR: Missing required environment variables: {', '.join(missing_vars)}")
+        return
+    
+    print(f"Configuration:")
+    print(f"  SDP Domain: {SDP_DOMAIN}")
+    print(f"  Dust Workspace: {DUST_WORKSPACE_ID}")
+    print(f"  Dust Data Source: {DUST_FOLDER_NAME}")
+    print()
+    
+    tickets = fetch_all_tickets()
+    print(f"\n{'='*60}")
+    print(f"Total tickets to process: {len(tickets)}")
+    print(f"{'='*60}\n")
+    
+    if not tickets:
+        print("No tickets to process")
+        return
+    
+    access_token = get_access_token()
+    
+    success_count = 0
+    error_count = 0
+    
+    for idx, ticket in enumerate(tickets, 1):
+        ticket_id = ticket.get('id')
+        
+        if idx % 10 == 0 or idx == 1:
+            print(f"[{idx}/{len(tickets)}] Processing tickets...")
+        
+        details = fetch_ticket_details(ticket_id, access_token)
+        if not details:
+            error_count += 1
+            continue
+        
+        conversations = fetch_ticket_conversations(ticket_id, access_token)
+        
+        document = format_ticket_for_dust(ticket, details, conversations)
+        if upload_to_dust(document):
+            success_count += 1
+            if idx % 10 == 0:
+                print(f"  ✓ {success_count} uploaded, {error_count} errors")
+        else:
+            error_count += 1
+        
+        time.sleep(0.3)
+        
+        if idx % 500 == 0:
+            access_token = get_access_token()
+    
+    print(f"\n{'='*60}")
+    print(f"SYNC COMPLETED")
+    print(f"  Success: {success_count}/{len(tickets)} tickets")
+    print(f"  Errors: {error_count}")
+    print(f"  Finished at: {datetime.now()}")
+    print(f"{'='*60}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
