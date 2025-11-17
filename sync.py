@@ -25,7 +25,6 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
 # Pagination settings
-TICKETS_PER_PAGE = 10
 MAX_TICKETS = 5000
 
 # Token cache
@@ -64,10 +63,12 @@ def get_access_token():
         raise Exception(f"Failed to get access token: {response.status_code}")
 
 def fetch_all_tickets():
-    """Fetch all tickets with pagination"""
+    """Fetch all tickets with pagination and duplicate detection"""
     access_token = get_access_token()
     all_tickets = []
+    seen_ticket_ids = set()
     start_index = 1
+    consecutive_duplicate_pages = 0
     
     print(f"Fetching all tickets with pagination...")
     
@@ -99,23 +100,54 @@ def fetch_all_tickets():
                 result = response.json()
                 tickets = result.get('requests', [])
                 
-                response_list_info = result.get('list_info', {})
-                print(f"  Page {start_index}: got {len(tickets)} tickets")
-                print(f"    Response list_info: {response_list_info}")
-                
                 if not tickets:
-                    print(f"  No more tickets. Total: {len(all_tickets)}")
+                    print(f"  No more tickets returned. Total unique: {len(all_tickets)}")
                     break
                 
-                all_tickets.extend(tickets)
+                # Check for duplicates in this batch
+                new_tickets = []
+                duplicate_count = 0
+                ticket_ids_in_batch = []
                 
+                for ticket in tickets:
+                    ticket_id = ticket.get('id')
+                    ticket_ids_in_batch.append(ticket_id)
+                    if ticket_id not in seen_ticket_ids:
+                        new_tickets.append(ticket)
+                        seen_ticket_ids.add(ticket_id)
+                    else:
+                        duplicate_count += 1
+                
+                # Show first and last ticket ID in batch for debugging
+                if ticket_ids_in_batch:
+                    first_id = ticket_ids_in_batch[0]
+                    last_id = ticket_ids_in_batch[-1]
+                    print(f"  Page {start_index}: got {len(tickets)} tickets (IDs: {first_id} to {last_id})")
+                    print(f"    New: {len(new_tickets)}, Duplicates: {duplicate_count}, Total unique: {len(all_tickets) + len(new_tickets)}")
+                
+                # If entire batch was duplicates, stop
+                if duplicate_count == len(tickets):
+                    consecutive_duplicate_pages += 1
+                    print(f"    ⚠️  All tickets in this page were duplicates (page {consecutive_duplicate_pages})")
+                    if consecutive_duplicate_pages >= 3:
+                        print(f"  Stopping: 3 consecutive pages of duplicates")
+                        break
+                else:
+                    consecutive_duplicate_pages = 0
+                
+                all_tickets.extend(new_tickets)
+                
+                # Check API response for more rows
+                response_list_info = result.get('list_info', {})
                 has_more = response_list_info.get('has_more_rows', False)
-                total_count = response_list_info.get('row_count', 0)
-                
-                print(f"    Total so far: {len(all_tickets)}, has_more: {has_more}, total_count: {total_count}")
                 
                 if not has_more:
-                    print(f"  API says no more rows. Total: {len(all_tickets)}")
+                    print(f"  API says no more rows. Total unique: {len(all_tickets)}")
+                    break
+                
+                # If no new tickets were added, stop
+                if len(new_tickets) == 0:
+                    print(f"  No new tickets found. Stopping.")
                     break
                 
                 start_index += len(tickets)
@@ -132,16 +164,7 @@ def fetch_all_tickets():
             traceback.print_exc()
             break
     
-    # Check for duplicates
-    ticket_ids = [t.get('id') for t in all_tickets]
-    unique_ids = set(ticket_ids)
-    if len(ticket_ids) != len(unique_ids):
-        duplicates_count = len(ticket_ids) - len(unique_ids)
-        print(f"\n  ⚠️  WARNING: Found {duplicates_count} duplicate tickets!")
-        print(f"  Total fetched: {len(ticket_ids)}, Unique: {len(unique_ids)}")
-    else:
-        print(f"\n  ✓ All {len(ticket_ids)} tickets are unique (no duplicates)")
-    
+    print(f"\n  ✓ Fetched {len(all_tickets)} unique tickets")
     return all_tickets
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -262,7 +285,7 @@ def main():
     
     tickets = fetch_all_tickets()
     print(f"\n{'='*60}")
-    print(f"Total tickets to process: {len(tickets)}")
+    print(f"Total unique tickets to process: {len(tickets)}")
     print(f"{'='*60}\n")
     
     if not tickets:
@@ -313,3 +336,4 @@ if __name__ == "__main__":
         print(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+        
