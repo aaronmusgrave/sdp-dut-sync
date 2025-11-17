@@ -81,7 +81,10 @@ def save_sync_state(state):
 
 def fetch_all_tickets_paginated(access_token):
     """Fetch all tickets with pagination"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
     all_tickets = []
     start_index = 1
     page_size = 100  # Max per page
@@ -118,6 +121,7 @@ def fetch_all_tickets_paginated(access_token):
                 start_index += page_size
             else:
                 print(f"Error fetching tickets: {response.status_code}")
+                print(f"Response: {response.text}")
                 break
         except Exception as e:
             print(f"Exception fetching tickets: {e}")
@@ -127,7 +131,10 @@ def fetch_all_tickets_paginated(access_token):
 
 def fetch_recent_tickets(access_token):
     """Fetch the most recent tickets for incremental sync"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
     input_data = {
         "list_info": {
             "row_count": 50
@@ -140,13 +147,20 @@ def fetch_recent_tickets(access_token):
         response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
             return response.json().get('requests', [])
+        else:
+            print(f"Error fetching recent tickets: {response.status_code}")
+            print(f"Response: {response.text}")
         return []
-    except:
+    except Exception as e:
+        print(f"Exception: {e}")
         return []
 
 def fetch_ticket_details(ticket_id, access_token):
     """Fetch detailed information for a single ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
     input_data = {"list_info": {"row_count": 50}}
     params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests/{ticket_id}"
@@ -161,7 +175,10 @@ def fetch_ticket_details(ticket_id, access_token):
 
 def fetch_ticket_conversations(ticket_id, access_token):
     """Fetch conversations for a ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
     input_data = {"list_info": {"row_count": 50}}
     params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
