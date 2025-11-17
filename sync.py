@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Incremental Sync - Runs hourly to capture new/updated tickets
-Fetches the 50 most recent tickets to catch new ones
+Fetches the most recent tickets to catch new ones
 """
 
 import os
@@ -27,17 +27,6 @@ DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUS
 # Token cache
 _access_token = None
 _token_expiry = None
-
-# Input data for filtering
-input_data = {
-    "list_info": {
-        "row_count": 50
-    }
-}
-
-params = {
-    "input_data": json.dumps(input_data)
-}
 
 def get_access_token():
     """Get a valid access token using refresh token"""
@@ -73,15 +62,21 @@ def get_access_token():
 def fetch_recent_tickets():
     """Fetch the most recent tickets"""
     access_token = get_access_token()
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}'
+    }
     url = f"{SDP_API_BASE}/requests"
     
     try:
-        response = requests.get(url, headers=headers, params=params)
+        # Fetch without input_data parameter (will return default results)
+        response = requests.get(url, headers=headers)
+        print(f"Fetch tickets response: {response.status_code}")
         if response.status_code == 200:
-            return response.json().get('requests', [])
+            tickets = response.json().get('requests', [])
+            return tickets
         else:
             print(f"Failed to fetch tickets: {response.status_code}")
+            print(f"Response: {response.text}")
         return []
     except Exception as e:
         print(f"Error fetching tickets: {e}")
@@ -92,7 +87,7 @@ def fetch_ticket_details(ticket_id, access_token):
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
     url = f"{SDP_API_BASE}/requests/{ticket_id}"
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
             return response.json().get('request', {})
         else:
@@ -108,7 +103,7 @@ def fetch_ticket_conversations(ticket_id, access_token):
     url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
     
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
             return response.json().get('conversations', [])
         else:
