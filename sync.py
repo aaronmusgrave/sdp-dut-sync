@@ -68,7 +68,6 @@ def fetch_recent_tickets():
     url = f"{SDP_API_BASE}/requests"
     
     try:
-        # Fetch without input_data parameter (will return default results)
         response = requests.get(url, headers=headers)
         print(f"Fetch tickets response: {response.status_code}")
         if response.status_code == 200:
@@ -113,6 +112,22 @@ def fetch_ticket_conversations(ticket_id, access_token):
         print(f"Error fetching conversations for ticket {ticket_id}: {e}")
         return []
 
+def safe_get_name(obj, default='Unknown'):
+    """Safely extract name from an object that might be None or a dict"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get('name', default)
+    return default
+
+def safe_get_display_value(obj, default=''):
+    """Safely extract display_value from an object that might be None or a dict"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get('display_value', default)
+    return default
+
 def format_ticket_for_dust(ticket, details, conversations):
     """Format ticket data into a document for Dust"""
     
@@ -121,18 +136,18 @@ def format_ticket_for_dust(ticket, details, conversations):
     if conversations:
         conversation_text = "\n\n## Conversations\n\n"
         for conv in conversations:
-            from_user = conv.get('from', {}).get('name', 'Unknown')
-            created_time = conv.get('created_time', {}).get('display_value', '')
+            from_user = safe_get_name(conv.get('from'))
+            created_time = safe_get_display_value(conv.get('created_time'))
             description = conv.get('description', '')
             conversation_text += f"**{from_user}** ({created_time}):\n{description}\n\n"
     
-    # Build the document text
+    # Safely extract all fields
     subject = details.get('subject', ticket.get('subject', 'No Subject'))
-    status = details.get('status', {}).get('name', 'Unknown')
-    priority = details.get('priority', {}).get('name', 'Unknown')
-    requester = details.get('requester', {}).get('name', 'Unknown')
-    technician = details.get('technician', {}).get('name', 'Unassigned')
-    created_time = details.get('created_time', {}).get('display_value', '')
+    status = safe_get_name(details.get('status'))
+    priority = safe_get_name(details.get('priority'))
+    requester = safe_get_name(details.get('requester'))
+    technician = safe_get_name(details.get('technician'), 'Unassigned')
+    created_time = safe_get_display_value(details.get('created_time'))
     description = details.get('description', '')
     
     document_text = f"""# {subject}
