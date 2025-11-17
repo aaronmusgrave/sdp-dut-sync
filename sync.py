@@ -82,27 +82,29 @@ def save_sync_state(state):
 def fetch_all_tickets_paginated(access_token):
     """Fetch all tickets with pagination"""
     headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Authorization': f'Zoho-oauthtoken {access_token}'
     }
     all_tickets = []
     start_index = 1
     page_size = 100  # Max per page
     
     while True:
-        input_data = {
-            "list_info": {
+        # Try without input_data wrapper - just direct params
+        params = {
+            'list_info': json.dumps({
                 "row_count": page_size,
                 "start_index": start_index
-            }
+            })
         }
-        params = {"input_data": json.dumps(input_data)}
         url = f"{SDP_API_BASE}/requests"
         
         try:
             response = requests.get(url, headers=headers, params=params)
+            print(f"Status: {response.status_code}")
+            
             if response.status_code == 200:
                 data = response.json()
+                print(f"Response keys: {data.keys()}")
                 tickets = data.get('requests', [])
                 
                 if not tickets:
@@ -122,9 +124,21 @@ def fetch_all_tickets_paginated(access_token):
             else:
                 print(f"Error fetching tickets: {response.status_code}")
                 print(f"Response: {response.text}")
+                
+                # Try without any params as fallback
+                if start_index == 1:
+                    print("\nTrying without pagination params...")
+                    response = requests.get(url, headers=headers)
+                    if response.status_code == 200:
+                        data = response.json()
+                        tickets = data.get('requests', [])
+                        all_tickets.extend(tickets)
+                        print(f"Fetched {len(tickets)} tickets without pagination")
                 break
         except Exception as e:
             print(f"Exception fetching tickets: {e}")
+            import traceback
+            traceback.print_exc()
             break
     
     return all_tickets
@@ -132,15 +146,13 @@ def fetch_all_tickets_paginated(access_token):
 def fetch_recent_tickets(access_token):
     """Fetch the most recent tickets for incremental sync"""
     headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Authorization': f'Zoho-oauthtoken {access_token}'
     }
-    input_data = {
-        "list_info": {
+    params = {
+        'list_info': json.dumps({
             "row_count": 50
-        }
+        })
     }
-    params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests"
     
     try:
@@ -148,8 +160,12 @@ def fetch_recent_tickets(access_token):
         if response.status_code == 200:
             return response.json().get('requests', [])
         else:
-            print(f"Error fetching recent tickets: {response.status_code}")
-            print(f"Response: {response.text}")
+            # Try without params
+            print("Trying without params...")
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                return response.json().get('requests', [])
+            print(f"Error: {response.status_code} - {response.text}")
         return []
     except Exception as e:
         print(f"Exception: {e}")
@@ -158,15 +174,12 @@ def fetch_recent_tickets(access_token):
 def fetch_ticket_details(ticket_id, access_token):
     """Fetch detailed information for a single ticket"""
     headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Authorization': f'Zoho-oauthtoken {access_token}'
     }
-    input_data = {"list_info": {"row_count": 50}}
-    params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests/{ticket_id}"
     
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
             return response.json().get('request', {})
         return None
@@ -176,15 +189,12 @@ def fetch_ticket_details(ticket_id, access_token):
 def fetch_ticket_conversations(ticket_id, access_token):
     """Fetch conversations for a ticket"""
     headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Authorization': f'Zoho-oauthtoken {access_token}'
     }
-    input_data = {"list_info": {"row_count": 50}}
-    params = {"input_data": json.dumps(input_data)}
     url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
     
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers)
         if response.status_code == 200:
             return response.json().get('conversations', [])
         return []
@@ -259,6 +269,10 @@ def main():
         all_tickets = fetch_all_tickets_paginated(access_token)
         total = len(all_tickets)
         print(f"Found {total} total tickets to sync")
+        
+        if total == 0:
+            print("No tickets found. Check API permissions or try again.")
+            return
         
         # Sync with rate limiting
         for i, ticket in enumerate(all_tickets, 1):
