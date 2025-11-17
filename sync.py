@@ -132,4 +132,124 @@ def format_ticket_for_dust(ticket, details, conversations):
             conversation_text += f"**{from_user}** ({created_time}):\n{description}\n\n"
     
     # Build the document text
-    subject = details
+    subject = details.get('subject', ticket.get('subject', 'No Subject'))
+    status = details.get('status', {}).get('name', 'Unknown')
+    priority = details.get('priority', {}).get('name', 'Unknown')
+    requester = details.get('requester', {}).get('name', 'Unknown')
+    technician = details.get('technician', {}).get('name', 'Unassigned')
+    created_time = details.get('created_time', {}).get('display_value', '')
+    description = details.get('description', '')
+    
+    document_text = f"""# {subject}
+
+**Ticket ID:** {ticket.get('id')}
+**Status:** {status}
+**Priority:** {priority}
+**Requester:** {requester}
+**Technician:** {technician}
+**Created:** {created_time}
+
+## Description
+
+{description}
+
+{conversation_text}
+"""
+    
+    return {
+        "document_id": f"ticket-{ticket.get('id')}",
+        "timestamp": int(time.time()),
+        "tags": [
+            f"status:{status.lower().replace(' ', '-')}",
+            f"priority:{priority.lower().replace(' ', '-')}"
+        ],
+        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{ticket.get('id')}",
+        "text": document_text
+    }
+
+def upload_to_dust(document):
+    """Upload a single document to Dust"""
+    headers = {
+        'Authorization': f'Bearer {DUST_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    
+    url = f"{DUST_API_BASE}/{document['document_id']}"
+    
+    try:
+        response = requests.post(url, headers=headers, json=document)
+        if response.status_code in [200, 201]:
+            print(f"✓ Uploaded ticket {document['document_id']}")
+            return True
+        else:
+            print(f"✗ Failed to upload {document['document_id']}: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"✗ Error uploading {document['document_id']}: {e}")
+        return False
+
+def main():
+    """Main sync function"""
+    print("=" * 50)
+    print(f"Starting incremental sync at {datetime.now()}")
+    print("=" * 50)
+    
+    # Validate required environment variables
+    required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
+                     'SDP_REFRESH_TOKEN', 'DUST_API_KEY', 'DUST_WORKSPACE_ID']
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    
+    if missing_vars:
+        print(f"ERROR: Missing required environment variables: {', '.join(missing_vars)}")
+        return
+    
+    print(f"Configuration:")
+    print(f"  SDP Domain: {SDP_DOMAIN}")
+    print(f"  Dust Workspace: {DUST_WORKSPACE_ID}")
+    print(f"  Dust Data Source: {DUST_FOLDER_NAME}")
+    print()
+    
+    # Fetch recent tickets
+    tickets = fetch_recent_tickets()
+    print(f"Found {len(tickets)} recent tickets")
+    
+    if not tickets:
+        print("No tickets to process")
+        return
+    
+    # Get access token once for all detail/conversation fetches
+    access_token = get_access_token()
+    
+    # Process each ticket
+    success_count = 0
+    for ticket in tickets:
+        ticket_id = ticket.get('id')
+        print(f"\nProcessing ticket {ticket_id}...")
+        
+        # Fetch details and conversations
+        details = fetch_ticket_details(ticket_id, access_token)
+        if not details:
+            print(f"Skipping ticket {ticket_id} - no details available")
+            continue
+        
+        conversations = fetch_ticket_conversations(ticket_id, access_token)
+        
+        # Format and upload to Dust
+        document = format_ticket_for_dust(ticket, details, conversations)
+        if upload_to_dust(document):
+            success_count += 1
+        
+        # Small delay to avoid rate limiting
+        time.sleep(0.5)
+    
+    print(f"\n{'='*50}")
+    print(f"Sync completed: {success_count}/{len(tickets)} tickets uploaded successfully")
+    print(f"Finished at {datetime.now()}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
