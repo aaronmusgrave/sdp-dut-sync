@@ -25,7 +25,7 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
 # Pagination settings
-TICKETS_PER_PAGE = 100
+TICKETS_PER_PAGE = 10  # API seems to return 10 per page
 MAX_TICKETS = 5000
 
 # Token cache
@@ -69,19 +69,20 @@ def fetch_all_tickets():
     all_tickets = []
     start_index = 1
     
-    print(f"Fetching tickets in batches of {TICKETS_PER_PAGE}...")
+    print(f"Fetching all tickets with pagination...")
     
     while len(all_tickets) < MAX_TICKETS:
         headers = {
             'Authorization': f'Zoho-oauthtoken {access_token}',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Accept': 'application/vnd.manageengine.sdp.v3+json'
+            'Content-Type': 'application/x-www-form-urlencoded'
         }
         
         list_info = {
             "list_info": {
-                "row_count": TICKETS_PER_PAGE,
-                "start_index": start_index
+                "row_count": 100,
+                "start_index": start_index,
+                "sort_field": "id",
+                "sort_order": "asc"
             }
         }
         
@@ -93,36 +94,46 @@ def fetch_all_tickets():
         
         try:
             response = requests.get(url, headers=headers, data=data)
-            print(f"  Page starting at {start_index}: status={response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
                 tickets = result.get('requests', [])
+                
+                # Debug: print the list_info from response
+                response_list_info = result.get('list_info', {})
+                print(f"  Page {start_index}: got {len(tickets)} tickets")
+                print(f"    Response list_info: {response_list_info}")
                 
                 if not tickets:
                     print(f"  No more tickets. Total: {len(all_tickets)}")
                     break
                 
                 all_tickets.extend(tickets)
-                print(f"  ✓ Fetched {len(tickets)} tickets (total: {len(all_tickets)})")
                 
-                response_list_info = result.get('list_info', {})
+                # Check pagination info
                 has_more = response_list_info.get('has_more_rows', False)
+                total_count = response_list_info.get('row_count', 0)
                 
-                if not has_more or len(tickets) < TICKETS_PER_PAGE:
-                    print(f"  Reached end. Total: {len(all_tickets)}")
+                print(f"    Total so far: {len(all_tickets)}, has_more: {has_more}, total_count: {total_count}")
+                
+                # If no more rows or we got fewer tickets than requested
+                if not has_more:
+                    print(f"  API says no more rows. Total: {len(all_tickets)}")
                     break
                 
-                start_index += TICKETS_PER_PAGE
+                # Move to next page
+                start_index += len(tickets)
                 time.sleep(0.5)
                 
             else:
                 print(f"  Failed: {response.status_code}")
-                print(f"  Response: {response.text[:300]}")
+                print(f"  Response: {response.text[:500]}")
                 break
                 
         except Exception as e:
             print(f"  Error: {e}")
+            import traceback
+            traceback.print_exc()
             break
     
     return all_tickets
@@ -259,7 +270,7 @@ def main():
     for idx, ticket in enumerate(tickets, 1):
         ticket_id = ticket.get('id')
         
-        if idx % 10 == 0 or idx == 1:
+        if idx % 50 == 0 or idx == 1:
             print(f"[{idx}/{len(tickets)}] Processing tickets...")
         
         details = fetch_ticket_details(ticket_id, access_token)
@@ -272,12 +283,12 @@ def main():
         
         if upload_to_dust(document):
             success_count += 1
-            if idx % 10 == 0:
+            if idx % 50 == 0:
                 print(f"  ✓ {success_count} uploaded, {error_count} errors")
         else:
             error_count += 1
         
-        time.sleep(0.3)
+        time.sleep(0.2)
         
         if idx % 500 == 0:
             access_token = get_access_token()
