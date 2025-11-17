@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Debug script to inspect conversation details
+Debug script to find actual conversation/comment content
 """
 
 import os
@@ -8,13 +8,12 @@ import requests
 import json
 from datetime import datetime, timedelta
 
-# Configuration from environment variables
+# Configuration
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
 SDP_CLIENT_ID = os.environ.get('SDP_CLIENT_ID')
 SDP_CLIENT_SECRET = os.environ.get('SDP_CLIENT_SECRET')
 SDP_REFRESH_TOKEN = os.environ.get('SDP_REFRESH_TOKEN')
 
-# API Endpoints
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 
@@ -48,91 +47,102 @@ def get_access_token():
     else:
         raise Exception(f"Failed to get access token: {response.status_code}")
 
-def debug_conversation_detail(ticket_id, conversation_id):
-    """Fetch detailed information for a single conversation"""
+def check_ticket_detail(ticket_id):
+    """Check if ticket detail has conversation/comment fields"""
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations/{conversation_id}"
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
     
-    print(f"Fetching conversation detail: {conversation_id}")
-    
-    try:
-        response = requests.get(url, headers=headers)
-        print(f"Status Code: {response.status_code}\n")
-        
-        if response.status_code == 200:
-            data = response.json()
-            print("Full conversation detail:")
-            print(json.dumps(data, indent=2))
-        else:
-            print(f"Failed: {response.text}\n")
-            
-    except Exception as e:
-        print(f"Error: {e}\n")
-
-def debug_notes(ticket_id):
-    """Try fetching notes instead of conversations"""
-    access_token = get_access_token()
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/notes"
-    
-    print(f"\n{'='*60}")
-    print(f"Trying to fetch NOTES for ticket: {ticket_id}")
+    print(f"{'='*60}")
+    print(f"Checking FULL TICKET DETAIL for: {ticket_id}")
     print(f"{'='*60}\n")
     
     try:
         response = requests.get(url, headers=headers)
-        print(f"Status Code: {response.status_code}\n")
         
         if response.status_code == 200:
             data = response.json()
-            notes = data.get('notes', [])
+            ticket = data.get('request', {})
             
-            print(f"Found {len(notes)} notes\n")
+            # List all top-level keys
+            print("All fields in ticket:")
+            for key in sorted(ticket.keys()):
+                print(f"  - {key}")
             
-            for idx, note in enumerate(notes, 1):
-                print(f"--- Note {idx} ---")
-                print(f"Keys: {list(note.keys())}")
-                print(json.dumps(note, indent=2)[:500])
-                print("\n")
+            print("\n" + "="*60)
+            print("Checking for conversation-related fields:")
+            print("="*60 + "\n")
+            
+            # Check specific fields that might contain text
+            fields_to_check = [
+                'description', 'short_description', 'notes', 'comments',
+                'resolution', 'workaround', 'conversation', 'replies',
+                'thread', 'messages', 'interactions', 'history'
+            ]
+            
+            for field in fields_to_check:
+                if field in ticket:
+                    value = ticket[field]
+                    print(f"{field}:")
+                    if isinstance(value, str):
+                        print(f"  {value[:200]}")
+                    else:
+                        print(f"  Type: {type(value)}")
+                        print(f"  Value: {str(value)[:200]}")
+                    print()
+            
+            # Print full raw response (truncated)
+            print("\n" + "="*60)
+            print("Full ticket data (first 2000 chars):")
+            print("="*60)
+            print(json.dumps(ticket, indent=2)[:2000])
+            
         else:
-            print(f"Failed: {response.text}\n")
+            print(f"Failed: {response.text}")
             
     except Exception as e:
-        print(f"Error: {e}\n")
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
-def debug_resolutions(ticket_id):
-    """Try fetching resolutions"""
+def try_replies_endpoint(ticket_id):
+    """Try different possible endpoints for replies/comments"""
     access_token = get_access_token()
     headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/resolutions"
     
-    print(f"\n{'='*60}")
-    print(f"Trying to fetch RESOLUTIONS for ticket: {ticket_id}")
-    print(f"{'='*60}\n")
+    endpoints_to_try = [
+        f"/requests/{ticket_id}/replies",
+        f"/requests/{ticket_id}/comments",
+        f"/requests/{ticket_id}/threads",
+        f"/requests/{ticket_id}/messages",
+        f"/requests/{ticket_id}/history"
+    ]
     
-    try:
-        response = requests.get(url, headers=headers)
-        print(f"Status Code: {response.status_code}\n")
+    print("\n" + "="*60)
+    print("Trying alternative endpoints:")
+    print("="*60 + "\n")
+    
+    for endpoint in endpoints_to_try:
+        url = f"{SDP_API_BASE}{endpoint}"
+        print(f"Trying: {endpoint}")
         
-        if response.status_code == 200:
-            data = response.json()
-            print(json.dumps(data, indent=2))
-        else:
-            print(f"Failed: {response.text}\n")
+        try:
+            response = requests.get(url, headers=headers)
+            print(f"  Status: {response.status_code}")
             
-    except Exception as e:
-        print(f"Error: {e}\n")
+            if response.status_code == 200:
+                data = response.json()
+                print(f"  SUCCESS! Found data:")
+                print(f"  {json.dumps(data, indent=2)[:300]}")
+            else:
+                print(f"  Failed: {response.json().get('response_status', {}).get('messages', [{}])[0].get('message', 'Unknown')}")
+        except Exception as e:
+            print(f"  Error: {e}")
+        
+        print()
 
 if __name__ == "__main__":
     ticket_id = "150534000025071271"
-    conversation_id = "150534000025100105"  # First conversation from previous output
     
-    # Try getting conversation detail
-    debug_conversation_detail(ticket_id, conversation_id)
-    
-    # Try getting notes
-    debug_notes(ticket_id)
-    
-    # Try getting resolutions
-    debug_resolutions(ticket_id)
+    check_ticket_detail(ticket_id)
+    try_replies_endpoint(ticket_id)
