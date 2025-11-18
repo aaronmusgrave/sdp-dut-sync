@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Full Sync - Initial import of all tickets with comprehensive field coverage
-Handles pagination to fetch all tickets from ServiceDesk Plus
+Incremental Sync - Runs every 15 minutes to capture new/updated tickets
+Only syncs tickets created or modified since last run
 """
 
 import os
@@ -21,14 +21,13 @@ DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
 DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk-tickets')
 
+# Sync window - look back 30 minutes to ensure we don't miss anything
+SYNC_WINDOW_MINUTES = int(os.environ.get('SYNC_WINDOW_MINUTES', '30'))
+
 # API Endpoints
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
-
-# Pagination settings
-TICKETS_PER_PAGE = 100
-MAX_TICKETS = 10000
 
 # Token cache
 _access_token = None
@@ -65,16 +64,26 @@ def get_access_token():
     else:
         raise Exception(f"Failed to get access token: {response.status_code}")
 
-def fetch_all_tickets():
-    """Fetch all tickets with pagination using start_index"""
+def get_modified_since_timestamp():
+    """Calculate the timestamp for modified_since filter"""
+    cutoff_time = datetime.now() - timedelta(minutes=SYNC_WINDOW_MINUTES)
+    timestamp_ms = int(cutoff_time.timestamp() * 1000)
+    return timestamp_ms
+
+def fetch_modified_tickets():
+    """Fetch tickets modified since last sync"""
     access_token = get_access_token()
     all_tickets = []
     seen_ticket_ids = set()
     start_index = 1
     
-    print(f"Fetching all tickets with pagination (batches of {TICKETS_PER_PAGE})...")
+    modified_since = get_modified_since_timestamp()
+    cutoff_datetime = datetime.fromtimestamp(modified_since / 1000)
     
-    while len(all_tickets) < MAX_TICKETS:
+    print(f"Fetching tickets modified since: {cutoff_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"(Last {SYNC_WINDOW_MINUTES} minutes)")
+    
+    while True:
         headers = {
             'Authorization': f'Zoho-oauthtoken {access_token}',
             'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -82,10 +91,17 @@ def fetch_all_tickets():
         
         list_info = {
             "list_info": {
-                "row_count": TICKETS_PER_PAGE,
+                "row_count": 100,
                 "start_index": start_index,
-                "sort_field": "created_time",
-                "sort_order": "desc"
+                "sort_field": "last_updated_time",
+                "sort_order": "desc",
+                "search_criteria": [
+                    {
+                        "field": "last_updated_time",
+                        "condition": "greater than",
+                        "value": modified_since
+                    }
+                ]
             }
         }
         
@@ -103,49 +119,34 @@ def fetch_all_tickets():
                 tickets = result.get('requests', [])
                 
                 if not tickets:
-                    print(f"  No more tickets. Total: {len(all_tickets)}")
+                    if len(all_tickets) == 0:
+                        print(f"  No modified tickets found")
                     break
                 
-                if tickets:
-                    first_created = tickets[0].get('created_time', {})
-                    last_created = tickets[-1].get('created_time', {})
-                    first_date = first_created.get('display_value', 'Unknown') if isinstance(first_created, dict) else 'Unknown'
-                    last_date = last_created.get('display_value', 'Unknown') if isinstance(last_created, dict) else 'Unknown'
-                    batch_end = start_index + len(tickets) - 1
-                    print(f"  Batch {start_index}-{batch_end}: {len(tickets)} tickets ({first_date} to {last_date})")
-                
                 new_tickets = []
-                duplicate_count = 0
-                
                 for ticket in tickets:
                     ticket_id = ticket.get('id')
                     if ticket_id not in seen_ticket_ids:
                         new_tickets.append(ticket)
                         seen_ticket_ids.add(ticket_id)
-                    else:
-                        duplicate_count += 1
                 
-                if duplicate_count > 0:
-                    print(f"    Warning: {duplicate_count} duplicates")
+                if new_tickets:
+                    print(f"  Found {len(new_tickets)} new tickets (batch {start_index})")
                 
                 all_tickets.extend(new_tickets)
                 
                 response_list_info = result.get('list_info', {})
                 has_more = response_list_info.get('has_more_rows', False)
                 
-                print(f"    Total: {len(all_tickets)}, Has more: {has_more}")
-                
-                if not has_more:
-                    print(f"  Reached end. Total: {len(all_tickets)}")
+                if not has_more or len(new_tickets) == 0:
                     break
                 
-                if len(new_tickets) == 0:
-                    print(f"  No new tickets. Total: {len(all_tickets)}")
-                    break
+                start_index += 100
+                time.sleep(0.3)
                 
-                start_index += TICKETS_PER_PAGE
-                time.sleep(0.5)
-                
+            elif response.status_code == 400:
+                print("  Search criteria not supported, fetching recent tickets...")
+                return fetch_recent_tickets_fallback()
             else:
                 print(f"  Failed: {response.status_code}")
                 print(f"  Response: {response.text[:500]}")
@@ -157,8 +158,48 @@ def fetch_all_tickets():
             traceback.print_exc()
             break
     
-    print(f"\n  ✓ Fetched {len(all_tickets)} unique tickets")
+    if all_tickets:
+        print(f"  ✓ Found {len(all_tickets)} modified tickets")
+    
     return all_tickets
+
+def fetch_recent_tickets_fallback():
+    """Fallback: fetch most recent tickets without filter"""
+    access_token = get_access_token()
+    
+    print("  Using fallback: fetching 100 most recent tickets")
+    
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
+    
+    list_info = {
+        "list_info": {
+            "row_count": 100,
+            "start_index": 1,
+            "sort_field": "last_updated_time",
+            "sort_order": "desc"
+        }
+    }
+    
+    params = {
+        'input_data': json.dumps(list_info)
+    }
+    
+    url = f"{SDP_API_BASE}/requests"
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 200:
+            result = response.json()
+            tickets = result.get('requests', [])
+            print(f"  ✓ Fetched {len(tickets)} recent tickets")
+            return tickets
+    except:
+        pass
+    
+    return []
 
 def fetch_ticket_details(ticket_id, access_token):
     """Fetch detailed information for a single ticket"""
@@ -266,7 +307,6 @@ def format_history_timeline(history):
                 prev_val = change.get('previous_value')
                 curr_val = change.get('current_value')
                 
-                # Safely handle None values
                 if prev_val is None:
                     prev = 'Unknown'
                 elif isinstance(prev_val, dict):
@@ -293,7 +333,6 @@ def format_history_timeline(history):
                 prev_val = change.get('previous_value')
                 curr_val = change.get('current_value')
                 
-                # Safely handle None values
                 if prev_val is None:
                     prev = 'Unknown'
                 elif isinstance(prev_val, dict):
@@ -511,7 +550,7 @@ def upload_to_dust(document):
 
 def main():
     print("=" * 60)
-    print(f"FULL SYNC - Starting at {datetime.now()}")
+    print(f"INCREMENTAL SYNC - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
@@ -522,20 +561,17 @@ def main():
         print(f"ERROR: Missing: {', '.join(missing_vars)}")
         return
     
-    print(f"Configuration:")
-    print(f"  SDP Domain: {SDP_DOMAIN}")
-    print(f"  Dust Workspace: {DUST_WORKSPACE_ID}")
-    print(f"  Dust Data Source: {DUST_FOLDER_NAME}")
+    print(f"Sync window: {SYNC_WINDOW_MINUTES} minutes")
     print()
     
-    tickets = fetch_all_tickets()
-    print(f"\n{'='*60}")
-    print(f"Total unique tickets to process: {len(tickets)}")
-    print(f"{'='*60}\n")
+    tickets = fetch_modified_tickets()
     
     if not tickets:
-        print("No tickets to process")
+        print("\n✓ No modified tickets - nothing to sync")
+        print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return
+    
+    print(f"\nProcessing {len(tickets)} modified tickets...\n")
     
     access_token = get_access_token()
     success_count = 0
@@ -543,9 +579,6 @@ def main():
     
     for idx, ticket in enumerate(tickets, 1):
         ticket_id = ticket.get('id')
-        
-        if idx % 50 == 0 or idx == 1:
-            print(f"[{idx}/{len(tickets)}] Processing tickets...")
         
         details = fetch_ticket_details(ticket_id, access_token)
         if not details:
@@ -557,21 +590,16 @@ def main():
         
         if upload_to_dust(document):
             success_count += 1
-            if idx % 50 == 0:
-                print(f"  ✓ {success_count} uploaded, {error_count} errors")
         else:
             error_count += 1
         
-        time.sleep(0.2)
-        
-        if idx % 500 == 0:
-            access_token = get_access_token()
+        time.sleep(0.1)
     
-    print(f"\n{'='*60}")
-    print(f"FULL SYNC COMPLETED")
+    print(f"{'='*60}")
+    print(f"SYNC COMPLETED")
     print(f"  Success: {success_count}/{len(tickets)} tickets")
     print(f"  Errors: {error_count}")
-    print(f"  Finished at: {datetime.now()}")
+    print(f"  Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
