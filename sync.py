@@ -106,7 +106,6 @@ def fetch_all_tickets():
                     print(f"  No more tickets. Total: {len(all_tickets)}")
                     break
                 
-                # Show date range for this batch
                 if tickets:
                     first_created = tickets[0].get('created_time', {})
                     last_created = tickets[-1].get('created_time', {})
@@ -262,18 +261,53 @@ def format_history_timeline(history):
         diff = item.get('diff', [])
         for change in diff:
             field = change.get('field', '')
+            
             if field == 'status':
-                prev = change.get('previous_value', {}).get('name', 'Unknown')
-                curr = change.get('current_value', {}).get('name', 'Unknown')
+                prev_val = change.get('previous_value')
+                curr_val = change.get('current_value')
+                
+                # Safely handle None values
+                if prev_val is None:
+                    prev = 'Unknown'
+                elif isinstance(prev_val, dict):
+                    prev = prev_val.get('name', 'Unknown')
+                else:
+                    prev = str(prev_val)
+                
+                if curr_val is None:
+                    curr = 'Unknown'
+                elif isinstance(curr_val, dict):
+                    curr = curr_val.get('name', 'Unknown')
+                else:
+                    curr = str(curr_val)
+                
                 timeline += f"  Status: {prev} → {curr}\n"
+                
             elif field == 'closure_comments':
                 comments = change.get('current_value', '')
                 if comments:
                     clean_comments = strip_html(comments)
                     timeline += f"  Closure note: {clean_comments}\n"
+                    
             elif field == 'priority':
-                prev = change.get('previous_value', {}).get('name', 'Unknown')
-                curr = change.get('current_value', {}).get('name', 'Unknown')
+                prev_val = change.get('previous_value')
+                curr_val = change.get('current_value')
+                
+                # Safely handle None values
+                if prev_val is None:
+                    prev = 'Unknown'
+                elif isinstance(prev_val, dict):
+                    prev = prev_val.get('name', 'Unknown')
+                else:
+                    prev = str(prev_val)
+                
+                if curr_val is None:
+                    curr = 'Unknown'
+                elif isinstance(curr_val, dict):
+                    curr = curr_val.get('name', 'Unknown')
+                else:
+                    curr = str(curr_val)
+                
                 timeline += f"  Priority: {prev} → {curr}\n"
         
         timeline += "\n"
