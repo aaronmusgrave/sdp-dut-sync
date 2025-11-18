@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-Manually sync the most recent ticket to verify upload works
+Test uploading ticket 15706 to Dust with correct data source name
 """
 
 import os
 import requests
 import json
-from datetime import datetime, timedelta
 import time
-import re
-from html import unescape
 
 # Config
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
@@ -18,7 +15,7 @@ SDP_CLIENT_SECRET = os.environ.get('SDP_CLIENT_SECRET')
 SDP_REFRESH_TOKEN = os.environ.get('SDP_REFRESH_TOKEN')
 DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
-DUST_FOLDER_NAME = 'servicedesk-tickets'
+DUST_FOLDER_NAME = os.environ.get('DUST_FOLDER_NAME', 'servicedesk')  # Fixed!
 
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
@@ -89,6 +86,7 @@ Test document to verify upload.
     print("="*60)
     print("UPLOADING TEST DOCUMENT TO DUST")
     print("="*60)
+    print(f"Data Source: {DUST_FOLDER_NAME}")
     print(f"Document ID: {document['document_id']}")
     print(f"Tags: {document['tags']}")
     print()
@@ -106,7 +104,7 @@ Test document to verify upload.
     dust_response = requests.post(dust_url, headers=dust_headers, json=document)
     
     print(f"Status: {dust_response.status_code}")
-    print(f"Response: {dust_response.text}")
+    print(f"Response: {dust_response.text[:500]}")
     
     if dust_response.status_code in [200, 201]:
         print("\n✓ Upload successful!")
@@ -118,11 +116,19 @@ Test document to verify upload.
         verify_response = requests.get(dust_url, headers=dust_headers)
         
         if verify_response.status_code == 200:
-            print("✓ Document verified in Dust!")
+            print("\n✓ Document verified in Dust!")
             doc = verify_response.json().get('document', {})
+            print(f"  Document ID: {doc.get('document_id')}")
             print(f"  Tags: {doc.get('tags', [])}")
+            print(f"  Timestamp: {doc.get('timestamp')}")
+            
+            print("\n✓✓ SUCCESS! The ticket is now in Dust with correct tags.")
+            print("\nNow try asking Dust:")
+            print('  "Show me all tickets with status open"')
+            print('  "Find tickets tagged status:open"')
         else:
-            print(f"⚠️  Could not verify: {verify_response.status_code}")
+            print(f"\n⚠️  Could not verify: {verify_response.status_code}")
+            print(verify_response.text[:500])
     else:
         print("\n✗ Upload failed!")
         print(f"Error: {dust_response.text}")
