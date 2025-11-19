@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch a specific notification to see if it has text content
+Test if individual notes contain conversation text
 """
 
 import os
@@ -25,31 +25,89 @@ def get_access_token():
     response = requests.post(ZOHO_TOKEN_URL, data=payload)
     return response.json()['access_token']
 
-def test_specific_notification():
+def find_ticket_with_notes():
+    """Find a ticket that has notes"""
     access_token = get_access_token()
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
     
-    ticket_id = "150534000025071271"
+    # Get recent tickets
+    list_info = {"list_info": {"row_count": 50, "start_index": 1, "sort_field": "created_time", "sort_order": "desc"}}
+    params = {'input_data': json.dumps(list_info)}
+    url = f"{SDP_API_BASE}/requests"
     
-    # First get list of notifications
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications"
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, params=params)
     
     if response.status_code == 200:
-        data = response.json()
-        notifications = data.get('notifications', [])
+        tickets = response.json().get('requests', [])
         
-        print(f"Found {len(notifications)} notifications\n")
+        print("Checking recent tickets for notes...\n")
         
-        # Try to get details for first few notifications
-        for idx, notif in enumerate(notifications[:3], 1):
-            notif_id = notif.get('id')
-            notif_type = notif.get('type', 'Unknown')
+        for ticket in tickets[:20]:
+            ticket_id = ticket.get('id')
             
-            print(f"{'='*60}")
-            print(f"Notification {idx} - Type: {notif_type}")
-            print(f"ID: {notif_id}")
-            print(f"{'='*60}\n")
+            # Check if ticket has notes
+            notes_url = f"{SDP_API_BASE}/requests/{ticket_id}/notes"
+            notes_response = requests.get(notes_url, headers={'Authorization': f'Zoho-oauthtoken {access_token}'})
             
-            # Get specific notification details
-            detail
+            if notes_response.status_code == 200:
+                notes_data = notes_response.json()
+                notes = notes_data.get('notes', [])
+                
+                if notes:
+                    print(f"{'='*60}")
+                    print(f"✓ Found ticket with {len(notes)} notes!")
+                    print(f"Ticket ID: {ticket_id}")
+                    print(f"{'='*60}\n")
+                    
+                    # Get details of first note
+                    first_note = notes[0]
+                    note_id = first_note.get('id')
+                    
+                    print("List view of first note:")
+                    print(json.dumps(first_note, indent=2)[:500])
+                    print("\n")
+                    
+                    # Get detailed view of note
+                    if note_id:
+                        detail_url = f"{SDP_API_BASE}/requests/{ticket_id}/notes/{note_id}"
+                        detail_response = requests.get(detail_url, headers={'Authorization': f'Zoho-oauthtoken {access_token}'})
+                        
+                        if detail_response.status_code == 200:
+                            detail_data = detail_response.json()
+                            note_detail = detail_data.get('note', {})
+                            
+                            print("="*60)
+                            print("DETAILED NOTE VIEW:")
+                            print("="*60)
+                            print(json.dumps(note_detail, indent=2))
+                            print("\n")
+                            
+                            # Check for text fields
+                            text_fields = ['description', 'text', 'content', 'body', 'message', 
+                                         'note_text', 'comment', 'reply', 'html', 'plain_text']
+                            
+                            print("Checking for text content:")
+                            found_text = False
+                            for field in text_fields:
+                                if field in note_detail:
+                                    value = note_detail[field]
+                                    if value:
+                                        print(f"✓✓✓ Found '{field}':")
+                                        print(f"{str(value)[:500]}")
+                                        found_text = True
+                            
+                            if not found_text:
+                                print("✗ No text content found in note")
+                            
+                            return  # Stop after finding first ticket with notes
+                        else:
+                            print(f"Failed to get note details: {detail_response.status_code}")
+                            print(detail_response.text[:500])
+        
+        print("\n✗ No tickets with notes found in recent 20 tickets")
+
+if __name__ == "__main__":
+    find_ticket_with_notes()
