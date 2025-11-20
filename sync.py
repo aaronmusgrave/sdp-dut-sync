@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Full Structured Sync with Conversations - WORKING VERSION
+Structured Sync WITHOUT Conversations - Fast & Queryable
+Exports tickets as structured fields for database-like queries
 """
 
 import os
@@ -205,6 +206,14 @@ def safe_get_display_value(obj, default=''):
         return obj.get('display_value', default)
     return default
 
+def safe_get_value(obj, default=None):
+    """Get the value field from a dict or return the object"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get('value', default)
+    return obj
+
 def get_display_id(details):
     """Extract the display ID"""
     if 'display_id' in details:
@@ -215,51 +224,173 @@ def get_display_id(details):
     
     return str(details.get('id', 'Unknown'))
 
-def format_ticket_for_dust(ticket, details):
-    """Format ticket data into a simple document for Dust"""
+def format_ticket_structured(ticket, details):
+    """Format ticket as structured fields for Dust (without conversations)"""
     
     try:
+        # Extract all fields
+        internal_id = ticket.get('id')
+        display_id = get_display_id(details)
         subject = details.get('subject', ticket.get('subject', 'No Subject'))
+        
+        # Status and Priority
         status = safe_get_name(details.get('status'))
         priority = safe_get_name(details.get('priority'))
-        requester = safe_get_name(details.get('requester'))
-        technician = safe_get_name(details.get('technician'), 'Unassigned')
-        display_id = get_display_id(details)
         
-        created_time = safe_get_display_value(details.get('created_time'))
+        # People
+        requester_obj = details.get('requester', {})
+        requester_name = safe_get_name(requester_obj)
+        requester_email = requester_obj.get('email_id', '') if isinstance(requester_obj, dict) else ''
+        
+        technician_obj = details.get('technician', {})
+        technician_name = safe_get_name(technician_obj, 'Unassigned')
+        technician_email = technician_obj.get('email_id', '') if isinstance(technician_obj, dict) else ''
+        
+        # Classification
         category = safe_get_name(details.get('category'), 'Uncategorized')
-        group = safe_get_name(details.get('group'), 'Unassigned')
+        subcategory = safe_get_name(details.get('subcategory'), 'None')
+        service_category = safe_get_name(details.get('service_category'), 'None')
         
+        group = safe_get_name(details.get('group'), 'Unassigned')
+        site = safe_get_name(details.get('site'), 'No site')
+        
+        impact = safe_get_name(details.get('impact'), 'Not specified')
+        urgency = safe_get_name(details.get('urgency'), 'Not specified')
+        
+        # Type and SLA
+        request_type = safe_get_name(details.get('request_type'), 'Incident')
+        sla = safe_get_name(details.get('sla'), 'No SLA')
+        
+        # Timestamps (in milliseconds)
+        created_time = safe_get_value(details.get('created_time'))
+        due_by_time = safe_get_value(details.get('due_by_time'))
+        resolved_time = safe_get_value(details.get('resolved_time'))
+        completed_time = safe_get_value(details.get('completed_time'))
+        last_updated_time = safe_get_value(details.get('last_updated_time'))
+        
+        # Display timestamps
+        created_time_display = safe_get_display_value(details.get('created_time'))
+        due_by_time_display = safe_get_display_value(details.get('due_by_time'), 'Not set')
+        resolved_time_display = safe_get_display_value(details.get('resolved_time'), 'Not resolved')
+        completed_time_display = safe_get_display_value(details.get('completed_time'), 'Not completed')
+        
+        # Flags
+        is_overdue = details.get('is_overdue', False)
+        is_escalated = details.get('is_escalated', False)
+        is_reopened = details.get('is_reopened', False)
+        is_service_request = details.get('is_service_request', False)
+        has_attachments = details.get('has_attachments', False)
+        
+        # Description and Resolution
         raw_description = details.get('description', '')
         clean_description = strip_html(raw_description)
         
-        is_overdue = details.get('is_overdue', False)
-        is_escalated = details.get('is_escalated', False)
+        resolution_obj = details.get('resolution')
+        resolution_text = ''
+        if resolution_obj and isinstance(resolution_obj, dict):
+            resolution_content = resolution_obj.get('content', '')
+            if resolution_content:
+                resolution_text = strip_html(resolution_content)
         
-        internal_id = ticket.get('id')
+        # Tags
+        tags_list = []
+        for tag in details.get('tags', []):
+            if isinstance(tag, dict):
+                tag_name = tag.get('name', '')
+                if tag_name:
+                    tags_list.append(tag_name)
         
-        document_text = f"""# {subject}
-
-**Ticket ID:** {display_id}
-**Status:** {status}
-**Priority:** {priority}
-
-**Requester:** {requester}
-**Technician:** {technician}
-**Group:** {group}
-**Category:** {category}
-
-**Created:** {created_time}
-
-## Description
-
-{clean_description}
-"""
+        # Assets
+        assets_list = []
+        for asset in details.get('assets', []):
+            if isinstance(asset, dict):
+                asset_name = asset.get('name', '')
+                if asset_name:
+                    assets_list.append(asset_name)
         
+        # Custom fields (UDF)
+        custom_fields = {}
+        udf_fields = details.get('udf_fields', {})
+        if udf_fields and isinstance(udf_fields, dict):
+            for key, value in udf_fields.items():
+                if value:
+                    custom_fields[key] = value
+        
+        # Email CC
+        email_cc = details.get('email_cc', [])
+        
+        # Create structured document
+        structured_data = {
+            # Identifiers
+            "ticket_id": display_id,
+            "internal_id": internal_id,
+            "subject": subject,
+            
+            # Status
+            "status": status,
+            "priority": priority,
+            "request_type": request_type,
+            
+            # People
+            "requester_name": requester_name,
+            "requester_email": requester_email,
+            "technician_name": technician_name,
+            "technician_email": technician_email,
+            "group": group,
+            "site": site,
+            
+            # Classification
+            "category": category,
+            "subcategory": subcategory,
+            "service_category": service_category,
+            "impact": impact,
+            "urgency": urgency,
+            
+            # Timestamps (milliseconds for sorting/filtering)
+            "created_time_ms": created_time,
+            "due_by_time_ms": due_by_time,
+            "resolved_time_ms": resolved_time,
+            "completed_time_ms": completed_time,
+            "last_updated_time_ms": last_updated_time,
+            
+            # Display timestamps (human-readable)
+            "created_time": created_time_display,
+            "due_by_time": due_by_time_display,
+            "resolved_time": resolved_time_display,
+            "completed_time": completed_time_display,
+            
+            # SLA
+            "sla": sla,
+            
+            # Flags
+            "is_overdue": is_overdue,
+            "is_escalated": is_escalated,
+            "is_reopened": is_reopened,
+            "is_service_request": is_service_request,
+            "has_attachments": has_attachments,
+            
+            # Content
+            "description": clean_description,
+            "resolution": resolution_text,
+            
+            # Arrays
+            "tags": tags_list,
+            "assets": assets_list,
+            "email_cc": email_cc,
+            
+            # Custom fields
+            "custom_fields": custom_fields,
+            
+            # Source
+            "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{internal_id}"
+        }
+        
+        # Create Dust tags for filtering
         dust_tags = [
             f"status:{status.lower().replace(' ', '-')}",
             f"priority:{priority.lower().replace(' ', '-')}",
             f"ticket-id:{display_id}",
+            f"type:{request_type.lower().replace(' ', '-')}",
             f"category:{category.lower().replace(' ', '-')}",
             f"group:{group.lower().replace(' ', '-')}",
         ]
@@ -268,14 +399,54 @@ def format_ticket_for_dust(ticket, details):
             dust_tags.append('overdue')
         if is_escalated:
             dust_tags.append('escalated')
+        if is_reopened:
+            dust_tags.append('reopened')
+        if is_service_request:
+            dust_tags.append('service-request')
+        if has_attachments:
+            dust_tags.append('has-attachments')
+        
+        # Create readable text version for search
+        text_content = f"""# {subject}
+
+**Ticket ID:** {display_id}
+**Status:** {status} | **Priority:** {priority}
+**Type:** {request_type}
+
+## Assignment
+**Requester:** {requester_name} ({requester_email})
+**Technician:** {technician_name}
+**Group:** {group}
+
+## Classification
+**Category:** {category}
+**Subcategory:** {subcategory}
+**Impact:** {impact} | **Urgency:** {urgency}
+
+## Timeline
+**Created:** {created_time_display}
+**Due By:** {due_by_time_display}
+**Resolved:** {resolved_time_display}
+
+## Description
+{clean_description}
+"""
+
+        if resolution_text:
+            text_content += f"\n## Resolution\n{resolution_text}\n"
+        
+        # Timestamp for Dust (use last updated)
+        timestamp = last_updated_time if last_updated_time else int(time.time() * 1000)
         
         return {
             "document_id": f"ticket-{internal_id}",
-            "timestamp": int(time.time() * 1000),
+            "timestamp": timestamp,
             "tags": dust_tags,
             "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{internal_id}",
-            "text": document_text
+            "text": text_content,
+            "structured_data": structured_data  # ← KEY: Structured fields!
         }
+        
     except Exception as e:
         print(f"      Error formatting ticket: {e}")
         return None
@@ -299,21 +470,21 @@ def upload_to_dust(document):
                 time.sleep(2)
                 continue
             else:
-                print(f"      Upload failed: {response.status_code} - {response.text[:100]}")
+                print(f"      Upload failed: {response.status_code}")
             return False
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(2)
                 continue
             else:
-                print(f"      Upload exception: {e}")
+                print(f"      Upload exception: {str(e)[:50]}")
             return False
     
     return False
 
 def main():
     print("=" * 60)
-    print(f"FULL SYNC - Starting at {datetime.now()}")
+    print(f"STRUCTURED SYNC (No Conversations) - Starting at {datetime.now()}")
     print("=" * 60)
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
@@ -328,6 +499,7 @@ def main():
     print(f"  SDP Domain: {SDP_DOMAIN}")
     print(f"  Dust Workspace: {DUST_WORKSPACE_ID}")
     print(f"  Dust Data Source: {DUST_FOLDER_NAME}")
+    print(f"  Format: Structured fields + searchable text (no conversations)")
     print()
     
     tickets = fetch_all_tickets()
@@ -353,11 +525,11 @@ def main():
             details = fetch_ticket_details(ticket_id, access_token)
             if not details:
                 error_count += 1
-                if idx <= 10:  # Show first 10 errors
+                if idx <= 10:
                     print(f"    ✗ Failed to get details for {ticket_id}")
                 continue
             
-            document = format_ticket_for_dust(ticket, details)
+            document = format_ticket_structured(ticket, details)
             
             if document and upload_to_dust(document):
                 success_count += 1
@@ -365,7 +537,7 @@ def main():
                     print(f"  ✓ {success_count} uploaded, {error_count} errors")
             else:
                 error_count += 1
-                if idx <= 10:  # Show first 10 errors
+                if idx <= 10:
                     print(f"    ✗ Failed to upload {ticket_id}")
             
         except Exception as e:
@@ -383,7 +555,7 @@ def main():
             print(f"     Time: {datetime.now().strftime('%H:%M:%S')}\n")
     
     print(f"\n{'='*60}")
-    print(f"FULL SYNC COMPLETED")
+    print(f"STRUCTURED SYNC COMPLETED")
     print(f"  Success: {success_count}/{len(tickets)} tickets")
     print(f"  Errors: {error_count}")
     print(f"  Success rate: {(success_count/len(tickets)*100):.1f}%")
