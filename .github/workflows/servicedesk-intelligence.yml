@@ -42,7 +42,7 @@ jobs:
         DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
         DUST_FOLDER_NAME: 'servicedesk'
       run: |
-        python scripts/sync_servicedesk_intelligence.py
+        python -u scripts/sync_servicedesk_intelligence.py
     
     - name: 📊 Upload analytics report
       if: success()
