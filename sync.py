@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Full Sync - With retry logic and rate limiting
-Fixed syntax error in get_display_id function
+Structured Sync - Export tickets to Dust as structured fields WITH conversations
+This makes data queryable like a database with full conversation history
 """
 
 import os
@@ -141,19 +141,14 @@ def fetch_with_retry(url, headers, max_retries=MAX_RETRIES, timeout=30):
             if response.status_code == 200:
                 return response
             elif response.status_code == 401:
-                # Token expired, refresh and retry
-                print(f"      Token expired, refreshing...")
                 access_token = get_access_token(force_refresh=True)
                 headers['Authorization'] = f'Zoho-oauthtoken {access_token}'
                 continue
             elif response.status_code == 429:
-                # Rate limited, wait longer
                 wait_time = (attempt + 1) * 5
-                print(f"      Rate limited, waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             else:
-                # Other error, retry with backoff
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 2
                     time.sleep(wait_time)
@@ -162,7 +157,6 @@ def fetch_with_retry(url, headers, max_retries=MAX_RETRIES, timeout=30):
                 
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
-                print(f"      Timeout, retrying (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(2)
                 continue
             return None
@@ -197,9 +191,58 @@ def fetch_ticket_history(ticket_id, access_token):
     return []
 
 def fetch_ticket_conversations(ticket_id, access_token):
-    """Fetch ticket conversations - DISABLED for speed"""
-    # Skip conversations for now to get all tickets synced quickly
-    return []
+    """Fetch ticket conversations with full text content - with robust error handling"""
+    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+    
+    url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications"
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return []
+        
+        notifications = response.json().get('notifications', [])
+        conversations = []
+        
+        # Limit to first 20 notifications to avoid timeout
+        for notif in notifications[:20]:
+            notif_id = notif.get('id')
+            notif_type = notif.get('type', '')
+            
+            # Focus on actual conversations/replies
+            if any(keyword in notif_type.lower() for keyword in ['conversation', 'reply', 'reqreply', 'technician']):
+                try:
+                    detail_url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications/{notif_id}"
+                    detail_response = requests.get(detail_url, headers=headers, timeout=10)
+                    
+                    if detail_response.status_code == 200:
+                        detail_data = detail_response.json()
+                        notification = detail_data.get('notification', {})
+                        
+                        description = notification.get('description', '')
+                        if description and len(description.strip()) > 0:
+                            sender = notification.get('sender', {})
+                            time_obj = notification.get('time', {})
+                            
+                            conversations.append({
+                                'id': notif_id,
+                                'type': notif_type,
+                                'sender': sender.get('name', 'Unknown'),
+                                'sender_email': sender.get('email_id', ''),
+                                'time': time_obj.get('display_value', 'Unknown'),
+                                'time_ms': time_obj.get('value'),
+                                'description': description,
+                                'is_public': notification.get('is_public', True)
+                            })
+                    
+                    time.sleep(0.1)
+                    
+                except Exception as e:
+                    continue
+        
+        return conversations
+        
+    except Exception as e:
+        return []
 
 def strip_html(html_text):
     """Remove HTML tags and decode HTML entities"""
@@ -228,19 +271,16 @@ def safe_get_display_value(obj, default=''):
         return obj.get('display_value', default)
     return default
 
-def parse_sdp_timestamp(timestamp_obj):
-    """Parse ServiceDesk Plus timestamp to milliseconds"""
-    if not timestamp_obj:
-        return int(time.time() * 1000)
-    
-    if isinstance(timestamp_obj, dict):
-        if 'value' in timestamp_obj:
-            return int(timestamp_obj['value'])
-    
-    return int(time.time() * 1000)
+def safe_get_value(obj, default=None):
+    """Get the value field from a dict or return the object"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get('value', default)
+    return obj
 
 def get_display_id(details):
-    """Extract the display ID (short ticket number) from ticket details"""
+    """Extract the display ID"""
     if 'display_id' in details:
         display_id = details['display_id']
         if isinstance(display_id, dict):
@@ -249,111 +289,29 @@ def get_display_id(details):
     
     return str(details.get('id', 'Unknown'))
 
-def format_conversations(conversations):
-    """Format conversations - currently empty"""
-    return ""
-
-def format_history_timeline(history):
-    """Format history into readable activity timeline"""
-    if not history:
-        return ""
-    
-    timeline = "\n\n## Activity Timeline\n\n"
-    
-    for item in history:
-        try:
-            by = item.get('by', {})
-            name = by.get('name', 'Unknown')
-            time_obj = item.get('time', {})
-            time_str = safe_get_display_value(time_obj)
-            operation = item.get('operation', 'unknown')
-            description = item.get('description', '')
-            
-            op_display = {
-                'add': 'Created',
-                'edit': 'Updated',
-                'reply': 'Replied',
-                'close': 'Closed',
-                'reopen': 'Reopened'
-            }.get(operation, operation.title())
-            
-            timeline += f"**{time_str}** - {name} - {op_display}\n"
-            
-            if description and description != 'null':
-                timeline += f"  _{description}_\n"
-            
-            diff = item.get('diff', [])
-            for change in diff:
-                field = change.get('field', '')
-                
-                if field == 'status':
-                    prev_val = change.get('previous_value')
-                    curr_val = change.get('current_value')
-                    
-                    if prev_val is None:
-                        prev = 'Unknown'
-                    elif isinstance(prev_val, dict):
-                        prev = prev_val.get('name', 'Unknown')
-                    else:
-                        prev = str(prev_val)
-                    
-                    if curr_val is None:
-                        curr = 'Unknown'
-                    elif isinstance(curr_val, dict):
-                        curr = curr_val.get('name', 'Unknown')
-                    else:
-                        curr = str(curr_val)
-                    
-                    timeline += f"  Status: {prev} → {curr}\n"
-                    
-                elif field == 'closure_comments':
-                    comments = change.get('current_value', '')
-                    if comments:
-                        clean_comments = strip_html(comments)
-                        timeline += f"  Closure note: {clean_comments}\n"
-                        
-                elif field == 'priority':
-                    prev_val = change.get('previous_value')
-                    curr_val = change.get('current_value')
-                    
-                    if prev_val is None:
-                        prev = 'Unknown'
-                    elif isinstance(prev_val, dict):
-                        prev = prev_val.get('name', 'Unknown')
-                    else:
-                        prev = str(prev_val)
-                    
-                    if curr_val is None:
-                        curr = 'Unknown'
-                    elif isinstance(curr_val, dict):
-                        curr = curr_val.get('name', 'Unknown')
-                    else:
-                        curr = str(curr_val)
-                    
-                    timeline += f"  Priority: {prev} → {curr}\n"
-            
-            timeline += "\n"
-        except Exception as e:
-            continue
-    
-    return timeline
-
-def format_ticket_for_dust(ticket, details, history, conversations):
-    """Format ticket data into a document for Dust"""
+def format_ticket_structured(ticket, details, history, conversations):
+    """Format ticket as structured fields for Dust with conversations"""
     
     try:
+        # Extract all fields
+        internal_id = ticket.get('id')
+        display_id = get_display_id(details)
         subject = details.get('subject', ticket.get('subject', 'No Subject'))
+        
+        # Status and Priority
         status = safe_get_name(details.get('status'))
         priority = safe_get_name(details.get('priority'))
-        requester = safe_get_name(details.get('requester'))
-        technician = safe_get_name(details.get('technician'), 'Unassigned')
-        display_id = get_display_id(details)
         
-        created_time = safe_get_display_value(details.get('created_time'))
-        due_by_time = safe_get_display_value(details.get('due_by_time'), 'Not set')
-        resolved_time = safe_get_display_value(details.get('resolved_time'), 'Not resolved')
-        completed_time = safe_get_display_value(details.get('completed_time'), 'Not completed')
+        # People
+        requester_obj = details.get('requester', {})
+        requester_name = safe_get_name(requester_obj)
+        requester_email = requester_obj.get('email_id', '') if isinstance(requester_obj, dict) else ''
         
+        technician_obj = details.get('technician', {})
+        technician_name = safe_get_name(technician_obj, 'Unassigned')
+        technician_email = technician_obj.get('email_id', '') if isinstance(technician_obj, dict) else ''
+        
+        # Classification
         category = safe_get_name(details.get('category'), 'Uncategorized')
         subcategory = safe_get_name(details.get('subcategory'), 'None')
         service_category = safe_get_name(details.get('service_category'), 'None')
@@ -364,16 +322,31 @@ def format_ticket_for_dust(ticket, details, history, conversations):
         impact = safe_get_name(details.get('impact'), 'Not specified')
         urgency = safe_get_name(details.get('urgency'), 'Not specified')
         
+        # Type and SLA
+        request_type = safe_get_name(details.get('request_type'), 'Incident')
         sla = safe_get_name(details.get('sla'), 'No SLA')
         
+        # Timestamps (in milliseconds)
+        created_time = safe_get_value(details.get('created_time'))
+        due_by_time = safe_get_value(details.get('due_by_time'))
+        resolved_time = safe_get_value(details.get('resolved_time'))
+        completed_time = safe_get_value(details.get('completed_time'))
+        last_updated_time = safe_get_value(details.get('last_updated_time'))
+        
+        # Display timestamps
+        created_time_display = safe_get_display_value(details.get('created_time'))
+        due_by_time_display = safe_get_display_value(details.get('due_by_time'), 'Not set')
+        resolved_time_display = safe_get_display_value(details.get('resolved_time'), 'Not resolved')
+        completed_time_display = safe_get_display_value(details.get('completed_time'), 'Not completed')
+        
+        # Flags
         is_overdue = details.get('is_overdue', False)
         is_escalated = details.get('is_escalated', False)
         is_reopened = details.get('is_reopened', False)
         is_service_request = details.get('is_service_request', False)
         has_attachments = details.get('has_attachments', False)
         
-        request_type = safe_get_name(details.get('request_type'), 'Incident')
-        
+        # Description and Resolution
         raw_description = details.get('description', '')
         clean_description = strip_html(raw_description)
         
@@ -384,114 +357,155 @@ def format_ticket_for_dust(ticket, details, history, conversations):
             if resolution_content:
                 resolution_text = strip_html(resolution_content)
         
+        # Tags
         tags_list = []
         for tag in details.get('tags', []):
             if isinstance(tag, dict):
                 tag_name = tag.get('name', '')
                 if tag_name:
                     tags_list.append(tag_name)
-        tags_str = ', '.join(tags_list) if tags_list else 'None'
         
+        # Assets
         assets_list = []
         for asset in details.get('assets', []):
             if isinstance(asset, dict):
                 asset_name = asset.get('name', '')
                 if asset_name:
                     assets_list.append(asset_name)
-        assets_str = ', '.join(assets_list) if assets_list else 'None'
         
-        udf_section = ''
+        # Custom fields (UDF)
+        custom_fields = {}
         udf_fields = details.get('udf_fields', {})
         if udf_fields and isinstance(udf_fields, dict):
-            udf_items = []
             for key, value in udf_fields.items():
                 if value:
-                    udf_items.append(f"- **{key}**: {value}")
-            if udf_items:
-                udf_section = f"\n\n## Custom Fields\n\n" + '\n'.join(udf_items)
+                    custom_fields[key] = value
         
+        # Email CC
         email_cc = details.get('email_cc', [])
-        email_cc_str = ', '.join(email_cc) if email_cc else 'None'
         
-        conversations_text = format_conversations(conversations)
-        timeline = format_history_timeline(history)
+        # History summary
+        history_count = len(history) if history else 0
         
-        status_indicators = []
-        if is_overdue:
-            status_indicators.append('⚠️ OVERDUE')
-        if is_escalated:
-            status_indicators.append('🔺 ESCALATED')
-        if is_reopened:
-            status_indicators.append('🔄 REOPENED')
-        if has_attachments:
-            status_indicators.append('📎 Has Attachments')
+        # Process conversations into structured format
+        conversations_structured = []
+        conversations_text = ""
         
-        status_line = ' | '.join(status_indicators) if status_indicators else ''
+        if conversations:
+            conversations_text = "\n\n## Conversations & Replies\n\n"
+            
+            for idx, conv in enumerate(conversations, 1):
+                try:
+                    sender = conv.get('sender', 'Unknown')
+                    sender_email = conv.get('sender_email', '')
+                    time_str = conv.get('time', 'Unknown time')
+                    time_ms = conv.get('time_ms')
+                    conv_type = conv.get('type', 'Unknown')
+                    description = conv.get('description', '')
+                    is_public = conv.get('is_public', True)
+                    
+                    clean_text = strip_html(description)
+                    
+                    if len(clean_text.strip()) < 10:
+                        continue
+                    
+                    # Add to structured array
+                    conversations_structured.append({
+                        'sender': sender,
+                        'sender_email': sender_email,
+                        'time': time_str,
+                        'time_ms': time_ms,
+                        'type': conv_type,
+                        'is_public': is_public,
+                        'text': clean_text
+                    })
+                    
+                    # Add to text version
+                    visibility = "Public" if is_public else "Private"
+                    conversations_text += f"### Conversation {idx}\n"
+                    conversations_text += f"**From:** {sender}\n"
+                    conversations_text += f"**Time:** {time_str}\n"
+                    conversations_text += f"**Type:** {conv_type} ({visibility})\n\n"
+                    conversations_text += f"{clean_text}\n\n"
+                    conversations_text += "---\n\n"
+                    
+                except Exception as e:
+                    continue
         
-        document_text = f"""# {subject}
-
-{status_line}
-
-## Ticket Information
-
-**Ticket ID:** {display_id}
-**Type:** {request_type}
-**Status:** {status}
-**Priority:** {priority}
-
-## Classification
-
-**Category:** {category}
-**Subcategory:** {subcategory}
-**Service Category:** {service_category}
-**Impact:** {impact}
-**Urgency:** {urgency}
-
-## Assignment
-
-**Requester:** {requester}
-**Technician:** {technician}
-**Group:** {group}
-**Site:** {site}
-
-## Timeline
-
-**Created:** {created_time}
-**Due By:** {due_by_time}
-**Resolved:** {resolved_time}
-**Completed:** {completed_time}
-
-## SLA
-
-**SLA:** {sla}
-
-## Description
-
-{clean_description}
-"""
-
-        if resolution_text:
-            document_text += f"\n\n## Resolution\n\n{resolution_text}\n"
+        conversation_count = len(conversations_structured)
         
-        document_text += conversations_text
+        # Create structured document
+        structured_data = {
+            # Identifiers
+            "ticket_id": display_id,
+            "internal_id": internal_id,
+            "subject": subject,
+            
+            # Status
+            "status": status,
+            "priority": priority,
+            "request_type": request_type,
+            
+            # People
+            "requester_name": requester_name,
+            "requester_email": requester_email,
+            "technician_name": technician_name,
+            "technician_email": technician_email,
+            "group": group,
+            "site": site,
+            
+            # Classification
+            "category": category,
+            "subcategory": subcategory,
+            "service_category": service_category,
+            "impact": impact,
+            "urgency": urgency,
+            
+            # Timestamps (milliseconds for sorting/filtering)
+            "created_time_ms": created_time,
+            "due_by_time_ms": due_by_time,
+            "resolved_time_ms": resolved_time,
+            "completed_time_ms": completed_time,
+            "last_updated_time_ms": last_updated_time,
+            
+            # Display timestamps (human-readable)
+            "created_time": created_time_display,
+            "due_by_time": due_by_time_display,
+            "resolved_time": resolved_time_display,
+            "completed_time": completed_time_display,
+            
+            # SLA
+            "sla": sla,
+            
+            # Flags
+            "is_overdue": is_overdue,
+            "is_escalated": is_escalated,
+            "is_reopened": is_reopened,
+            "is_service_request": is_service_request,
+            "has_attachments": has_attachments,
+            
+            # Content
+            "description": clean_description,
+            "resolution": resolution_text,
+            
+            # Arrays
+            "tags": tags_list,
+            "assets": assets_list,
+            "email_cc": email_cc,
+            
+            # Custom fields
+            "custom_fields": custom_fields,
+            
+            # Conversations (structured)
+            "conversations": conversations_structured,
+            "conversation_count": conversation_count,
+            
+            # Metadata
+            "history_count": history_count,
+            "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{internal_id}"
+        }
         
-        if assets_str != 'None':
-            document_text += f"\n\n## Related Assets\n\n{assets_str}\n"
-        
-        if tags_str != 'None':
-            document_text += f"\n\n## Tags\n\n{tags_str}\n"
-        
-        if email_cc_str != 'None':
-            document_text += f"\n\n## Email CC\n\n{email_cc_str}\n"
-        
-        document_text += udf_section
-        document_text += timeline
-        
-        last_updated_time = details.get('last_updated_time', {})
-        timestamp = parse_sdp_timestamp(last_updated_time)
-        
-        internal_id = ticket.get('id')
-        
+        # Create Dust tags for filtering
         dust_tags = [
             f"status:{status.lower().replace(' ', '-')}",
             f"priority:{priority.lower().replace(' ', '-')}",
@@ -511,20 +525,55 @@ def format_ticket_for_dust(ticket, details, history, conversations):
             dust_tags.append('service-request')
         if has_attachments:
             dust_tags.append('has-attachments')
-        if conversations:
+        if conversation_count > 0:
             dust_tags.append('has-conversations')
         
-        for tag in tags_list:
-            dust_tags.append(f"custom:{tag.lower().replace(' ', '-')}")
+        # Create readable text version for search
+        text_content = f"""# {subject}
+
+**Ticket ID:** {display_id}
+**Status:** {status} | **Priority:** {priority}
+**Type:** {request_type}
+
+## Assignment
+**Requester:** {requester_name} ({requester_email})
+**Technician:** {technician_name}
+**Group:** {group}
+
+## Classification
+**Category:** {category}
+**Subcategory:** {subcategory}
+**Impact:** {impact} | **Urgency:** {urgency}
+
+## Timeline
+**Created:** {created_time_display}
+**Due By:** {due_by_time_display}
+**Resolved:** {resolved_time_display}
+
+## Description
+{clean_description}
+"""
+
+        if resolution_text:
+            text_content += f"\n## Resolution\n{resolution_text}\n"
+        
+        # Add conversations to text
+        text_content += conversations_text
+        
+        # Timestamp for Dust (use last updated)
+        timestamp = last_updated_time if last_updated_time else int(time.time() * 1000)
         
         return {
             "document_id": f"ticket-{internal_id}",
             "timestamp": timestamp,
             "tags": dust_tags,
             "source_url": f"https://{SDP_DOMAIN}/app/itdesk/ui/requests/{internal_id}",
-            "text": document_text
+            "text": text_content,
+            "structured_data": structured_data
         }
+        
     except Exception as e:
+        print(f"      Error formatting ticket: {e}")
         return None
 
 def upload_to_dust(document):
@@ -556,7 +605,7 @@ def upload_to_dust(document):
 
 def main():
     print("=" * 60)
-    print(f"FULL SYNC - Starting at {datetime.now()}")
+    print(f"STRUCTURED SYNC WITH CONVERSATIONS - Starting at {datetime.now()}")
     print("=" * 60)
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
@@ -571,7 +620,7 @@ def main():
     print(f"  SDP Domain: {SDP_DOMAIN}")
     print(f"  Dust Workspace: {DUST_WORKSPACE_ID}")
     print(f"  Dust Data Source: {DUST_FOLDER_NAME}")
-    print(f"  Conversations: DISABLED (for speed)")
+    print(f"  Format: Structured fields + conversations + searchable text")
     print()
     
     tickets = fetch_all_tickets()
@@ -606,12 +655,12 @@ def main():
             if conversations:
                 conv_count += 1
             
-            document = format_ticket_for_dust(ticket, details, history, conversations)
+            document = format_ticket_structured(ticket, details, history, conversations)
             
             if document and upload_to_dust(document):
                 success_count += 1
                 if idx % 100 == 0:
-                    print(f"  ✓ {success_count} uploaded, {error_count} errors")
+                    print(f"  ✓ {success_count} uploaded, {conv_count} with conversations, {error_count} errors")
             else:
                 error_count += 1
             
@@ -619,16 +668,16 @@ def main():
             error_count += 1
             continue
         
-        time.sleep(0.5)  # Slower rate to avoid hitting limits
+        time.sleep(0.5)
         
         if idx % 250 == 0:
             access_token = get_access_token(force_refresh=True)
             print(f"\n  ℹ️  CHECKPOINT at ticket {idx}/{len(tickets)}")
-            print(f"     Success: {success_count}, Errors: {error_count}")
+            print(f"     Success: {success_count}, Errors: {error_count}, With conversations: {conv_count}")
             print(f"     Time: {datetime.now().strftime('%H:%M:%S')}\n")
     
     print(f"\n{'='*60}")
-    print(f"FULL SYNC COMPLETED")
+    print(f"STRUCTURED SYNC COMPLETED")
     print(f"  Success: {success_count}/{len(tickets)} tickets")
     print(f"  With conversations: {conv_count}")
     print(f"  Errors: {error_count}")
