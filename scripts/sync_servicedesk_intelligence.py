@@ -2,6 +2,7 @@
 """
 ServiceDesk Plus Intelligence Suite - Complete Enhanced Sync
 Phases 1-4: All features including AI insights, patterns, predictions, and recommendations
+VERSION: 1.1 - Fixed timestamp handling
 """
 
 import os
@@ -283,6 +284,15 @@ def safe_get_value(obj, default=None):
     except:
         return default
 
+def safe_int_conversion(value, default=None):
+    """Safely convert any value to int"""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
 def get_display_id(details):
     """Extract the display ID"""
     if 'display_id' in details:
@@ -505,7 +515,7 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
         
         if conversations and len(conversations) > 0:
             first_conv = conversations[-1]
-            first_response_ms = first_conv.get('time_ms')
+            first_response_ms = safe_int_conversion(first_conv.get('time_ms'))
             created_ms = ticket_data.get('created_time_ms')
             if first_response_ms and created_ms:
                 response_hours = (first_response_ms - created_ms) / (1000 * 60 * 60)
@@ -601,18 +611,25 @@ def format_ticket_with_intelligence(ticket, details, conversations):
         latest_conversation_time_ms = None
         
         if conversations:
+            # FIXED: Sort with safe int conversion
             conversations_sorted = sorted(
                 conversations,
-                key=lambda x: x.get('time_ms', 0) or 0,
+                key=lambda x: safe_int_conversion(x.get('time_ms'), 0),
                 reverse=True
             )
             
-            latest_conversation_time_ms = conversations_sorted[0].get('time_ms')
+            # FIXED: Safe conversion of latest conversation timestamp
+            latest_conv_ms_raw = conversations_sorted[0].get('time_ms')
+            latest_conversation_time_ms = safe_int_conversion(latest_conv_ms_raw)
+            
             if latest_conversation_time_ms:
                 days_since_last_activity = (now_ms - latest_conversation_time_ms) / (1000 * 60 * 60 * 24)
             
+            # FIXED: Safe conversion of first response timestamp
             if len(conversations_sorted) > 0 and created_time_ms:
-                first_conv_ms = conversations_sorted[-1].get('time_ms')
+                first_conv_ms_raw = conversations_sorted[-1].get('time_ms')
+                first_conv_ms = safe_int_conversion(first_conv_ms_raw)
+                
                 if first_conv_ms:
                     first_response_time_hours = (first_conv_ms - created_time_ms) / (1000 * 60 * 60)
             
@@ -624,7 +641,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                     sender = conv.get('sender', 'Unknown')
                     sender_email = conv.get('sender_email', '')
                     time_str = conv.get('time', 'Unknown time')
-                    time_ms = conv.get('time_ms')
+                    time_ms = safe_int_conversion(conv.get('time_ms'))
                     conv_type = conv.get('type', 'Unknown')
                     description = conv.get('description', '')
                     is_public = conv.get('is_public', True)
@@ -990,7 +1007,7 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
 - Complexity: {structured_data['complexity_level']}
 - Assigned To: {technician_name}
 - Category: {category}
-- Age: {age_days:.1f} days
+- Age: {age_days:.1f} days if age_days else 'N/A'
 - Conversations: {conversation_count}
 - Keywords: {', '.join(keywords) if keywords else 'None'}
 - Sentiment: {sentiment}
@@ -1102,13 +1119,14 @@ def print_analytics_summary():
 
 def main():
     print("=" * 60)
-    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE - Starting at {datetime.now()}")
+    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v1.1 - Starting at {datetime.now()}")
     print("=" * 60)
     print("✨ Phases 1-4: Complete AI-powered ticket intelligence")
     print("   • Advanced tagging & search")
     print("   • Predictive analytics")
     print("   • Pattern detection")
     print("   • Resolution recommendations")
+    print("   • FIXED: Timestamp handling")
     print()
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
