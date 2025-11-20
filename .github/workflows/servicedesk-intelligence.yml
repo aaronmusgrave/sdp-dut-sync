@@ -1,0 +1,89 @@
+name: ServiceDesk Intelligence Suite
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  
+  workflow_dispatch:
+  
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/sync_servicedesk_intelligence.py'
+      - '.github/workflows/servicedesk-intelligence.yml'
+
+jobs:
+  sync-intelligence:
+    runs-on: ubuntu-latest
+    name: Full Intelligence Sync
+    
+    steps:
+    - name: 📥 Checkout
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: 📦 Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r scripts/requirements.txt
+    
+    - name: 🚀 Run intelligence sync
+      env:
+        SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
+        SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
+        SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
+        SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
+        DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
+        DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+        DUST_FOLDER_NAME: 'servicedesk'
+      run: |
+        python scripts/sync_servicedesk_intelligence.py
+    
+    - name: 📊 Upload analytics report
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: analytics-report
+        path: analytics_report_*.json
+        retention-days: 30
+
+  health-check:
+    runs-on: ubuntu-latest
+    name: Daily Health Check
+    if: github.event.schedule == '0 9 * * *'
+    needs: sync-intelligence
+    
+    steps:
+    - name: 📥 Checkout
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: 📦 Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r scripts/requirements.txt
+    
+    - name: 🏥 Run health check
+      env:
+        DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
+        DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        python scripts/ticket_health_check.py
+    
+    - name: 📤 Upload health report
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: health-report
+        path: health_report_*.md
+        retention-days: 90
