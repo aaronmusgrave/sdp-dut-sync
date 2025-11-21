@@ -2,7 +2,7 @@ name: ServiceDesk Intelligence Suite
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '*/15 * * * *'  # Every 15 minutes (incremental sync)
   
   workflow_dispatch:
   
@@ -16,7 +16,7 @@ on:
 jobs:
   sync-intelligence:
     runs-on: ubuntu-latest
-    name: Full Intelligence Sync
+    name: Incremental Intelligence Sync
     
     steps:
     - name: 📥 Checkout
@@ -32,7 +32,13 @@ jobs:
         pip install --upgrade pip
         pip install -r scripts/requirements.txt
     
-    - name: 🚀 Run intelligence sync
+    - name: 📥 Download last sync timestamp
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        name: last-sync-timestamp
+    
+    - name: 🚀 Run incremental intelligence sync
       env:
         SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
         SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
@@ -42,7 +48,23 @@ jobs:
         DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
         DUST_FOLDER_NAME: 'servicedesk'
       run: |
+        # Load last sync time if it exists
+        if [ -f last_sync_time.txt ]; then
+          export LAST_SYNC_TIME=$(cat last_sync_time.txt)
+          echo "Last sync time loaded: $LAST_SYNC_TIME"
+        else
+          echo "No previous sync time found - will perform full sync"
+        fi
+        
         python -u scripts/sync_servicedesk_intelligence.py
+    
+    - name: 💾 Save last sync timestamp
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: last-sync-timestamp
+        path: last_sync_time.txt
+        retention-days: 7
     
     - name: 📊 Upload analytics report
       if: success()
