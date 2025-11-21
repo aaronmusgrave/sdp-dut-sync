@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus Intelligence Suite - Complete Enhanced Sync
-Phases 1-4: All features including AI insights, patterns, predictions, and recommendations
-VERSION: 1.1 - Fixed timestamp handling
+ServiceDesk Plus Intelligence Suite - Incremental Sync Version
+VERSION: 2.0 - Incremental updates for near real-time intelligence
 """
 
 import os
@@ -80,13 +79,29 @@ def get_access_token(force_refresh=False):
         raise Exception(f"Failed to get access token: {response.status_code}")
 
 def fetch_all_tickets():
-    """Fetch all tickets with pagination"""
+    """Fetch tickets updated since last sync (incremental) or all tickets (initial)"""
     access_token = get_access_token()
     all_tickets = []
     seen_ticket_ids = set()
     start_index = 1
     
-    print(f"Fetching all tickets...")
+    # Check for last sync timestamp
+    last_sync_time = os.environ.get('LAST_SYNC_TIME')
+    
+    if last_sync_time:
+        try:
+            last_sync_ms = int(last_sync_time)
+            last_sync_dt = datetime.fromtimestamp(last_sync_ms / 1000)
+            print(f"📊 Incremental sync: Fetching tickets updated since {last_sync_dt}")
+            incremental = True
+        except:
+            print("⚠️  Invalid last sync time, performing full sync")
+            incremental = False
+    else:
+        print("🔄 No last sync time found - performing initial full sync")
+        incremental = False
+    
+    print(f"Fetching {'updated' if incremental else 'all'} tickets...")
     
     while len(all_tickets) < MAX_TICKETS:
         headers = {
@@ -98,7 +113,7 @@ def fetch_all_tickets():
             "list_info": {
                 "row_count": TICKETS_PER_PAGE,
                 "start_index": start_index,
-                "sort_field": "created_time",
+                "sort_field": "last_updated_time",
                 "sort_order": "desc"
             }
         }
@@ -116,11 +131,37 @@ def fetch_all_tickets():
                 if not tickets:
                     break
                 
-                for ticket in tickets:
-                    ticket_id = ticket.get('id')
-                    if ticket_id not in seen_ticket_ids:
-                        all_tickets.append(ticket)
-                        seen_ticket_ids.add(ticket_id)
+                # For incremental sync, filter and stop when reaching old tickets
+                if incremental:
+                    new_tickets_found = False
+                    for ticket in tickets:
+                        ticket_updated = ticket.get('last_updated_time', {})
+                        ticket_updated_ms = None
+                        
+                        if isinstance(ticket_updated, dict):
+                            ticket_updated_ms = ticket_updated.get('value')
+                        else:
+                            ticket_updated_ms = ticket_updated
+                        
+                        try:
+                            ticket_updated_ms = int(ticket_updated_ms)
+                            if ticket_updated_ms > last_sync_ms:
+                                ticket_id = ticket.get('id')
+                                if ticket_id not in seen_ticket_ids:
+                                    all_tickets.append(ticket)
+                                    seen_ticket_ids.add(ticket_id)
+                                    new_tickets_found = True
+                        except:
+                            continue
+                    
+                    if not new_tickets_found:
+                        break
+                else:
+                    for ticket in tickets:
+                        ticket_id = ticket.get('id')
+                        if ticket_id not in seen_ticket_ids:
+                            all_tickets.append(ticket)
+                            seen_ticket_ids.add(ticket_id)
                 
                 response_list_info = result.get('list_info', {})
                 has_more = response_list_info.get('has_more_rows', False)
@@ -137,7 +178,8 @@ def fetch_all_tickets():
         except Exception as e:
             break
     
-    print(f"✓ Fetched {len(all_tickets)} tickets")
+    sync_type = "incremental" if incremental else "full"
+    print(f"✓ Fetched {len(all_tickets)} tickets ({sync_type} sync)")
     return all_tickets
 
 def fetch_with_retry(url, headers, max_retries=MAX_RETRIES, timeout=30):
@@ -611,21 +653,18 @@ def format_ticket_with_intelligence(ticket, details, conversations):
         latest_conversation_time_ms = None
         
         if conversations:
-            # FIXED: Sort with safe int conversion
             conversations_sorted = sorted(
                 conversations,
                 key=lambda x: safe_int_conversion(x.get('time_ms'), 0),
                 reverse=True
             )
             
-            # FIXED: Safe conversion of latest conversation timestamp
             latest_conv_ms_raw = conversations_sorted[0].get('time_ms')
             latest_conversation_time_ms = safe_int_conversion(latest_conv_ms_raw)
             
             if latest_conversation_time_ms:
                 days_since_last_activity = (now_ms - latest_conversation_time_ms) / (1000 * 60 * 60 * 24)
             
-            # FIXED: Safe conversion of first response timestamp
             if len(conversations_sorted) > 0 and created_time_ms:
                 first_conv_ms_raw = conversations_sorted[-1].get('time_ms')
                 first_conv_ms = safe_int_conversion(first_conv_ms_raw)
@@ -1027,8 +1066,6 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
         
     except Exception as e:
         print(f"      Format error: {str(e)[:100]}")
-        import traceback
-        traceback.print_exc()
         return None
 
 def upload_to_dust(document):
@@ -1119,14 +1156,14 @@ def print_analytics_summary():
 
 def main():
     print("=" * 60)
-    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v1.1 - Starting at {datetime.now()}")
+    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.0 - Starting at {datetime.now()}")
     print("=" * 60)
-    print("✨ Phases 1-4: Complete AI-powered ticket intelligence")
+    print("✨ INCREMENTAL SYNC - Near real-time ticket intelligence")
     print("   • Advanced tagging & search")
     print("   • Predictive analytics")
     print("   • Pattern detection")
     print("   • Resolution recommendations")
-    print("   • FIXED: Timestamp handling")
+    print("   • Fast incremental updates")
     print()
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
@@ -1141,6 +1178,7 @@ def main():
     print(f"\nTotal tickets to process: {len(tickets)}\n")
     
     if not tickets:
+        print("No tickets to process - system is up to date!")
         return
     
     access_token = get_access_token()
@@ -1218,11 +1256,21 @@ def main():
     print_analytics_summary()
     save_analytics_report()
     
+    # Save current timestamp for next incremental sync
+    current_time_ms = int(datetime.now().timestamp() * 1000)
+    print(f"\n📅 Current sync timestamp: {current_time_ms}")
+    print(f"   (Will be used for next incremental sync)")
+    
+    # Save to file for GitHub Actions to read
+    with open('last_sync_time.txt', 'w') as f:
+        f.write(str(current_time_ms))
+    
     print("\n🎯 Enhanced Features Active:")
     print("  ✓ Phase 1: Status tagging, SLA tracking, aging metrics")
     print("  ✓ Phase 2: AI insights, complexity scoring, resolution suggestions")
     print("  ✓ Phase 3: Pattern detection, workload analysis, auto-assignment")
     print("  ✓ Phase 4: Predictive analytics, sentiment analysis, trend forecasting")
+    print("  ✓ INCREMENTAL: Near real-time updates (only changed tickets)")
     print()
 
 if __name__ == "__main__":
