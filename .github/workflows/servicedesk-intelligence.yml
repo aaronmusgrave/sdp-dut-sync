@@ -2,7 +2,7 @@ name: ServiceDesk Intelligence Suite
 
 on:
   schedule:
-   - cron: '*/15 * * * *'  # Every 15 minutes (incremental sync)
+    - cron: '*/15 * * * *'  # Every 15 minutes (incremental sync)
   
   workflow_dispatch:
   
@@ -18,9 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     name: Incremental Intelligence Sync
     
+    permissions:
+      contents: write  # Need write permission to commit timestamp
+    
     steps:
     - name: 📥 Checkout
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for git operations
     
     - name: 🐍 Setup Python
       uses: actions/setup-python@v5
@@ -32,12 +37,6 @@ jobs:
         pip install --upgrade pip
         pip install -r scripts/requirements.txt
     
-    - name: 📥 Download last sync timestamp
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        name: last-sync-timestamp
-    
     - name: 🚀 Run incremental intelligence sync
       env:
         SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
@@ -48,23 +47,51 @@ jobs:
         DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
         DUST_FOLDER_NAME: 'servicedesk'
       run: |
-        # Load last sync time if it exists
+        echo "🔍 Checking for previous sync timestamp..."
+        
+        # Load last sync time from repo file
         if [ -f last_sync_time.txt ]; then
           export LAST_SYNC_TIME=$(cat last_sync_time.txt)
-          echo "Last sync time loaded: $LAST_SYNC_TIME"
+          echo "✅ Last sync time loaded from repo: $LAST_SYNC_TIME"
+          
+          # Calculate human-readable date (optional, for logging)
+          if command -v date &> /dev/null; then
+            SYNC_DATE=$(date -d @$((LAST_SYNC_TIME/1000)) '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "timestamp: $LAST_SYNC_TIME")
+            echo "   📅 Syncing tickets updated since: $SYNC_DATE"
+          fi
         else
-          echo "No previous sync time found - will perform full sync"
+          echo "⚠️  No previous sync timestamp found - will perform initial full sync"
         fi
         
+        echo ""
+        echo "🚀 Starting ServiceDesk Intelligence Sync..."
         python -u scripts/sync_servicedesk_intelligence.py
     
-    - name: 💾 Save last sync timestamp
+    - name: 💾 Commit updated timestamp
       if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: last-sync-timestamp
-        path: last_sync_time.txt
-        retention-days: 7
+      run: |
+        if [ -f last_sync_time.txt ]; then
+          echo "📝 Saving updated sync timestamp to repository..."
+          
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add the timestamp file
+          git add last_sync_time.txt
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "ℹ️  No timestamp changes to commit"
+          else
+            TIMESTAMP=$(cat last_sync_time.txt)
+            git commit -m "Update sync timestamp: $TIMESTAMP [skip ci]"
+            git push
+            echo "✅ Timestamp committed and pushed to repository"
+          fi
+        else
+          echo "⚠️  No timestamp file found to commit"
+        fi
     
     - name: 📊 Upload analytics report
       if: success()
@@ -73,6 +100,7 @@ jobs:
         name: analytics-report
         path: analytics_report_*.json
         retention-days: 30
+        if-no-files-found: ignore
 
   health-check:
     runs-on: ubuntu-latest
