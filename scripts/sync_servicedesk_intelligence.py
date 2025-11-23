@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus Intelligence Suite - Fixed Incremental Sync v2.2
-VERSION: 2.2 - Sorts by last_updated_time, checks minimum 500 tickets
+ServiceDesk Plus Intelligence Suite v2.3
+Enhanced with: SLA breach prediction, requester history, conversation intelligence
 """
 
 import os
@@ -32,19 +32,19 @@ DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUS
 TICKETS_PER_PAGE = 100
 MAX_TICKETS = 10000
 MAX_RETRIES = 3
+MIN_PAGES_TO_CHECK = 5
+MAX_PAGES_TO_CHECK = 20
 
-# Incremental sync settings
-MIN_PAGES_TO_CHECK = 5  # Always check at least 500 tickets
-MAX_PAGES_TO_CHECK = 20  # Maximum 2000 tickets
-
-# Analytics Cache
+# Analytics Cache - ENHANCED with requester tracking
 analytics_cache = {
-    'category_stats': defaultdict(lambda: {'count': 0, 'avg_resolution_days': [], 'overdue_count': 0}),
+    'category_stats': defaultdict(lambda: {'count': 0, 'avg_resolution_days': [], 'overdue_count': 0, 'sla_breach_count': 0}),
     'technician_stats': defaultdict(lambda: {'active': 0, 'total': 0, 'avg_response_hours': []}),
+    'requester_stats': defaultdict(lambda: {'open_count': 0, 'total_count': 0, 'avg_resolution_days': [], 'satisfaction_scores': []}),
     'hourly_distribution': defaultdict(int),
     'daily_distribution': defaultdict(int),
     'issue_keywords': Counter(),
-    'resolution_patterns': defaultdict(list)
+    'resolution_patterns': defaultdict(list),
+    'sla_breach_patterns': defaultdict(lambda: {'total': 0, 'breached': 0})
 }
 
 # Token cache
@@ -106,7 +106,6 @@ def fetch_all_tickets():
     seen_ticket_ids = set()
     start_index = 1
     
-    # Check for last sync timestamp
     last_sync_time = os.environ.get('LAST_SYNC_TIME')
     
     if last_sync_time:
@@ -136,8 +135,6 @@ def fetch_all_tickets():
             'Accept': 'application/vnd.manageengine.sdp.v3+json'
         }
         
-        # CRITICAL FIX: For incremental, sort by last_updated_time to catch ALL updates
-        # For full sync, sort by created_time for consistency
         if incremental:
             sort_field = "last_updated_time"
         else:
@@ -179,16 +176,13 @@ def fetch_all_tickets():
                         
                         seen_ticket_ids.add(ticket_id)
                         
-                        # Get both timestamps
                         created_ms = safe_get_value(ticket.get('created_time'))
                         updated_ms = safe_get_value(ticket.get('last_updated_time'))
                         
-                        # Track oldest UPDATED time in page (since we're sorting by that)
                         if updated_ms:
                             if oldest_updated_in_page is None or updated_ms < oldest_updated_in_page:
                                 oldest_updated_in_page = updated_ms
                         
-                        # Include if created OR updated after last sync
                         should_include = False
                         if created_ms and created_ms > last_sync_ms:
                             should_include = True
@@ -205,9 +199,6 @@ def fetch_all_tickets():
                     else:
                         print(f"  Page {pages_checked}: No new tickets found")
                     
-                    # Stop conditions:
-                    # 1. Must check at least MIN_PAGES_TO_CHECK (500 tickets)
-                    # 2. AND oldest updated ticket in page is before timestamp
                     if pages_checked >= MIN_PAGES_TO_CHECK:
                         if oldest_updated_in_page and oldest_updated_in_page < last_sync_ms:
                             oldest_dt = datetime.fromtimestamp(oldest_updated_in_page / 1000)
@@ -217,7 +208,6 @@ def fetch_all_tickets():
                             break
                 
                 else:
-                    # Full sync: add all tickets
                     for ticket in tickets:
                         ticket_id = ticket.get('id')
                         if ticket_id not in seen_ticket_ids:
@@ -448,6 +438,197 @@ def calculate_complexity_score(ticket_data, conversations, age_days):
     
     return min(score, 10)
 
+def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score, requester_history, category_stats):
+    """
+    ENHANCED: Predict likelihood of SLA breach as percentage
+    Returns: (breach_likelihood_percent, risk_level, contributing_factors)
+    """
+    if hours_until_due is None or hours_until_due < 0:
+        return (100, 'breached', ['Already overdue'])
+    
+    breach_score = 0
+    factors = []
+    
+    # Time pressure factor (40% weight)
+    if hours_until_due < 2:
+        breach_score += 40
+        factors.append('Critical time pressure (<2h)')
+    elif hours_until_due < 4:
+        breach_score += 30
+        factors.append('High time pressure (<4h)')
+    elif hours_until_due < 8:
+        breach_score += 20
+        factors.append('Moderate time pressure (<8h)')
+    elif hours_until_due < 24:
+        breach_score += 10
+        factors.append('Limited time remaining (<24h)')
+    
+    # Complexity factor (25% weight)
+    if complexity_score >= 8:
+        breach_score += 25
+        factors.append('Very high complexity')
+    elif complexity_score >= 6:
+        breach_score += 18
+        factors.append('High complexity')
+    elif complexity_score >= 4:
+        breach_score += 10
+        factors.append('Moderate complexity')
+    
+    # Category historical performance (15% weight)
+    if category_stats and category_stats.get('total') > 10:
+        breach_rate = category_stats.get('breached', 0) / category_stats['total']
+        if breach_rate > 0.3:
+            breach_score += 15
+            factors.append(f'Category has high breach rate ({breach_rate*100:.0f}%)')
+        elif breach_rate > 0.15:
+            breach_score += 8
+            factors.append(f'Category has elevated breach rate ({breach_rate*100:.0f}%)')
+    
+    # Requester factor (10% weight)
+    if requester_history and requester_history.get('open_count', 0) > 5:
+        breach_score += 10
+        factors.append(f"Requester has {requester_history['open_count']} open tickets")
+    
+    # Priority factor (10% weight)
+    priority = ticket_data.get('priority', '').lower()
+    if priority in ['urgent', 'high']:
+        breach_score += 10
+        factors.append(f'{priority.title()} priority ticket')
+    
+    # Determine risk level
+    if breach_score >= 75:
+        risk_level = 'critical'
+    elif breach_score >= 50:
+        risk_level = 'high'
+    elif breach_score >= 25:
+        risk_level = 'moderate'
+    else:
+        risk_level = 'low'
+    
+    return (min(breach_score, 100), risk_level, factors)
+
+def analyze_conversation_intelligence(conversations, created_time_ms, technician_name):
+    """
+    ADVANCED: Deep conversation flow analysis
+    Returns detailed intelligence about communication patterns
+    """
+    if not conversations:
+        return {
+            'total_exchanges': 0,
+            'customer_messages': 0,
+            'technician_messages': 0,
+            'avg_response_time_hours': None,
+            'longest_gap_hours': None,
+            'last_responder': 'none',
+            'awaiting': 'unknown',
+            'response_pattern': 'no-conversation',
+            'unanswered_questions': 0,
+            'engagement_score': 0
+        }
+    
+    # Sort conversations chronologically
+    sorted_convs = sorted(conversations, key=lambda x: safe_int_conversion(x.get('time_ms'), 0))
+    
+    customer_count = 0
+    technician_count = 0
+    response_times = []
+    gaps = []
+    last_responder_type = 'unknown'
+    unanswered_questions = 0
+    
+    prev_time_ms = created_time_ms
+    
+    for idx, conv in enumerate(sorted_convs):
+        sender = conv.get('sender', '')
+        time_ms = safe_int_conversion(conv.get('time_ms'))
+        description = strip_html(conv.get('description', '')).lower()
+        
+        # Classify sender
+        is_technician = (sender == technician_name or 
+                        'technician' in conv.get('type', '').lower() or
+                        any(word in sender.lower() for word in ['tech', 'support', 'admin']))
+        
+        if is_technician:
+            technician_count += 1
+            last_responder_type = 'technician'
+        else:
+            customer_count += 1
+            last_responder_type = 'customer'
+        
+        # Calculate response time from previous message
+        if time_ms and prev_time_ms:
+            gap_hours = (time_ms - prev_time_ms) / (1000 * 60 * 60)
+            if gap_hours > 0:
+                response_times.append(gap_hours)
+                gaps.append(gap_hours)
+        
+        # Detect unanswered questions
+        if '?' in description and not is_technician:
+            # Check if next message is from technician
+            if idx < len(sorted_convs) - 1:
+                next_sender = sorted_convs[idx + 1].get('sender', '')
+                next_is_tech = (next_sender == technician_name or 
+                               'technician' in sorted_convs[idx + 1].get('type', '').lower())
+                if not next_is_tech:
+                    unanswered_questions += 1
+            else:
+                unanswered_questions += 1
+        
+        prev_time_ms = time_ms
+    
+    # Determine who's waiting
+    awaiting = 'unknown'
+    if last_responder_type == 'customer':
+        awaiting = 'technician'
+    elif last_responder_type == 'technician':
+        awaiting = 'customer'
+    
+    # Response pattern analysis
+    total_messages = customer_count + technician_count
+    if total_messages == 0:
+        response_pattern = 'no-conversation'
+    elif technician_count == 0:
+        response_pattern = 'no-tech-response'
+    elif customer_count == 0:
+        response_pattern = 'no-customer-response'
+    elif technician_count > customer_count * 2:
+        response_pattern = 'tech-heavy'
+    elif customer_count > technician_count * 2:
+        response_pattern = 'customer-heavy'
+    else:
+        response_pattern = 'balanced'
+    
+    # Engagement score (0-10)
+    engagement_score = 0
+    if total_messages > 0:
+        engagement_score = min(10, total_messages)
+    if technician_count > 0 and customer_count > 0:
+        engagement_score += 2
+    if response_times and statistics.mean(response_times) < 4:
+        engagement_score += 2
+    engagement_score = min(10, engagement_score)
+    
+    return {
+        'total_exchanges': len(conversations),
+        'customer_messages': customer_count,
+        'technician_messages': technician_count,
+        'avg_response_time_hours': round(statistics.mean(response_times), 1) if response_times else None,
+        'longest_gap_hours': round(max(gaps), 1) if gaps else None,
+        'last_responder': last_responder_type,
+        'awaiting': awaiting,
+        'response_pattern': response_pattern,
+        'unanswered_questions': unanswered_questions,
+        'engagement_score': engagement_score,
+        'message_ratio': round(technician_count / customer_count, 2) if customer_count > 0 else None
+    }
+
+def get_requester_statistics(requester_name, requester_email):
+    """
+    Get or create requester statistics from cache
+    """
+    key = requester_email if requester_email else requester_name
+    return analytics_cache['requester_stats'][key]
+
 def predict_resolution_time(category, priority, complexity_score):
     """Predict resolution time based on historical patterns"""
     
@@ -587,17 +768,27 @@ def analyze_sentiment_risk(conversations):
         return 'neutral', risk_score
 
 def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
-    """Update global analytics cache for pattern detection"""
+    """Update global analytics cache including requester tracking"""
     
     category = ticket_data.get('category', 'Unknown')
     technician = ticket_data.get('technician_name', 'Unassigned')
+    requester_name = ticket_data.get('requester_name', 'Unknown')
+    requester_email = ticket_data.get('requester_email', '')
     
+    # Category stats
     analytics_cache['category_stats'][category]['count'] += 1
     if ticket_data.get('is_overdue'):
         analytics_cache['category_stats'][category]['overdue_count'] += 1
     if is_closed and age_days:
         analytics_cache['category_stats'][category]['avg_resolution_days'].append(age_days)
     
+    # SLA breach tracking
+    category_key = f"{category}_{ticket_data.get('priority', 'normal')}"
+    analytics_cache['sla_breach_patterns'][category_key]['total'] += 1
+    if ticket_data.get('is_overdue'):
+        analytics_cache['sla_breach_patterns'][category_key]['breached'] += 1
+    
+    # Technician stats
     if technician != 'Unassigned':
         analytics_cache['technician_stats'][technician]['total'] += 1
         if not is_closed:
@@ -612,6 +803,15 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
                 if response_hours > 0:
                     analytics_cache['technician_stats'][technician]['avg_response_hours'].append(response_hours)
     
+    # ENHANCED: Requester stats
+    req_key = requester_email if requester_email else requester_name
+    analytics_cache['requester_stats'][req_key]['total_count'] += 1
+    if not is_closed:
+        analytics_cache['requester_stats'][req_key]['open_count'] += 1
+    if is_closed and age_days:
+        analytics_cache['requester_stats'][req_key]['avg_resolution_days'].append(age_days)
+    
+    # Time distribution
     created_ms = ticket_data.get('created_time_ms')
     if created_ms:
         created_dt = datetime.fromtimestamp(created_ms / 1000)
@@ -619,7 +819,7 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
         analytics_cache['daily_distribution'][created_dt.strftime('%A')] += 1
 
 def format_ticket_with_intelligence(ticket, details, conversations):
-    """Format ticket with COMPLETE intelligence suite - All 4 Phases"""
+    """Format ticket with MAXIMUM intelligence - v2.3 Enhanced"""
     
     try:
         internal_id = safe_string(ticket.get('id'))
@@ -694,6 +894,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
         if is_closed and created_time_ms and resolved_time_ms:
             resolution_time_days = (resolved_time_ms - created_time_ms) / (1000 * 60 * 60 * 24)
         
+        # Process conversations
         conversations_structured = []
         conversations_text = ""
         first_response_time_hours = None
@@ -780,12 +981,38 @@ def format_ticket_with_intelligence(ticket, details, conversations):
         
         assignment_suggestion = generate_auto_assignment_suggestion(category, group, analytics_cache['technician_stats'])
         
+        # ENHANCED: Get requester history
+        requester_stats = get_requester_statistics(requester_name, requester_email)
+        
+        # ENHANCED: Advanced conversation intelligence
+        conv_intelligence = analyze_conversation_intelligence(conversations, created_time_ms, technician_name)
+        
+        # ENHANCED: SLA breach prediction
+        category_sla_key = f"{category}_{priority.lower()}"
+        category_sla_stats = analytics_cache['sla_breach_patterns'].get(category_sla_key)
+        
+        sla_breach_likelihood = 0
+        sla_risk_level = 'unknown'
+        sla_risk_factors = []
+        
+        if is_active and hours_until_due is not None:
+            sla_breach_likelihood, sla_risk_level, sla_risk_factors = predict_sla_breach_likelihood(
+                {'priority': priority, 'is_overdue': is_overdue, 'is_escalated': is_escalated},
+                hours_until_due,
+                complexity_score,
+                requester_stats,
+                category_sla_stats
+            )
+        
         update_analytics_cache(
             {
                 'category': category,
                 'technician_name': technician_name,
                 'is_overdue': is_overdue,
-                'created_time_ms': created_time_ms
+                'created_time_ms': created_time_ms,
+                'priority': priority,
+                'requester_name': requester_name,
+                'requester_email': requester_email
             },
             conversations_structured,
             age_days,
@@ -846,7 +1073,28 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             "is_weekend": (created_dt.strftime('%A') in ['Saturday', 'Sunday']) if created_dt else None,
             "needs_immediate_attention": (is_overdue and is_active and priority.lower() in ['urgent', 'high']),
             "needs_followup": (is_active and days_since_last_activity and days_since_last_activity > 3),
-            "auto_assignment_suggestion": assignment_suggestion if technician_name == 'Unassigned' else None
+            "auto_assignment_suggestion": assignment_suggestion if technician_name == 'Unassigned' else None,
+            
+            # ENHANCED v2.3: SLA Breach Prediction
+            "sla_breach_likelihood_percent": sla_breach_likelihood,
+            "sla_breach_risk_level": sla_risk_level,
+            "sla_breach_factors": sla_risk_factors,
+            
+            # ENHANCED v2.3: Requester History
+            "requester_open_tickets": requester_stats.get('open_count', 0),
+            "requester_total_tickets": requester_stats.get('total_count', 0),
+            "requester_avg_resolution_days": round(statistics.mean(requester_stats['avg_resolution_days']), 1) if requester_stats.get('avg_resolution_days') else None,
+            "is_frequent_requester": requester_stats.get('total_count', 0) > 10,
+            "is_repeat_requester": requester_stats.get('open_count', 0) > 3,
+            
+            # ENHANCED v2.3: Conversation Intelligence
+            "conversation_intelligence": conv_intelligence,
+            "awaiting_response_from": conv_intelligence['awaiting'],
+            "conversation_pattern": conv_intelligence['response_pattern'],
+            "conversation_engagement_score": conv_intelligence['engagement_score'],
+            "unanswered_questions": conv_intelligence['unanswered_questions'],
+            "avg_response_time_hours": conv_intelligence['avg_response_time_hours'],
+            "longest_conversation_gap_hours": conv_intelligence['longest_gap_hours']
         }
         
         if created_time_ms:
@@ -893,6 +1141,12 @@ def format_ticket_with_intelligence(ticket, details, conversations):
         if sla_status != 'unknown':
             dust_tags.append(f"sla:{sla_status}")
         
+        # ENHANCED: SLA breach risk tags
+        if sla_risk_level != 'unknown':
+            dust_tags.append(f"sla-risk:{sla_risk_level}")
+            if sla_breach_likelihood > 75:
+                dust_tags.append('high-breach-risk')
+        
         if first_response_time_hours:
             if first_response_time_hours < 1:
                 dust_tags.append('response:immediate')
@@ -914,6 +1168,21 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             dust_tags.append('satisfaction:at-risk')
         elif sentiment == 'positive':
             dust_tags.append('satisfaction:positive')
+        
+        # ENHANCED: Conversation intelligence tags
+        if conv_intelligence['awaiting'] == 'customer':
+            dust_tags.append('awaiting-customer-response')
+        elif conv_intelligence['awaiting'] == 'technician':
+            dust_tags.append('awaiting-technician-response')
+        
+        if conv_intelligence['unanswered_questions'] > 0:
+            dust_tags.append('has-unanswered-questions')
+        
+        # ENHANCED: Requester history tags
+        if requester_stats.get('open_count', 0) > 3:
+            dust_tags.append('repeat-requester')
+        if requester_stats.get('total_count', 0) > 10:
+            dust_tags.append('frequent-requester')
         
         if created_dt:
             if created_dt.hour >= 9 and created_dt.hour <= 17:
@@ -970,12 +1239,27 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
             text_content += f"{sla_emoji} **SLA Status:** {sla_status.upper()}\n"
             if hours_until_due:
                 text_content += f"⏰ **Time Until Due:** {abs(hours_until_due):.1f} hours {'(OVERDUE)' if hours_until_due < 0 else ''}\n"
+            
+            # ENHANCED: SLA Breach Prediction
+            if sla_breach_likelihood > 0 and is_active:
+                risk_emoji = "🚨" if sla_risk_level == 'critical' else "⚠️" if sla_risk_level == 'high' else "⚡"
+                text_content += f"{risk_emoji} **SLA Breach Risk:** {sla_breach_likelihood}% ({sla_risk_level.upper()})\n"
+                if sla_risk_factors:
+                    text_content += f"  Risk Factors: {', '.join(sla_risk_factors[:3])}\n"
         
         text_content += f"""
 ## 👥 Assignment
 - **Requester:** {requester_name}
   - Email: {requester_email}
-- **Technician:** {technician_name}
+"""
+        
+        # ENHANCED: Requester History
+        if requester_stats.get('total_count', 0) > 0:
+            text_content += f"  - **Requester History:** {requester_stats['open_count']} open / {requester_stats['total_count']} total tickets\n"
+            if requester_stats.get('open_count', 0) > 3:
+                text_content += f"  - ⚠️ **Repeat Requester:** Multiple open tickets\n"
+        
+        text_content += f"""- **Technician:** {technician_name}
   - Email: {technician_email}
 - **Group:** {group}
 - **Site:** {site}
@@ -1017,17 +1301,34 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
 {clean_description}
 """
 
-        text_content += "\n## 🤖 AI-Powered Insights & Recommendations\n\n"
+        text_content += "\n## 🤖 AI-Powered Insights & Recommendations (v2.3 Enhanced)\n\n"
         
         if is_active:
             text_content += f"### 📊 Predictive Analytics\n"
             text_content += f"- **Predicted Resolution Time:** {predicted_resolution_days} days\n"
             text_content += f"- **Similar Tickets in Category:** {similar_ticket_count}\n"
             text_content += f"- **Complexity Assessment:** {structured_data['complexity_level'].upper()} complexity\n"
+            
+            if sla_breach_likelihood > 0:
+                text_content += f"- **SLA Breach Likelihood:** {sla_breach_likelihood}% ({sla_risk_level.upper()} risk)\n"
+        
+        # ENHANCED: Conversation Intelligence
+        if conv_intelligence['total_exchanges'] > 0:
+            text_content += f"\n### 💬 Conversation Intelligence\n"
+            text_content += f"- **Exchanges:** {conv_intelligence['total_exchanges']} (Customer: {conv_intelligence['customer_messages']}, Tech: {conv_intelligence['technician_messages']})\n"
+            text_content += f"- **Pattern:** {conv_intelligence['response_pattern'].replace('-', ' ').title()}\n"
+            text_content += f"- **Engagement Score:** {conv_intelligence['engagement_score']}/10\n"
+            if conv_intelligence['avg_response_time_hours']:
+                text_content += f"- **Avg Response Time:** {conv_intelligence['avg_response_time_hours']:.1f} hours\n"
+            if conv_intelligence['awaiting'] != 'unknown':
+                awaiting_emoji = "👤" if conv_intelligence['awaiting'] == 'customer' else "🔧"
+                text_content += f"- {awaiting_emoji} **Awaiting:** {conv_intelligence['awaiting'].title()} response\n"
+            if conv_intelligence['unanswered_questions'] > 0:
+                text_content += f"- ❓ **Unanswered Questions:** {conv_intelligence['unanswered_questions']}\n"
         
         if sentiment != 'unknown':
             sentiment_emoji = "🚨" if sentiment == 'high_risk' else "⚠️" if sentiment == 'moderate_risk' else "😊" if sentiment == 'positive' else "😐"
-            text_content += f"- **Customer Sentiment:** {sentiment_emoji} {sentiment.replace('_', ' ').title()} ({sentiment_score:.0f}% risk)\n"
+            text_content += f"\n- **Customer Sentiment:** {sentiment_emoji} {sentiment.replace('_', ' ').title()} ({sentiment_score:.0f}% risk)\n"
         
         text_content += "\n"
         
@@ -1036,11 +1337,17 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
         if structured_data['needs_immediate_attention']:
             alerts.append("🔥 **CRITICAL:** This ticket requires IMMEDIATE attention (overdue + high priority)")
         
+        if sla_breach_likelihood > 75 and is_active:
+            alerts.append(f"🚨 **HIGH SLA BREACH RISK:** {sla_breach_likelihood}% likelihood - {', '.join(sla_risk_factors[:2])}")
+        
         if is_active and conversation_count == 0 and age_days and age_days > 2:
             alerts.append("💬 **NO RESPONSES YET:** Ticket created {:.0f} days ago with no conversation - reach out to requester".format(age_days))
         
         if is_active and days_since_last_activity and days_since_last_activity > 7:
             alerts.append("⏰ **STALE TICKET:** No activity in {:.0f} days - needs follow-up".format(days_since_last_activity))
+        
+        if conv_intelligence['unanswered_questions'] > 0:
+            alerts.append(f"❓ **UNANSWERED QUESTIONS:** {conv_intelligence['unanswered_questions']} questions need response")
         
         if conversation_count > 10:
             alerts.append("🔄 **HIGH CONVERSATION VOLUME:** Multiple exchanges detected - consider scheduling a call/meeting")
@@ -1053,6 +1360,9 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
         
         if technician_name == 'Unassigned':
             alerts.append("👤 **UNASSIGNED:** No technician assigned - review priority and assign appropriate team member")
+        
+        if requester_stats.get('open_count', 0) > 5:
+            alerts.append(f"⚠️ **MULTIPLE OPEN ISSUES:** Requester has {requester_stats['open_count']} open tickets - may indicate systemic problem")
         
         if alerts:
             text_content += "### ⚠️ Action Required\n"
@@ -1085,20 +1395,23 @@ TICKET_STATE: {'NOT_CLOSED' if is_active else 'CLOSED'}
         text_content += f"""
 
 ---
-## 🔍 Quick Reference
+## 🔍 Quick Reference (v2.3 Enhanced)
 - Ticket: #{display_id}
 - Current Status: {status}
 - Active: {'Yes' if is_active else 'No'}
 - Closed: {'Yes' if is_closed else 'No'}
 - Priority: {priority}
-- Complexity: {structured_data['complexity_level']}
+- Complexity: {structured_data['complexity_level']} ({complexity_score}/10)
 - Assigned To: {technician_name}
 - Category: {category}
 - Age: {age_days:.1f} days if age_days else 'N/A'
-- Conversations: {conversation_count}
+- Conversations: {conversation_count} ({conv_intelligence['response_pattern']})
+- Awaiting: {conv_intelligence['awaiting'].title()}
 - Keywords: {', '.join(keywords) if keywords else 'None'}
 - Sentiment: {sentiment}
 - Predicted Resolution: {predicted_resolution_days} days
+- SLA Breach Risk: {sla_breach_likelihood}% ({sla_risk_level}) if is_active and sla_breach_likelihood > 0 else 'N/A'
+- Requester History: {requester_stats['open_count']} open / {requester_stats['total_count']} total
 """
         
         timestamp = last_updated_time_ms if last_updated_time_ms else int(time.time() * 1000)
@@ -1152,6 +1465,8 @@ def save_analytics_report():
             'generated_at': datetime.now().isoformat(),
             'category_statistics': dict(analytics_cache['category_stats']),
             'technician_statistics': dict(analytics_cache['technician_stats']),
+            'requester_statistics': dict(analytics_cache['requester_stats']),
+            'sla_breach_patterns': dict(analytics_cache['sla_breach_patterns']),
             'hourly_distribution': dict(analytics_cache['hourly_distribution']),
             'daily_distribution': dict(analytics_cache['daily_distribution']),
             'top_issue_keywords': dict(analytics_cache['issue_keywords'].most_common(20))
@@ -1170,7 +1485,7 @@ def print_analytics_summary():
     """Print analytics summary to console"""
     
     print("\n" + "="*60)
-    print("📊 ANALYTICS SUMMARY")
+    print("📊 ANALYTICS SUMMARY (v2.3 Enhanced)")
     print("="*60)
     
     print("\n🏆 Top Categories:")
@@ -1190,6 +1505,12 @@ def print_analytics_summary():
             avg = statistics.mean(stats['avg_response_hours'])
             print(f"    Avg response: {avg:.1f} hours")
     
+    print("\n👤 Top Requesters:")
+    top_req = sorted(analytics_cache['requester_stats'].items(),
+                    key=lambda x: x[1]['total_count'], reverse=True)[:5]
+    for req, stats in top_req:
+        print(f"  {req}: {stats['open_count']} open / {stats['total_count']} total")
+    
     print("\n⏰ Peak Hours:")
     top_hours = sorted(analytics_cache['hourly_distribution'].items(), 
                       key=lambda x: x[1], reverse=True)[:5]
@@ -1204,14 +1525,14 @@ def print_analytics_summary():
 
 def main():
     print("=" * 60)
-    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.2 - Starting at {datetime.now()}")
+    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.3 - Starting at {datetime.now()}")
     print("=" * 60)
-    print("✨ FIXED INCREMENTAL SYNC v2.2 - 500 ticket minimum, sorts by last_updated_time")
-    print("   • Advanced tagging & search")
-    print("   • Predictive analytics")
-    print("   • Pattern detection")
-    print("   • Resolution recommendations")
-    print("   • Reliable incremental updates")
+    print("✨ v2.3 ENHANCEMENTS:")
+    print("   • Enhanced SLA breach prediction with risk percentages")
+    print("   • Requester history tracking (open/total tickets)")
+    print("   • Advanced conversation intelligence (flow, patterns, waiting states)")
+    print("   • 500 ticket minimum incremental sync")
+    print("   • Sort by last_updated_time for complete coverage")
     print()
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
@@ -1227,7 +1548,6 @@ def main():
     
     if not tickets:
         print("No tickets to process - system is up to date!")
-        # Still save timestamp even if no tickets
         current_time_ms = int(datetime.now().timestamp() * 1000)
         with open('last_sync_time.txt', 'w') as f:
             f.write(str(current_time_ms))
@@ -1242,6 +1562,9 @@ def main():
     closed_count = 0
     high_complexity_count = 0
     at_risk_count = 0
+    high_breach_risk_count = 0
+    awaiting_customer_count = 0
+    awaiting_tech_count = 0
     
     for idx, ticket in enumerate(tickets, 1):
         ticket_id = ticket.get('id')
@@ -1274,11 +1597,17 @@ def main():
                     high_complexity_count += 1
                 if structured.get('satisfaction_risk'):
                     at_risk_count += 1
+                if structured.get('sla_breach_likelihood_percent', 0) > 75:
+                    high_breach_risk_count += 1
+                if structured.get('awaiting_response_from') == 'customer':
+                    awaiting_customer_count += 1
+                elif structured.get('awaiting_response_from') == 'technician':
+                    awaiting_tech_count += 1
                 
                 if upload_to_dust(document):
                     success_count += 1
                     if idx % 100 == 0:
-                        print(f"  ✓ {success_count} updated | Active: {active_count} | Complex: {high_complexity_count} | At-Risk: {at_risk_count}")
+                        print(f"  ✓ {success_count} updated | Active: {active_count} | Complex: {high_complexity_count} | At-Risk: {at_risk_count} | High Breach Risk: {high_breach_risk_count}")
                 else:
                     error_count += 1
             else:
@@ -1295,13 +1624,16 @@ def main():
             print(f"  ℹ️  Checkpoint: {success_count}/{idx}\n")
     
     print(f"\n{'='*60}")
-    print(f"✅ INTELLIGENCE SYNC COMPLETED")
+    print(f"✅ INTELLIGENCE SYNC COMPLETED (v2.3)")
     print(f"  Total Processed: {success_count}/{len(tickets)}")
     print(f"  Active Tickets: {active_count}")
     print(f"  Closed Tickets: {closed_count}")
     print(f"  With Conversations: {conv_count}")
     print(f"  High Complexity: {high_complexity_count}")
     print(f"  Satisfaction At-Risk: {at_risk_count}")
+    print(f"  High SLA Breach Risk: {high_breach_risk_count}")
+    print(f"  Awaiting Customer: {awaiting_customer_count}")
+    print(f"  Awaiting Technician: {awaiting_tech_count}")
     print(f"  Errors: {error_count}")
     print(f"  Finished: {datetime.now()}")
     print(f"{'='*60}")
@@ -1309,21 +1641,21 @@ def main():
     print_analytics_summary()
     save_analytics_report()
     
-    # Save current timestamp for next incremental sync
     current_time_ms = int(datetime.now().timestamp() * 1000)
     print(f"\n📅 Current sync timestamp: {current_time_ms}")
     print(f"   (Will be used for next incremental sync)")
     
-    # Save to file for GitHub Actions to read
     with open('last_sync_time.txt', 'w') as f:
         f.write(str(current_time_ms))
     
-    print("\n🎯 Enhanced Features Active:")
-    print("  ✓ Phase 1: Status tagging, SLA tracking, aging metrics")
-    print("  ✓ Phase 2: AI insights, complexity scoring, resolution suggestions")
-    print("  ✓ Phase 3: Pattern detection, workload analysis, auto-assignment")
-    print("  ✓ Phase 4: Predictive analytics, sentiment analysis, trend forecasting")
-    print("  ✓ FIXED v2.2: Sorts by last_updated_time, checks minimum 500 tickets")
+    print("\n🎯 v2.3 Enhanced Features Active:")
+    print("  ✓ Enhanced SLA breach prediction with percentage likelihood")
+    print("  ✓ Requester history tracking (open/total tickets, repeat requesters)")
+    print("  ✓ Advanced conversation intelligence (flow analysis, waiting states)")
+    print("  ✓ Unanswered question detection")
+    print("  ✓ Response pattern analysis")
+    print("  ✓ Engagement scoring")
+    print("  ✓ All previous v2.2 features (complexity, sentiment, predictions)")
     print()
 
 if __name__ == "__main__":
