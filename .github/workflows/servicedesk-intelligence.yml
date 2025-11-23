@@ -1,8 +1,8 @@
 name: ServiceDesk Intelligence Suite
 
 on:
-  #schedule:
-   # - cron: '*/15 * * * *'  # Every 15 minutes (incremental sync)
+  schedule:
+    - cron: '*/15 * * * *'  # Every 15 minutes (incremental sync)
   
   workflow_dispatch:
   
