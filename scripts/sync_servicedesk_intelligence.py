@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus Intelligence Suite - Fixed Incremental Sync
-VERSION: 2.1 - Fixed incremental logic to properly catch new and updated tickets
+ServiceDesk Plus Intelligence Suite - Fixed Incremental Sync v2.2
+VERSION: 2.2 - Sorts by last_updated_time, checks minimum 500 tickets
 """
 
 import os
@@ -32,6 +32,10 @@ DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUS
 TICKETS_PER_PAGE = 100
 MAX_TICKETS = 10000
 MAX_RETRIES = 3
+
+# Incremental sync settings
+MIN_PAGES_TO_CHECK = 5  # Always check at least 500 tickets
+MAX_PAGES_TO_CHECK = 20  # Maximum 2000 tickets
 
 # Analytics Cache
 analytics_cache = {
@@ -120,27 +124,30 @@ def fetch_all_tickets():
     
     print(f"Fetching {'updated' if incremental else 'all'} tickets...")
     
-    # For incremental: fetch reasonable window, then filter in Python
-    # This ensures we don't miss tickets due to API sorting/filtering issues
     if incremental:
-        max_tickets = 2000  # Check up to 2000 most recent tickets
-    else:
-        max_tickets = MAX_TICKETS
+        print(f"  ℹ️  Will check minimum {MIN_PAGES_TO_CHECK * TICKETS_PER_PAGE} tickets for thoroughness")
     
     pages_checked = 0
     tickets_found = 0
     
-    while len(seen_ticket_ids) < max_tickets:
+    while len(seen_ticket_ids) < MAX_TICKETS and pages_checked < MAX_PAGES_TO_CHECK:
         headers = {
             'Authorization': f'Zoho-oauthtoken {access_token}',
             'Accept': 'application/vnd.manageengine.sdp.v3+json'
         }
         
+        # CRITICAL FIX: For incremental, sort by last_updated_time to catch ALL updates
+        # For full sync, sort by created_time for consistency
+        if incremental:
+            sort_field = "last_updated_time"
+        else:
+            sort_field = "created_time"
+        
         list_info = {
             "list_info": {
                 "row_count": TICKETS_PER_PAGE,
                 "start_index": start_index,
-                "sort_field": "created_time",  # Sort by creation for consistency
+                "sort_field": sort_field,
                 "sort_order": "desc"
             }
         }
@@ -156,13 +163,13 @@ def fetch_all_tickets():
                 tickets = result.get('requests', [])
                 
                 if not tickets:
+                    print(f"  ✓ No more tickets available from API")
                     break
                 
                 pages_checked += 1
                 
-                # For incremental: check BOTH created and updated times
                 if incremental:
-                    oldest_created_in_page = None
+                    oldest_updated_in_page = None
                     page_added = 0
                     
                     for ticket in tickets:
@@ -176,21 +183,17 @@ def fetch_all_tickets():
                         created_ms = safe_get_value(ticket.get('created_time'))
                         updated_ms = safe_get_value(ticket.get('last_updated_time'))
                         
-                        # Track oldest created ticket in this page
-                        if created_ms:
-                            if oldest_created_in_page is None or created_ms < oldest_created_in_page:
-                                oldest_created_in_page = created_ms
+                        # Track oldest UPDATED time in page (since we're sorting by that)
+                        if updated_ms:
+                            if oldest_updated_in_page is None or updated_ms < oldest_updated_in_page:
+                                oldest_updated_in_page = updated_ms
                         
                         # Include if created OR updated after last sync
                         should_include = False
-                        reason = ""
-                        
                         if created_ms and created_ms > last_sync_ms:
                             should_include = True
-                            reason = "newly created"
                         elif updated_ms and updated_ms > last_sync_ms:
                             should_include = True
-                            reason = "recently updated"
                         
                         if should_include:
                             all_tickets.append(ticket)
@@ -199,14 +202,19 @@ def fetch_all_tickets():
                     
                     if page_added > 0:
                         print(f"  Page {pages_checked}: Found {page_added} tickets to sync")
+                    else:
+                        print(f"  Page {pages_checked}: No new tickets found")
                     
-                    # Stop if oldest ticket created in page is before our timestamp
-                    # This means we've checked all potentially new/updated tickets
-                    if oldest_created_in_page and oldest_created_in_page < last_sync_ms:
-                        oldest_dt = datetime.fromtimestamp(oldest_created_in_page / 1000)
-                        print(f"  ✓ Reached tickets older than last sync (oldest in page: {oldest_dt})")
-                        print(f"  Checked {pages_checked} pages, found {tickets_found} tickets to sync")
-                        break
+                    # Stop conditions:
+                    # 1. Must check at least MIN_PAGES_TO_CHECK (500 tickets)
+                    # 2. AND oldest updated ticket in page is before timestamp
+                    if pages_checked >= MIN_PAGES_TO_CHECK:
+                        if oldest_updated_in_page and oldest_updated_in_page < last_sync_ms:
+                            oldest_dt = datetime.fromtimestamp(oldest_updated_in_page / 1000)
+                            print(f"  ℹ️  Checked minimum {MIN_PAGES_TO_CHECK * TICKETS_PER_PAGE} tickets")
+                            print(f"  ✓ Reached tickets with updates older than last sync (oldest: {oldest_dt})")
+                            print(f"  Total checked: {pages_checked} pages, found {tickets_found} tickets to sync")
+                            break
                 
                 else:
                     # Full sync: add all tickets
@@ -220,12 +228,8 @@ def fetch_all_tickets():
                 has_more = response_list_info.get('has_more_rows', False)
                 
                 if not has_more or len(tickets) == 0:
-                    print(f"  ✓ No more tickets available from API")
-                    break
-                
-                # For incremental, if we've checked enough pages without finding anything, stop
-                if incremental and pages_checked >= 20 and tickets_found == 0:
-                    print(f"  ℹ️  Checked {pages_checked} pages with no new tickets - stopping search")
+                    if incremental and pages_checked < MIN_PAGES_TO_CHECK:
+                        print(f"  ℹ️  API reports no more rows after {pages_checked} pages")
                     break
                 
                 start_index += TICKETS_PER_PAGE
@@ -1200,9 +1204,9 @@ def print_analytics_summary():
 
 def main():
     print("=" * 60)
-    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.1 - Starting at {datetime.now()}")
+    print(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.2 - Starting at {datetime.now()}")
     print("=" * 60)
-    print("✨ FIXED INCREMENTAL SYNC - Properly catches new and updated tickets")
+    print("✨ FIXED INCREMENTAL SYNC v2.2 - 500 ticket minimum, sorts by last_updated_time")
     print("   • Advanced tagging & search")
     print("   • Predictive analytics")
     print("   • Pattern detection")
@@ -1319,7 +1323,7 @@ def main():
     print("  ✓ Phase 2: AI insights, complexity scoring, resolution suggestions")
     print("  ✓ Phase 3: Pattern detection, workload analysis, auto-assignment")
     print("  ✓ Phase 4: Predictive analytics, sentiment analysis, trend forecasting")
-    print("  ✓ FIXED: Incremental sync properly catches new AND updated tickets")
+    print("  ✓ FIXED v2.2: Sorts by last_updated_time, checks minimum 500 tickets")
     print()
 
 if __name__ == "__main__":
