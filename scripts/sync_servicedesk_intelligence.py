@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus Intelligence Suite v2.3
+ServiceDesk Plus Intelligence Suite v2.3 - FIXED
 Enhanced with: SLA breach prediction, requester history, conversation intelligence
+FIX: Dynamic page limits - 100 for full sync (10k tickets), 20 for incremental
 """
 
 import os
@@ -32,8 +33,7 @@ DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUS
 TICKETS_PER_PAGE = 100
 MAX_TICKETS = 10000
 MAX_RETRIES = 3
-MIN_PAGES_TO_CHECK = 5
-MAX_PAGES_TO_CHECK = 20
+MIN_PAGES_TO_CHECK = 5  # Minimum for incremental sync
 
 # Analytics Cache - ENHANCED with requester tracking
 analytics_cache = {
@@ -129,7 +129,17 @@ def fetch_all_tickets():
     pages_checked = 0
     tickets_found = 0
     
-    while len(seen_ticket_ids) < MAX_TICKETS and pages_checked < MAX_PAGES_TO_CHECK:
+    # FIXED: Set appropriate page limit based on sync type
+    # Full sync: fetch all tickets (up to MAX_TICKETS = 10,000)
+    # Incremental sync: safety limit to avoid processing too much
+    if incremental:
+        page_limit = 20  # 20 pages max for incremental (2000 tickets checked)
+    else:
+        page_limit = 100  # 100 pages for full sync (allows up to 10,000 tickets)
+    
+    print(f"  📊 Page limit: {page_limit} pages (up to {page_limit * TICKETS_PER_PAGE} tickets)")
+    
+    while len(seen_ticket_ids) < MAX_TICKETS and pages_checked < page_limit:
         headers = {
             'Authorization': f'Zoho-oauthtoken {access_token}',
             'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -1532,7 +1542,7 @@ def main():
     print("   • Requester history tracking (open/total tickets)")
     print("   • Advanced conversation intelligence (flow, patterns, waiting states)")
     print("   • 500 ticket minimum incremental sync")
-    print("   • Sort by last_updated_time for complete coverage")
+    print("   • FIXED: Dynamic page limits (100 for full, 20 for incremental)")
     print()
     
     required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 
@@ -1655,7 +1665,7 @@ def main():
     print("  ✓ Unanswered question detection")
     print("  ✓ Response pattern analysis")
     print("  ✓ Engagement scoring")
-    print("  ✓ All previous v2.2 features (complexity, sentiment, predictions)")
+    print("  ✓ FIXED: Dynamic page limits (fetches all 4,651+ tickets)")
     print()
 
 if __name__ == "__main__":
