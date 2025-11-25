@@ -12,7 +12,7 @@ on:
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 3 hours max
+    timeout-minutes: 180
     
     steps:
       - name: 📥 Checkout repository
@@ -40,8 +40,7 @@ jobs:
           DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
         run: |
           echo "🚀 Starting backfill for last ${{ inputs.days_back }} days"
-          echo "📊 This will process approximately $(( ${{ inputs.days_back }} * 5 / 7 )) business days"
-          echo "⏱️  Estimated time: 15-20 minutes"
+          echo "⏱️ Estimated time: 15-20 minutes"
           python scripts/track_meeting_load.py --backfill ${{ inputs.days_back }}
       
       - name: 📁 Upload all performance reports
@@ -65,5 +64,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add tech_performance_*.json
-          git commit -m "📅 Historical backfill: ${{ inputs.days_back }} days ($(date +%Y-%m-%d))" || echo "No changes to commit"
+          git commit -m "📅 Historical backfill: ${{ inputs.days_back }} days" || echo "No changes"
           git push || echo "Nothing to push"
