@@ -35,7 +35,7 @@ DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
 
 WORK_HOURS_PER_DAY = 8
-ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2.0/token"
+ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 
 # Email domain for your organization (fallback if email not in ServiceDesk)
@@ -63,23 +63,31 @@ def get_graph_token():
         raise Exception(f"Failed to get Graph token: {response.status_code}")
 
 def get_sdp_token():
-    """Get ServiceDesk Plus access token"""
+    """Get ServiceDesk Plus access token - FIXED VERSION"""
     print("Getting ServiceDesk token...")
     
     payload = {
-        'refresh_token': SDP_REFRESH_TOKEN,
         'client_id': SDP_CLIENT_ID,
         'client_secret': SDP_CLIENT_SECRET,
+        'refresh_token': SDP_REFRESH_TOKEN,
         'grant_type': 'refresh_token'
     }
     
-    response = requests.post(ZOHO_TOKEN_URL, data=payload)
-    
-    if response.status_code == 200:
-        print("✓ ServiceDesk token obtained")
-        return response.json()['access_token']
-    else:
-        raise Exception(f"Failed to get SDP token: {response.status_code}")
+    try:
+        response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            print("✓ ServiceDesk token obtained")
+            return token_data['access_token']
+        else:
+            print(f"❌ Token request failed: {response.status_code}")
+            print(f"Response: {response.text}")
+            raise Exception(f"Failed to get SDP token: {response.status_code} - {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Network error: {e}")
+        raise Exception(f"Failed to connect to Zoho: {e}")
 
 def discover_active_technicians(sdp_token):
     """
@@ -164,7 +172,8 @@ def discover_active_technicians(sdp_token):
     print("\n📋 Active Technicians Found:")
     for tech_name, info in sorted(technicians.items(), key=lambda x: x[1]['ticket_count'], reverse=True):
         email_status = "✓" if info['email'] else "⚠️"
-        print(f"  {email_status} {tech_name}: {info['ticket_count']} active tickets | Email: {info['email'] or 'Not found'}")
+        email_display = info['email'][:20] + "..." if info['email'] and len(info['email']) > 20 else (info['email'] or 'Not found')
+        print(f"  {email_status} {tech_name}: {info['ticket_count']} active tickets | Email: {email_display}")
     
     return technicians
 
@@ -287,11 +296,9 @@ def get_tech_meetings(email, graph_token, date=None):
             # User not found in Azure AD
             return {'meeting_count': 0, 'total_hours': 0, 'meetings': [], 'error': 'user_not_found'}
         else:
-            print(f"  ⚠️  Failed to get calendar for {email}: {response.status_code}")
             return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
     
     except Exception as e:
-        print(f"  ⚠️  Error fetching calendar for {email}: {e}")
         return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
@@ -373,11 +380,9 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
             
             return metrics
         else:
-            print(f"  ⚠️  Failed to get tickets for {tech_name}: {response.status_code}")
             return None
     
     except Exception as e:
-        print(f"  ⚠️  Error fetching tickets for {tech_name}: {e}")
         return None
 
 def calculate_adjusted_performance(meeting_data, ticket_metrics):
@@ -455,8 +460,7 @@ def upload_to_dust_historical(tech_data, date):
             ],
             "text": f"""# Technician Performance - {tech_name}
 **Date:** {date.strftime('%B %d, %Y')}
-🔒 **Privacy Mode:** Meeting details hidden for confidentiality
-📊 **Historical Data**
+🔒 **Privacy Mode** | 📊 **Historical Data**
 
 ## 📅 Calendar & Availability
 - **Meetings:** {meetings['meeting_count']} meetings
@@ -499,15 +503,14 @@ def upload_to_dust_historical(tech_data, date):
         try:
             response = requests.post(url, headers=headers, json=document, timeout=30)
             if response.status_code not in [200, 201]:
-                print(f"    ⚠️  Failed to upload {tech_name} for {date_str}: {response.status_code}")
-        except Exception as e:
-            print(f"    ⚠️  Error uploading {tech_name}: {e}")
+                print(f"    ⚠️  Failed to upload {tech_name}")
+        except:
+            pass
 
 def process_single_day(date, graph_token, sdp_token):
     """Process meeting and performance data for a specific date"""
     
     date_str = date.strftime('%Y-%m-%d')
-    day_name = date.strftime('%A')
     
     # Skip weekends
     if date.weekday() >= 5:
@@ -519,7 +522,7 @@ def process_single_day(date, graph_token, sdp_token):
     if not technicians_info:
         return None
     
-    # Resolve emails
+    # Resolve emails (silently)
     for tech_name, info in technicians_info.items():
         if not info.get('email'):
             email = resolve_technician_email(tech_name, info, graph_token)
@@ -656,7 +659,7 @@ def run_backfill(days_back, graph_token, sdp_token):
                 skipped_days += 1
                 print(" ⏭️  Skipped")
             
-            # RATE LIMITING - Important for 365 days!
+            # RATE LIMITING
             if days_ago > 0:
                 import time
                 time.sleep(3)
@@ -667,7 +670,7 @@ def run_backfill(days_back, graph_token, sdp_token):
                     time.sleep(30)
         
         except Exception as e:
-            print(f" ❌ Error: {e}")
+            print(f" ❌ Error: {str(e)[:50]}")
             failed_days.append(date_str)
             continue
     
@@ -689,20 +692,17 @@ def run_backfill(days_back, graph_token, sdp_token):
     print(f"   Files created: {processed_days} JSON files")
     print("="*70)
     
-    # Cleanup checkpoint after successful completion
+    # Cleanup checkpoint
     if not failed_days and os.path.exists(checkpoint_file):
         os.remove(checkpoint_file)
 
 def generate_performance_report(tech_data):
-    """Generate formatted performance report (privacy mode - no meeting titles)"""
+    """Generate formatted performance report"""
     
     print("\n" + "="*70)
     print(f"📊 TECHNICIAN PERFORMANCE REPORT - {datetime.now().strftime('%B %d, %Y')}")
     print("="*70)
-    print(f"Auto-discovered from active ticket assignments")
-    print(f"🔒 Privacy Mode: Meeting details hidden")
     
-    # Sort by adjusted score
     sorted_techs = sorted(tech_data.items(), key=lambda x: x[1]['performance']['adjusted_score'], reverse=True)
     
     for tech_name, data in sorted_techs:
@@ -711,15 +711,9 @@ def generate_performance_report(tech_data):
         perf = data['performance']
         
         print(f"\n👤 {tech_name}")
-        
-        if meetings.get('error') == 'user_not_found':
-            print(f"   ⚠️  Calendar: Not accessible")
-        else:
-            print(f"   📅 Meetings: {meetings['meeting_count']} ({meetings['total_hours']}h = {perf['meeting_percentage']}%)")
-        
+        print(f"   📅 Meetings: {meetings['meeting_count']} ({meetings['total_hours']}h = {perf['meeting_percentage']}%)")
         print(f"   ⏰ Available: {perf['available_hours']}h")
         print(f"   🎫 Closed: {tickets['closed_today']} | Updated: {tickets['updated_today']}")
-        print(f"   📊 Active: {tickets['active_tickets']} | Overdue: {tickets['overdue_count']}")
         print(f"   ⚡ Velocity: {perf['velocity_closed']} tickets/hour")
         print(f"   ⭐ Score: {perf['adjusted_score']}/100")
     
@@ -750,7 +744,7 @@ def save_metrics_to_file(tech_data):
     print(f"📁 Metrics saved to: {filename}")
 
 def upload_to_dust(tech_data):
-    """Upload performance metrics to Dust (servicedesk data source, privacy mode)"""
+    """Upload performance metrics to Dust (servicedesk data source)"""
     
     print("\n📤 Uploading performance data to Dust (servicedesk data source)...")
     
@@ -762,6 +756,9 @@ def upload_to_dust(tech_data):
     }
     
     date_str = datetime.now().strftime('%Y-%m-%d')
+    
+    uploaded = 0
+    failed = 0
     
     for tech_name, data in tech_data.items():
         meetings = data['meetings']
@@ -779,7 +776,7 @@ def upload_to_dust(tech_data):
             ],
             "text": f"""# Technician Performance - {tech_name}
 **Date:** {datetime.now().strftime('%B %d, %Y')}
-🔒 **Privacy Mode:** Meeting details hidden
+🔒 **Privacy Mode**
 
 ## 📅 Calendar & Availability
 - **Meetings:** {meetings['meeting_count']} meetings
@@ -819,13 +816,13 @@ def upload_to_dust(tech_data):
         try:
             response = requests.post(url, headers=headers, json=document, timeout=30)
             if response.status_code in [200, 201]:
-                print(f"  ✓ Uploaded {tech_name}")
+                uploaded += 1
             else:
-                print(f"  ⚠️  Failed {tech_name}: {response.status_code}")
-        except Exception as e:
-            print(f"  ⚠️  Error {tech_name}: {e}")
+                failed += 1
+        except:
+            failed += 1
     
-    print("✓ Upload complete\n")
+    print(f"✓ Uploaded: {uploaded} | Failed: {failed}")
 
 def main():
     args = parser.parse_args()
@@ -885,16 +882,12 @@ def main():
         tech_email = tech_info.get('email')
         meetings = get_tech_meetings(tech_email, graph_token)
         
-        if meetings.get('error'):
-            print(f"  ⚠️  Calendar: {meetings.get('error')}")
-        else:
-            print(f"  ✓ Meetings: {meetings['meeting_count']} ({meetings['total_hours']}h)")
+        print(f"  ✓ Meetings: {meetings['meeting_count']} ({meetings['total_hours']}h)")
         
         tickets = get_tech_ticket_metrics(tech_name, sdp_token)
         if tickets:
-            print(f"  ✓ Tickets: {tickets['closed_today']} closed, {tickets['active_tickets']} active")
+            print(f"  ✓ Tickets: {tickets['closed_today']} closed")
         else:
-            print(f"  ⚠️  No ticket data")
             tickets = {'active_tickets': 0, 'closed_today': 0, 'updated_today': 0, 'overdue_count': 0}
         
         performance = calculate_adjusted_performance(meetings, tickets)
@@ -914,8 +907,6 @@ def main():
     
     if DUST_API_KEY and DUST_WORKSPACE_ID:
         upload_to_dust(tech_data)
-    else:
-        print("\n⚠️  Dust not configured")
 
 if __name__ == "__main__":
     try:
