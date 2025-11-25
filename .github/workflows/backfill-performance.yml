@@ -44,7 +44,7 @@ jobs:
           python scripts/track_meeting_load.py --backfill ${{ inputs.days_back }}
       
       - name: 📁 Upload all performance reports
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: historical-performance-${{ inputs.days_back }}days
@@ -52,7 +52,7 @@ jobs:
           retention-days: 90
       
       - name: 📁 Upload checkpoint if failed
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: backfill-checkpoint
