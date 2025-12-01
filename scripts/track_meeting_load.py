@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FIXED v3: Accurate closed ticket counts + debug mode
-Run with: python track_meeting_load.py --today --debug
+DEFAULTS: Processes TODAY with DEBUG output enabled
 """
 
 import os
@@ -14,8 +13,8 @@ from datetime import datetime, timedelta
 parser = argparse.ArgumentParser(description='Track technician meeting load and performance')
 parser.add_argument('--backfill', type=int, metavar='DAYS', help='Backfill historical data')
 parser.add_argument('--date', type=str, metavar='YYYY-MM-DD', help='Process specific date')
-parser.add_argument('--today', action='store_true', help='Process today (default is yesterday)')
-parser.add_argument('--debug', action='store_true', help='Show debug output')
+parser.add_argument('--yesterday', action='store_true', help='Process yesterday instead of today')
+parser.add_argument('--no-debug', action='store_true', help='Disable debug output')
 
 TENANT_ID = os.environ.get('AZURE_TENANT_ID')
 CLIENT_ID = os.environ.get('AZURE_CLIENT_ID')
@@ -34,7 +33,7 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'motorad.com')
 
-DEBUG = False
+DEBUG = True  # DEFAULT: Debug ON
 
 def debug_print(message):
     if DEBUG:
@@ -342,9 +341,9 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                             if start_ms <= resolved_ms <= end_ms:
                                 closed_count += 1
                                 found_tickets_in_range = True
-                                debug_print(f"  Found closed ticket #{ticket.get('id')} resolved on {resolved_date}")
+                                debug_print(f"  ✓ Found closed ticket #{ticket.get('id')} resolved on {resolved_date.strftime('%Y-%m-%d %H:%M:%S')}")
                             elif resolved_ms < start_ms:
-                                debug_print(f"  Ticket #{ticket.get('id')} too old ({resolved_date}), stopping")
+                                debug_print(f"  ⏭️  Ticket #{ticket.get('id')} too old ({resolved_date.strftime('%Y-%m-%d')}), stopping")
                                 break
                 if not found_tickets_in_range and pages_checked > 0:
                     debug_print(f"No tickets in range on page {pages_checked + 1}")
@@ -359,7 +358,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                 debug_print(f"API error: {response.status_code}")
                 break
         metrics['closed_today'] = closed_count
-        debug_print(f"Total closed tickets found: {closed_count} (examined {tickets_examined} tickets)")
+        debug_print(f"✅ TOTAL CLOSED: {closed_count} tickets (examined {tickets_examined} total)")
     except Exception as e:
         debug_print(f"Error getting closed tickets: {e}")
     return metrics
@@ -499,11 +498,13 @@ def save_metrics_to_file(tech_data, date):
 def main():
     global DEBUG
     args = parser.parse_args()
-    if args.debug:
-        DEBUG = True
+    
+    if args.no_debug:
+        DEBUG = False
     
     print("="*70)
-    print("🚀 TECHNICIAN MEETING LOAD & PERFORMANCE TRACKER v3")
+    print("🚀 TECHNICIAN PERFORMANCE TRACKER")
+    print("   ✨ DEFAULT: TODAY + DEBUG MODE")
     print("="*70)
     print()
     
@@ -517,13 +518,13 @@ def main():
         except ValueError:
             print("❌ Invalid date format. Use YYYY-MM-DD")
             return
-    elif args.today:
-        target_date = datetime.now()
-        print("📅 Processing TODAY'S data...")
-    else:
+    elif args.yesterday:
         target_date = datetime.now() - timedelta(days=1)
-        print(f"📅 Processing YESTERDAY'S data ({target_date.strftime('%Y-%m-%d')})")
-        print("    (Use --today to process today instead)\n")
+        print(f"📅 Processing YESTERDAY: {target_date.strftime('%Y-%m-%d')}")
+    else:
+        target_date = datetime.now()
+        print(f"📅 Processing TODAY: {target_date.strftime('%Y-%m-%d')}")
+        print("    🔍 DEBUG MODE: ON\n")
     
     technicians_info = discover_active_technicians(sdp_token)
     if not technicians_info:
