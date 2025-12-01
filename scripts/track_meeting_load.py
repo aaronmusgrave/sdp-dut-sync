@@ -4,7 +4,11 @@ Track technician meeting load and correlate with ticket performance
 AUTO-DISCOVERS technicians from ServiceDesk ticket assignments
 PRIVACY MODE: Meeting titles are hidden, only shows "Busy"
 SAVES TO: servicedesk data source (unified with ticket data)
-FIXED v2: Properly counts closed tickets with manual date validation
+FIXED v3: 
+- Manual date validation for closed tickets
+- Fixed meeting hour calculation (handles all-day events)
+- Defaults to yesterday's closed tickets (more reliable)
+- Added debugging output
 """
 
 import os
@@ -20,6 +24,10 @@ parser.add_argument('--backfill', type=int, metavar='DAYS',
                     help='Backfill historical data for the last N days (max 365)')
 parser.add_argument('--date', type=str, metavar='YYYY-MM-DD',
                     help='Process specific date (format: 2025-11-25)')
+parser.add_argument('--today', action='store_true',
+                    help='Process today (default is yesterday for complete data)')
+parser.add_argument('--debug', action='store_true',
+                    help='Show debug output')
 
 # Microsoft Graph API credentials
 TENANT_ID = os.environ.get('AZURE_TENANT_ID')
@@ -41,6 +49,13 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 
 # Email domain for your organization (fallback if email not in ServiceDesk)
 EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'motorad.com')
+
+DEBUG = False
+
+def debug_print(message):
+    """Print debug messages if debug mode is on"""
+    if DEBUG:
+        print(f"  [DEBUG] {message}")
 
 def get_graph_token():
     """Get Microsoft Graph API access token"""
@@ -91,10 +106,7 @@ def get_sdp_token():
         raise Exception(f"Failed to connect to Zoho: {e}")
 
 def discover_active_technicians(sdp_token):
-    """
-    Auto-discover technicians from ServiceDesk by finding all unique
-    technicians assigned to active tickets
-    """
+    """Auto-discover technicians from ServiceDesk by finding all unique technicians assigned to active tickets"""
     print("\n🔍 Auto-discovering technicians from ServiceDesk...")
     
     headers = {
@@ -102,7 +114,6 @@ def discover_active_technicians(sdp_token):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Get active tickets (open, in-progress, on-hold)
     list_info = {
         "list_info": {
             "row_count": 100,
@@ -120,7 +131,7 @@ def discover_active_technicians(sdp_token):
     technicians = {}
     start_index = 1
     pages_checked = 0
-    max_pages = 20  # Check up to 2000 tickets
+    max_pages = 20
     
     while pages_checked < max_pages:
         list_info['list_info']['start_index'] = start_index
@@ -169,38 +180,22 @@ def discover_active_technicians(sdp_token):
     
     print(f"✓ Discovered {len(technicians)} active technicians")
     
-    # Display discovered technicians
-    print("\n📋 Active Technicians Found:")
-    for tech_name, info in sorted(technicians.items(), key=lambda x: x[1]['ticket_count'], reverse=True):
-        email_status = "✓" if info['email'] else "⚠️"
-        email_display = info['email'][:20] + "..." if info['email'] and len(info['email']) > 20 else (info['email'] or 'Not found')
-        print(f"  {email_status} {tech_name}: {info['ticket_count']} active tickets | Email: {email_display}")
-    
     return technicians
 
 def resolve_technician_email(tech_name, tech_info, graph_token):
-    """
-    Resolve technician email address
-    Priority:
-    1. Use email from ServiceDesk if available
-    2. Search Azure AD by display name
-    3. Generate from name + domain (firstname.lastname@domain)
-    """
+    """Resolve technician email address"""
     
-    # If we have email from ServiceDesk, use it
     if tech_info.get('email'):
         return tech_info['email']
     
-    print(f"  🔍 Resolving email for {tech_name}...")
+    debug_print(f"Resolving email for {tech_name}...")
     
-    # Try to find in Azure AD
     try:
         headers = {
             'Authorization': f'Bearer {graph_token}',
             'ConsistencyLevel': 'eventual'
         }
         
-        # Search by display name
         url = "https://graph.microsoft.com/v1.0/users"
         params = {
             '$filter': f"displayName eq '{tech_name}'",
@@ -213,24 +208,19 @@ def resolve_technician_email(tech_name, tech_info, graph_token):
             users = response.json().get('value', [])
             if users:
                 email = users[0].get('mail') or users[0].get('userPrincipalName')
-                print(f"    ✓ Found in Azure AD: {email}")
                 return email
     except Exception as e:
-        print(f"    ⚠️ Azure AD lookup failed: {e}")
+        debug_print(f"Azure AD lookup failed: {e}")
     
-    # Fallback: Generate email from name
-    # Convert "First Last" to "first.last@domain.com"
     name_parts = tech_name.lower().split()
     if len(name_parts) >= 2:
         generated_email = f"{name_parts[0]}.{name_parts[-1]}@{EMAIL_DOMAIN}"
-        print(f"    ⚠️ Generated email: {generated_email}")
         return generated_email
     
-    print(f"    ❌ Could not resolve email for {tech_name}")
     return None
 
 def get_tech_meetings(email, graph_token, date=None):
-    """Get meetings for a technician on a specific date (privacy mode - no titles stored)"""
+    """Get meetings for a technician on a specific date - FIXED: Handles all-day events correctly"""
     
     if not email:
         return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
@@ -261,7 +251,6 @@ def get_tech_meetings(email, graph_token, date=None):
         if response.status_code == 200:
             events = response.json().get('value', [])
             
-            # Filter out declined/cancelled meetings
             valid_meetings = []
             total_minutes = 0
             
@@ -273,20 +262,43 @@ def get_tech_meetings(email, graph_token, date=None):
                 if response_status == 'declined':
                     continue
                 
-                # Calculate duration
-                start = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00'))
-                end = datetime.fromisoformat(event['end']['dateTime'].replace('Z', '+00:00'))
-                duration_minutes = (end - start).total_seconds() / 60
+                # Handle all-day events
+                if event.get('isAllDay'):
+                    # All-day events count as full work day
+                    duration_minutes = WORK_HOURS_PER_DAY * 60
+                    debug_print(f"All-day event detected, counting as {WORK_HOURS_PER_DAY}h")
+                else:
+                    # Calculate duration for regular events
+                    start = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00'))
+                    end = datetime.fromisoformat(event['end']['dateTime'].replace('Z', '+00:00'))
+                    
+                    # Clamp to work hours (8 AM - 5 PM)
+                    work_start = start_time
+                    work_end = end_time
+                    
+                    meeting_start = max(start, work_start)
+                    meeting_end = min(end, work_end)
+                    
+                    if meeting_end > meeting_start:
+                        duration_minutes = (meeting_end - meeting_start).total_seconds() / 60
+                    else:
+                        continue  # Meeting outside work hours
                 
-                # PRIVACY: Don't store meeting subject, just store as "Busy"
+                # Cap individual meetings at work day length
+                duration_minutes = min(duration_minutes, WORK_HOURS_PER_DAY * 60)
+                
                 valid_meetings.append({
-                    'subject': 'Busy',  # Privacy mode - no actual subject
-                    'start': start,
-                    'end': end,
-                    'duration_minutes': duration_minutes
+                    'subject': 'Busy',
+                    'start': start if not event.get('isAllDay') else start_time,
+                    'end': end if not event.get('isAllDay') else end_time,
+                    'duration_minutes': duration_minutes,
+                    'is_all_day': event.get('isAllDay', False)
                 })
                 
                 total_minutes += duration_minutes
+            
+            # Cap total at work day length
+            total_minutes = min(total_minutes, WORK_HOURS_PER_DAY * 60)
             
             return {
                 'meeting_count': len(valid_meetings),
@@ -294,26 +306,28 @@ def get_tech_meetings(email, graph_token, date=None):
                 'meetings': valid_meetings
             }
         elif response.status_code == 404:
-            # User not found in Azure AD
             return {'meeting_count': 0, 'total_hours': 0, 'meetings': [], 'error': 'user_not_found'}
         else:
             return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
     
     except Exception as e:
+        debug_print(f"Error getting meetings: {e}")
         return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
-    """Get ticket metrics for a technician on a specific date - FIXED WITH MANUAL DATE VALIDATION"""
+    """Get ticket metrics for a technician on a specific date - WITH DEBUGGING"""
     
     if date is None:
-        date = datetime.now()
+        date = datetime.now() - timedelta(days=1)  # Default to yesterday
     
-    # Get tickets closed/updated by this tech today
     start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_day = date.replace(hour=23, minute=59, second=59, microsecond=999999)
     
     start_ms = int(start_of_day.timestamp() * 1000)
     end_ms = int(end_of_day.timestamp() * 1000)
+    
+    debug_print(f"Searching tickets for {tech_name} on {date.strftime('%Y-%m-%d')}")
+    debug_print(f"Date range: {start_ms} to {end_ms}")
     
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -329,9 +343,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
         'high_complexity_count': 0
     }
     
-    # ============================================================
-    # SEARCH 1: Get ACTIVE tickets (for workload count)
-    # ============================================================
+    # Get active tickets
     active_list_info = {
         "list_info": {
             "row_count": 250,
@@ -362,13 +374,12 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
             active_tickets = result.get('requests', [])
             
             metrics['active_tickets'] = len(active_tickets)
+            debug_print(f"Found {len(active_tickets)} active tickets")
             
-            # Count overdue from active tickets
             for ticket in active_tickets:
                 if ticket.get('is_overdue'):
                     metrics['overdue_count'] += 1
                     
-                # Check if updated today
                 updated_time = ticket.get('last_updated_time', {})
                 if isinstance(updated_time, dict):
                     updated_ms = updated_time.get('value')
@@ -376,11 +387,9 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                         metrics['updated_today'] += 1
     
     except Exception as e:
-        print(f"    ⚠️  Error getting active tickets: {e}")
+        debug_print(f"Error getting active tickets: {e}")
     
-    # ============================================================
-    # SEARCH 2: Get CLOSED tickets with MANUAL date filtering
-    # ============================================================
+    # Get closed tickets with manual date validation
     closed_list_info = {
         "list_info": {
             "row_count": 250,
@@ -406,7 +415,10 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
         closed_count = 0
         start_index = 1
         pages_checked = 0
-        max_pages = 5  # Check up to 1250 tickets (5 pages × 250)
+        max_pages = 5
+        tickets_examined = 0
+        
+        debug_print(f"Searching for closed tickets...")
         
         while pages_checked < max_pages:
             closed_list_info['list_info']['start_index'] = start_index
@@ -420,72 +432,68 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                 closed_tickets = result.get('requests', [])
                 
                 if not closed_tickets:
+                    debug_print(f"No more closed tickets on page {pages_checked + 1}")
                     break
                 
-                # Manually check each ticket's resolved_time
                 found_tickets_in_range = False
                 
                 for ticket in closed_tickets:
+                    tickets_examined += 1
                     resolved_time = ticket.get('resolved_time', {})
                     
                     if isinstance(resolved_time, dict):
                         resolved_ms = resolved_time.get('value')
                         
                         if resolved_ms:
-                            # Check if ticket was resolved today
+                            resolved_date = datetime.fromtimestamp(resolved_ms / 1000)
+                            
                             if start_ms <= resolved_ms <= end_ms:
                                 closed_count += 1
                                 found_tickets_in_range = True
+                                debug_print(f"  Found closed ticket #{ticket.get('id')} resolved on {resolved_date}")
                             elif resolved_ms < start_ms:
-                                # We've gone past today's tickets (sorted desc)
-                                # Stop checking more pages
+                                debug_print(f"  Ticket #{ticket.get('id')} too old ({resolved_date}), stopping search")
                                 break
                 
-                # If we didn't find any tickets in today's range, stop
                 if not found_tickets_in_range and pages_checked > 0:
+                    debug_print(f"No tickets in date range on page {pages_checked + 1}, stopping")
                     break
                 
-                # Check if there are more pages
                 has_more = result.get('list_info', {}).get('has_more_rows', False)
                 if not has_more:
+                    debug_print(f"No more pages")
                     break
                 
                 start_index += 250
                 pages_checked += 1
             else:
+                debug_print(f"API error: {response.status_code}")
                 break
         
         metrics['closed_today'] = closed_count
+        debug_print(f"Total closed tickets found: {closed_count} (examined {tickets_examined} total tickets)")
     
     except Exception as e:
-        print(f"    ⚠️  Error getting closed tickets: {e}")
+        debug_print(f"Error getting closed tickets: {e}")
     
     return metrics
 
 def calculate_adjusted_performance(meeting_data, ticket_metrics):
     """Calculate performance adjusted for meeting load"""
     
-    # Calculate available hours
     meeting_hours = meeting_data['total_hours']
-    available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)  # Minimum 0.5h
+    available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
     
-    # Calculate velocity (tickets per available hour)
     tickets_closed = ticket_metrics['closed_today']
     tickets_updated = ticket_metrics['updated_today']
     
     velocity_closed = tickets_closed / available_hours if available_hours > 0 else 0
     velocity_updated = tickets_updated / available_hours if available_hours > 0 else 0
     
-    # Calculate performance score (0-100)
     score = 0
-    
-    # Tickets closed (40 points max - 1 ticket per hour = 10 points)
     score += min(40, velocity_closed * 10)
-    
-    # Tickets updated (30 points max)
     score += min(30, velocity_updated * 5)
     
-    # Active workload (15 points for 5-15 active tickets, scale down if too many or too few)
     active = ticket_metrics['active_tickets']
     if 5 <= active <= 15:
         score += 15
@@ -494,10 +502,7 @@ def calculate_adjusted_performance(meeting_data, ticket_metrics):
     else:
         score += max(0, 15 - (active - 15) * 0.5)
     
-    # Overdue penalty (-5 points per overdue)
     score -= ticket_metrics['overdue_count'] * 5
-    
-    # Ensure score is 0-100
     score = max(0, min(100, score))
     
     return {
@@ -509,7 +514,7 @@ def calculate_adjusted_performance(meeting_data, ticket_metrics):
     }
 
 def upload_to_dust_historical(tech_data, date):
-    """Upload historical performance data to Dust (servicedesk data source)"""
+    """Upload historical performance data to Dust"""
     
     DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
     
@@ -537,23 +542,21 @@ def upload_to_dust_historical(tech_data, date):
             ],
             "text": f"""# Technician Performance - {tech_name}
 **Date:** {date.strftime('%B %d, %Y')}
-🔒 **Privacy Mode** | 📊 **Historical Data**
 
 ## 📅 Calendar & Availability
 - **Meetings:** {meetings['meeting_count']} meetings
-- **Meeting Time:** {meetings['total_hours']} hours ({perf['meeting_percentage']}% of workday)
-- **Available for Tickets:** {perf['available_hours']} hours
+- **Meeting Time:** {meetings['total_hours']} hours ({perf['meeting_percentage']}%)
+- **Available:** {perf['available_hours']} hours
 
 ## 🎫 Ticket Activity
-- **Tickets Closed:** {tickets['closed_today']}
-- **Tickets Updated:** {tickets['updated_today']}
-- **Active Workload:** {tickets['active_tickets']} tickets
-- **Overdue Tickets:** {tickets['overdue_count']}
+- **Closed:** {tickets['closed_today']}
+- **Updated:** {tickets['updated_today']}
+- **Active:** {tickets['active_tickets']}
+- **Overdue:** {tickets['overdue_count']}
 
-## ⚡ Performance Metrics
-- **Velocity (Closed):** {perf['velocity_closed']} tickets per available hour
-- **Velocity (Updated):** {perf['velocity_updated']} tickets per available hour
-- **Adjusted Performance Score:** {perf['adjusted_score']}/100
+## ⚡ Performance
+- **Velocity:** {perf['velocity_closed']} tickets/hour
+- **Score:** {perf['adjusted_score']}/100
 """,
             "structured_data": {
                 "technician_name": tech_name,
@@ -580,32 +583,26 @@ def upload_to_dust_historical(tech_data, date):
         try:
             response = requests.post(url, headers=headers, json=document, timeout=30)
             if response.status_code not in [200, 201]:
-                print(f"    ⚠️  Failed to upload {tech_name}")
-        except:
-            pass
+                debug_print(f"Failed to upload {tech_name}: {response.status_code}")
+        except Exception as e:
+            debug_print(f"Error uploading {tech_name}: {e}")
 
 def process_single_day(date, graph_token, sdp_token):
     """Process meeting and performance data for a specific date"""
     
-    date_str = date.strftime('%Y-%m-%d')
-    
-    # Skip weekends
     if date.weekday() >= 5:
         return None
     
-    # Auto-discover technicians (use current active techs)
     technicians_info = discover_active_technicians(sdp_token)
     
     if not technicians_info:
         return None
     
-    # Resolve emails (silently)
     for tech_name, info in technicians_info.items():
         if not info.get('email'):
             email = resolve_technician_email(tech_name, info, graph_token)
             info['email'] = email
     
-    # Track all technicians for this date
     tech_data = {}
     meeting_total = 0
     ticket_total = 0
@@ -613,18 +610,15 @@ def process_single_day(date, graph_token, sdp_token):
     for tech_name, tech_info in technicians_info.items():
         tech_email = tech_info.get('email')
         
-        # Get meetings for this specific date
         meetings = get_tech_meetings(tech_email, graph_token, date)
         meeting_total += meetings['meeting_count']
         
-        # Get tickets for this specific date
         tickets = get_tech_ticket_metrics(tech_name, sdp_token, date)
         if not tickets:
             tickets = {'active_tickets': 0, 'closed_today': 0, 'updated_today': 0, 'overdue_count': 0}
         
         ticket_total += tickets['closed_today']
         
-        # Calculate performance
         performance = calculate_adjusted_performance(meetings, tickets)
         
         tech_data[tech_name] = {
@@ -634,7 +628,6 @@ def process_single_day(date, graph_token, sdp_token):
             'performance': performance
         }
     
-    # Save to dated file
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -654,7 +647,6 @@ def process_single_day(date, graph_token, sdp_token):
     with open(filename, 'w') as f:
         json.dump(output, f, indent=2)
     
-    # Upload to Dust with historical date
     if DUST_API_KEY and DUST_WORKSPACE_ID:
         upload_to_dust_historical(tech_data, date)
     
@@ -663,16 +655,14 @@ def process_single_day(date, graph_token, sdp_token):
     return tech_data
 
 def run_backfill(days_back, graph_token, sdp_token):
-    """Backfill historical performance data with robust error handling"""
+    """Backfill historical performance data"""
     
     print("="*70)
     print(f"📅 HISTORICAL BACKFILL MODE")
     print(f"   Capturing last {days_back} calendar days")
-    print(f"   (Weekends will be skipped)")
     print("="*70)
     print()
     
-    # Limit check
     if days_back > 365:
         print("⚠️  Maximum backfill is 365 days. Using 365 instead.")
         days_back = 365
@@ -681,10 +671,8 @@ def run_backfill(days_back, graph_token, sdp_token):
     start_date = end_date - timedelta(days=days_back)
     
     print(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    print(f"Estimated business days: {days_back * 5 // 7}")
     print()
     
-    # Load checkpoint if exists
     checkpoint_file = 'backfill_checkpoint.json'
     processed_dates = set()
     
@@ -692,32 +680,26 @@ def run_backfill(days_back, graph_token, sdp_token):
         with open(checkpoint_file, 'r') as f:
             checkpoint = json.load(f)
             processed_dates = set(checkpoint.get('processed_dates', []))
-            print(f"📋 Resuming: {len(processed_dates)} days already processed")
-            print()
+            print(f"📋 Resuming: {len(processed_dates)} days already processed\n")
     
     processed_days = len(processed_dates)
     skipped_days = 0
     failed_days = []
     
-    # Process each day
     for days_ago in range(days_back, -1, -1):
         date = datetime.now() - timedelta(days=days_ago)
         date_str = date.strftime('%Y-%m-%d')
         
-        # Skip if already processed
         if date_str in processed_dates:
             continue
         
-        # Skip weekends
         if date.weekday() >= 5:
             skipped_days += 1
             continue
         
-        # Process day
         try:
             business_day_num = processed_days + 1
-            total_business_days = days_back * 5 // 7
-            print(f"{business_day_num}/{total_business_days} {date_str}", end=' ')
+            print(f"{business_day_num} {date_str}", end=' ')
             
             result = process_single_day(date, graph_token, sdp_token)
             
@@ -725,7 +707,6 @@ def run_backfill(days_back, graph_token, sdp_token):
                 processed_days += 1
                 processed_dates.add(date_str)
                 
-                # Save checkpoint every 10 days
                 if processed_days % 10 == 0:
                     with open(checkpoint_file, 'w') as f:
                         json.dump({
@@ -736,12 +717,10 @@ def run_backfill(days_back, graph_token, sdp_token):
                 skipped_days += 1
                 print(" ⏭️  Skipped")
             
-            # RATE LIMITING
             if days_ago > 0:
                 import time
                 time.sleep(3)
                 
-                # Extra delay every 50 days
                 if processed_days % 50 == 0 and processed_days > 0:
                     print(f"  ⏸️  Cooling down...")
                     time.sleep(30)
@@ -751,7 +730,6 @@ def run_backfill(days_back, graph_token, sdp_token):
             failed_days.append(date_str)
             continue
     
-    # Save final checkpoint
     with open(checkpoint_file, 'w') as f:
         json.dump({
             'processed_dates': list(processed_dates),
@@ -759,25 +737,22 @@ def run_backfill(days_back, graph_token, sdp_token):
             'last_updated': datetime.now().isoformat()
         }, f)
     
-    # Final summary
     print("\n" + "="*70)
     print(f"✅ BACKFILL COMPLETE")
     print(f"   Processed: {processed_days} business days")
-    print(f"   Skipped: {skipped_days} days (weekends)")
+    print(f"   Skipped: {skipped_days} days")
     if failed_days:
         print(f"   Failed: {len(failed_days)} days")
-    print(f"   Files created: {processed_days} JSON files")
     print("="*70)
     
-    # Cleanup checkpoint
     if not failed_days and os.path.exists(checkpoint_file):
         os.remove(checkpoint_file)
 
-def generate_performance_report(tech_data):
+def generate_performance_report(tech_data, date):
     """Generate formatted performance report"""
     
     print("\n" + "="*70)
-    print(f"📊 TECHNICIAN PERFORMANCE REPORT - {datetime.now().strftime('%B %d, %Y')}")
+    print(f"📊 TECHNICIAN PERFORMANCE REPORT - {date.strftime('%B %d, %Y')}")
     print("="*70)
     
     sorted_techs = sorted(tech_data.items(), key=lambda x: x[1]['performance']['adjusted_score'], reverse=True)
@@ -796,15 +771,15 @@ def generate_performance_report(tech_data):
     
     print()
 
-def save_metrics_to_file(tech_data):
+def save_metrics_to_file(tech_data, date):
     """Save daily metrics to JSON"""
     
-    filename = f"tech_performance_{datetime.now().strftime('%Y%m%d')}.json"
+    filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
     for tech, data in tech_data.items():
         output[tech] = {
-            'date': datetime.now().isoformat(),
+            'date': date.isoformat(),
             'email': data.get('email'),
             'meetings': {
                 'count': data['meetings']['meeting_count'],
@@ -820,10 +795,10 @@ def save_metrics_to_file(tech_data):
     
     print(f"📁 Metrics saved to: {filename}")
 
-def upload_to_dust(tech_data):
-    """Upload performance metrics to Dust (servicedesk data source)"""
+def upload_to_dust(tech_data, date):
+    """Upload performance metrics to Dust"""
     
-    print("\n📤 Uploading performance data to Dust (servicedesk data source)...")
+    print("\n📤 Uploading performance data to Dust...")
     
     DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
     
@@ -832,7 +807,7 @@ def upload_to_dust(tech_data):
         'Content-Type': 'application/json'
     }
     
-    date_str = datetime.now().strftime('%Y-%m-%d')
+    date_str = date.strftime('%Y-%m-%d')
     
     uploaded = 0
     failed = 0
@@ -844,7 +819,7 @@ def upload_to_dust(tech_data):
         
         document = {
             "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
-            "timestamp": int(datetime.now().timestamp() * 1000),
+            "timestamp": int(date.timestamp() * 1000),
             "tags": [
                 "performance-metrics",
                 f"technician:{tech_name.lower().replace(' ', '-')}",
@@ -852,8 +827,7 @@ def upload_to_dust(tech_data):
                 f"meeting-load:{meetings['meeting_count']}"
             ],
             "text": f"""# Technician Performance - {tech_name}
-**Date:** {datetime.now().strftime('%B %d, %Y')}
-🔒 **Privacy Mode**
+**Date:** {date.strftime('%B %d, %Y')}
 
 ## 📅 Calendar & Availability
 - **Meetings:** {meetings['meeting_count']} meetings
@@ -873,7 +847,7 @@ def upload_to_dust(tech_data):
             "structured_data": {
                 "technician_name": tech_name,
                 "date": date_str,
-                "timestamp_ms": int(datetime.now().timestamp() * 1000),
+                "timestamp_ms": int(date.timestamp() * 1000),
                 "meeting_count": meetings['meeting_count'],
                 "meeting_hours": meetings['total_hours'],
                 "meeting_percentage": perf['meeting_percentage'],
@@ -902,41 +876,47 @@ def upload_to_dust(tech_data):
     print(f"✓ Uploaded: {uploaded} | Failed: {failed}")
 
 def main():
+    global DEBUG
     args = parser.parse_args()
+    
+    if args.debug:
+        DEBUG = True
     
     print("="*70)
     print("🚀 TECHNICIAN MEETING LOAD & PERFORMANCE TRACKER")
-    print("   (AUTO-DISCOVERY + PRIVACY MODE + 365-DAY BACKFILL)")
-    print("   ✨ FIXED v2: Accurate closed ticket counts with manual validation!")
+    print("   ✨ FIXED v3: Accurate counts + meeting hour fix + debug mode")
     print("="*70)
     print()
     
-    # Get tokens
     graph_token = get_graph_token()
     sdp_token = get_sdp_token()
     
-    # BACKFILL MODE
     if args.backfill:
         if args.backfill > 365:
-            print("⚠️  Maximum is 365 days. Using 365.")
             args.backfill = 365
-        
         run_backfill(args.backfill, graph_token, sdp_token)
         return
     
-    # SPECIFIC DATE MODE
     if args.date:
         try:
             date = datetime.strptime(args.date, '%Y-%m-%d')
             print(f"📅 Processing: {date.strftime('%Y-%m-%d')}")
-            process_single_day(date, graph_token, sdp_token)
+            result = process_single_day(date, graph_token, sdp_token)
+            if result:
+                generate_performance_report(result, date)
             return
         except ValueError:
             print("❌ Invalid date format. Use YYYY-MM-DD")
             return
     
-    # DEFAULT MODE - TODAY
-    print("📅 Processing today's data...")
+    # Default: Process yesterday (more reliable than today)
+    if args.today:
+        target_date = datetime.now()
+        print("📅 Processing today's data (may be incomplete)...")
+    else:
+        target_date = datetime.now() - timedelta(days=1)
+        print(f"📅 Processing yesterday's data ({target_date.strftime('%Y-%m-%d')}) for complete metrics...")
+        print("    (Use --today flag to process today instead)\n")
     
     technicians_info = discover_active_technicians(sdp_token)
     
@@ -958,11 +938,11 @@ def main():
         print(f"Processing {tech_name}...")
         
         tech_email = tech_info.get('email')
-        meetings = get_tech_meetings(tech_email, graph_token)
+        meetings = get_tech_meetings(tech_email, graph_token, target_date)
         
         print(f"  ✓ Meetings: {meetings['meeting_count']} ({meetings['total_hours']}h)")
         
-        tickets = get_tech_ticket_metrics(tech_name, sdp_token)
+        tickets = get_tech_ticket_metrics(tech_name, sdp_token, target_date)
         if tickets:
             print(f"  ✓ Tickets: {tickets['closed_today']} closed")
         else:
@@ -980,11 +960,11 @@ def main():
         
         print()
     
-    generate_performance_report(tech_data)
-    save_metrics_to_file(tech_data)
+    generate_performance_report(tech_data, target_date)
+    save_metrics_to_file(tech_data, target_date)
     
     if DUST_API_KEY and DUST_WORKSPACE_ID:
-        upload_to_dust(tech_data)
+        upload_to_dust(tech_data, target_date)
 
 if __name__ == "__main__":
     try:
