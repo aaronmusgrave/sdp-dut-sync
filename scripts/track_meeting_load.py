@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FIXED: Fetches individual tickets to get date fields
+FIXED v5: Properly filters closed tickets by technician
 """
 
 import os
@@ -236,7 +236,7 @@ def get_tech_meetings(email, graph_token, date=None):
     return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
-    """FIXED: Fetches individual tickets to get date fields"""
+    """FIXED v5: Properly filters by technician name"""
     if date is None:
         date = datetime.now()
     
@@ -289,7 +289,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     except:
         pass
     
-    # Get closed tickets - fetch individually to get date fields
+    # Get closed tickets - fetch individually and VERIFY technician
     closed_list_info = {
         "list_info": {
             "row_count": 100,
@@ -320,23 +320,30 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
         if response.status_code == 200:
             result = response.json()
             closed_ticket_ids = [t['id'] for t in result.get('requests', [])]
-            debug_print(f"Found {len(closed_ticket_ids)} closed tickets, fetching details...")
+            debug_print(f"Found {len(closed_ticket_ids)} closed tickets for {tech_name}, checking dates...")
             
             closed_count = 0
             
-            # Fetch each ticket individually (this is slow but necessary)
-            for ticket_id in closed_ticket_ids[:50]:  # Limit to 50 most recent
+            for ticket_id in closed_ticket_ids[:50]:
                 ticket = get_ticket_details(ticket_id, sdp_token)
                 if not ticket:
                     continue
                 
-                # Check completed_time (preferred for closed tickets)
+                # CRITICAL FIX: Verify this ticket actually belongs to this technician
+                ticket_tech = ticket.get('technician', {})
+                if isinstance(ticket_tech, dict):
+                    ticket_tech_name = ticket_tech.get('name', '')
+                    if ticket_tech_name != tech_name:
+                        debug_print(f"  ⏭️  Ticket #{ticket_id} belongs to {ticket_tech_name}, skipping")
+                        continue
+                
+                # Check completed_time
                 completed_time = ticket.get('completed_time')
                 completed_date = safe_timestamp_to_date(completed_time)
                 
                 if completed_date and start_of_day <= completed_date <= end_of_day:
                     closed_count += 1
-                    debug_print(f"  ✓ Ticket #{ticket_id} completed on {completed_date.strftime('%Y-%m-%d %H:%M')}")
+                    debug_print(f"  ✓ Ticket #{ticket_id} completed by {tech_name} on {completed_date.strftime('%Y-%m-%d %H:%M')}")
                     continue
                 
                 # Fallback to resolved_time
@@ -345,10 +352,10 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                 
                 if resolved_date and start_of_day <= resolved_date <= end_of_day:
                     closed_count += 1
-                    debug_print(f"  ✓ Ticket #{ticket_id} resolved on {resolved_date.strftime('%Y-%m-%d %H:%M')}")
+                    debug_print(f"  ✓ Ticket #{ticket_id} resolved by {tech_name} on {resolved_date.strftime('%Y-%m-%d %H:%M')}")
             
             metrics['closed_today'] = closed_count
-            debug_print(f"✅ TOTAL CLOSED: {closed_count} tickets")
+            debug_print(f"✅ {tech_name} TOTAL CLOSED: {closed_count} tickets")
     
     except Exception as e:
         debug_print(f"Error getting closed tickets: {e}")
@@ -449,8 +456,8 @@ def main():
     DEBUG = args.debug
     
     print("="*70)
-    print("🚀 TECHNICIAN PERFORMANCE TRACKER v4")
-    print("   ✨ FIXED: Fetches individual tickets for accurate dates")
+    print("🚀 TECHNICIAN PERFORMANCE TRACKER v5")
+    print("   ✨ FIXED: Properly filters closed tickets by technician")
     print("="*70)
     print()
     
