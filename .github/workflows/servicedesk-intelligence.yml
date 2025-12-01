@@ -56,7 +56,7 @@ jobs:
           DUST_FOLDER_NAME: servicedesk
           LAST_SYNC_TIME: ${{ env.LAST_SYNC_TIME }}
         run: |
-          python sync_servicedesk_intelligence.py
+          python scripts/sync_servicedesk_intelligence.py
       
       - name: Save sync timestamp
         if: always()
