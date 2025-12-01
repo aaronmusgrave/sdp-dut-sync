@@ -1,139 +1,84 @@
-name: ServiceDesk Intelligence Suite
+name: ServiceDesk Sync
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes (incremental sync)
-  
+    - cron: '*/30 * * * *'  # Every 30 minutes
   workflow_dispatch:
-  
-  push:
-    branches:
-      - main
-    paths:
-      - 'scripts/sync_servicedesk_intelligence.py'
-      - '.github/workflows/servicedesk-intelligence.yml'
+    inputs:
+      force_full_sync:
+        description: 'Force full sync (ignore last sync time)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
-  sync-intelligence:
+  sync:
     runs-on: ubuntu-latest
-    name: Incremental Intelligence Sync
-    
-    permissions:
-      contents: write  # Need write permission to commit timestamp
-    
     steps:
-    - name: 📥 Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Need full history for git operations
-    
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: 📦 Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install -r scripts/requirements.txt
-    
-    - name: 🚀 Run incremental intelligence sync
-      env:
-        SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
-        SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
-        SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
-        SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
-        DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-        DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
-        DUST_FOLDER_NAME: 'servicedesk'
-      run: |
-        echo "🔍 Checking for previous sync timestamp..."
-        
-        # Load last sync time from repo file
-        if [ -f last_sync_time.txt ]; then
-          export LAST_SYNC_TIME=$(cat last_sync_time.txt)
-          echo "✅ Last sync time loaded from repo: $LAST_SYNC_TIME"
-          
-          # Calculate human-readable date (optional, for logging)
-          if command -v date &> /dev/null; then
-            SYNC_DATE=$(date -d @$((LAST_SYNC_TIME/1000)) '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "timestamp: $LAST_SYNC_TIME")
-            echo "   📅 Syncing tickets updated since: $SYNC_DATE"
-          fi
-        else
-          echo "⚠️  No previous sync timestamp found - will perform initial full sync"
-        fi
-        
-        echo ""
-        echo "🚀 Starting ServiceDesk Intelligence Sync..."
-        python -u scripts/sync_servicedesk_intelligence.py
-    
-    - name: 💾 Commit updated timestamp
-      if: success()
-      run: |
-        if [ -f last_sync_time.txt ]; then
-          echo "📝 Saving updated sync timestamp to repository..."
-          
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Add the timestamp file
-          git add last_sync_time.txt
-          
-          # Only commit if there are changes
-          if git diff --staged --quiet; then
-            echo "ℹ️  No timestamp changes to commit"
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Read last sync time
+        id: read_sync_time
+        run: |
+          if [ "${{ github.event.inputs.force_full_sync }}" == "true" ]; then
+            echo "🔄 Force full sync requested - ignoring last sync time"
+            # Don't set LAST_SYNC_TIME, triggering full sync
+          elif [ -f last_sync_time.txt ]; then
+            LAST_SYNC=$(cat last_sync_time.txt)
+            echo "LAST_SYNC_TIME=$LAST_SYNC" >> $GITHUB_ENV
+            echo "📊 Last sync time: $LAST_SYNC"
+            
+            # Calculate time since last sync
+            CURRENT_TIME=$(date +%s)000
+            TIME_DIFF=$((($CURRENT_TIME - $LAST_SYNC) / 1000 / 60))
+            echo "⏱️  Minutes since last sync: $TIME_DIFF"
           else
+            echo "🆕 No previous sync time found - performing initial full sync"
+          fi
+      
+      - name: Run ServiceDesk sync
+        env:
+          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+          DUST_FOLDER_NAME: servicedesk
+          LAST_SYNC_TIME: ${{ env.LAST_SYNC_TIME }}
+        run: |
+          python sdp_intelligence_v2.4.py
+      
+      - name: Save sync timestamp
+        if: always()
+        run: |
+          if [ -f last_sync_time.txt ]; then
+            echo "📝 Saving updated sync timestamp to repository..."
+            
             TIMESTAMP=$(cat last_sync_time.txt)
-            git commit -m "Update sync timestamp: $TIMESTAMP [skip ci]"
-            git push
+            
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+            git add last_sync_time.txt
+            git commit -m "Update sync timestamp: $TIMESTAMP [skip ci]" || echo "No changes to commit"
+            git push || echo "Nothing to push"
+            
             echo "✅ Timestamp committed and pushed to repository"
           fi
-        else
-          echo "⚠️  No timestamp file found to commit"
-        fi
-    
-    - name: 📊 Upload analytics report
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: analytics-report
-        path: analytics_report_*.json
-        retention-days: 30
-        if-no-files-found: ignore
-
-  health-check:
-    runs-on: ubuntu-latest
-    name: Daily Health Check
-    if: github.event.schedule == '0 9 * * *'
-    needs: sync-intelligence
-    
-    steps:
-    - name: 📥 Checkout
-      uses: actions/checkout@v4
-    
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: 📦 Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install -r scripts/requirements.txt
-    
-    - name: 🏥 Run health check
-      env:
-        DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-        DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      run: |
-        python scripts/ticket_health_check.py
-    
-    - name: 📤 Upload health report
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: health-report
-        path: health_report_*.md
-        retention-days: 90
+      
+      - name: Upload analytics report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analytics-report
+          path: analytics_report_*.json
+          retention-days: 30
