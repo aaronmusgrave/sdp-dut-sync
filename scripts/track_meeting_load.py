@@ -4,7 +4,7 @@ Track technician meeting load and correlate with ticket performance
 AUTO-DISCOVERS technicians from ServiceDesk ticket assignments
 PRIVACY MODE: Meeting titles are hidden, only shows "Busy"
 SAVES TO: servicedesk data source (unified with ticket data)
-FIXED: Now properly captures closed/resolved tickets
+FIXED v2: Properly counts closed tickets with manual date validation
 """
 
 import os
@@ -64,7 +64,7 @@ def get_graph_token():
         raise Exception(f"Failed to get Graph token: {response.status_code}")
 
 def get_sdp_token():
-    """Get ServiceDesk Plus access token - FIXED VERSION"""
+    """Get ServiceDesk Plus access token"""
     print("Getting ServiceDesk token...")
     
     payload = {
@@ -303,7 +303,7 @@ def get_tech_meetings(email, graph_token, date=None):
         return {'meeting_count': 0, 'total_hours': 0, 'meetings': []}
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
-    """Get ticket metrics for a technician on a specific date - FIXED VERSION"""
+    """Get ticket metrics for a technician on a specific date - FIXED WITH MANUAL DATE VALIDATION"""
     
     if date is None:
         date = datetime.now()
@@ -334,7 +334,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     # ============================================================
     active_list_info = {
         "list_info": {
-            "row_count": 250,  # Increased from 100
+            "row_count": 250,
             "start_index": 1,
             "search_criteria": [
                 {
@@ -345,7 +345,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                 {
                     "field": "status.name",
                     "condition": "is not",
-                    "values": ["Closed", "Resolved", "Cancelled"]  # Exclude closed
+                    "values": ["Closed", "Resolved", "Cancelled"]
                 }
             ]
         }
@@ -379,11 +379,11 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
         print(f"    ⚠️  Error getting active tickets: {e}")
     
     # ============================================================
-    # SEARCH 2: Get CLOSED tickets for this date range
+    # SEARCH 2: Get CLOSED tickets with MANUAL date filtering
     # ============================================================
     closed_list_info = {
         "list_info": {
-            "row_count": 250,  # Increased from 100
+            "row_count": 250,
             "start_index": 1,
             "search_criteria": [
                 {
@@ -394,39 +394,68 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
                 {
                     "field": "status.name",
                     "condition": "is",
-                    "values": ["Closed", "Resolved"]  # Only closed/resolved
-                },
-                {
-                    "field": "resolved_time",
-                    "condition": "between",
-                    "value": f"{start_ms},{end_ms}"  # Date range
+                    "values": ["Closed", "Resolved"]
                 }
-            ]
+            ],
+            "sort_field": "resolved_time",
+            "sort_order": "desc"
         }
     }
     
     try:
-        params = {'input_data': json.dumps(closed_list_info)}
-        url = f"{SDP_API_BASE}/requests"
+        closed_count = 0
+        start_index = 1
+        pages_checked = 0
+        max_pages = 5  # Check up to 1250 tickets (5 pages × 250)
         
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        while pages_checked < max_pages:
+            closed_list_info['list_info']['start_index'] = start_index
+            params = {'input_data': json.dumps(closed_list_info)}
+            url = f"{SDP_API_BASE}/requests"
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                closed_tickets = result.get('requests', [])
+                
+                if not closed_tickets:
+                    break
+                
+                # Manually check each ticket's resolved_time
+                found_tickets_in_range = False
+                
+                for ticket in closed_tickets:
+                    resolved_time = ticket.get('resolved_time', {})
+                    
+                    if isinstance(resolved_time, dict):
+                        resolved_ms = resolved_time.get('value')
+                        
+                        if resolved_ms:
+                            # Check if ticket was resolved today
+                            if start_ms <= resolved_ms <= end_ms:
+                                closed_count += 1
+                                found_tickets_in_range = True
+                            elif resolved_ms < start_ms:
+                                # We've gone past today's tickets (sorted desc)
+                                # Stop checking more pages
+                                break
+                
+                # If we didn't find any tickets in today's range, stop
+                if not found_tickets_in_range and pages_checked > 0:
+                    break
+                
+                # Check if there are more pages
+                has_more = result.get('list_info', {}).get('has_more_rows', False)
+                if not has_more:
+                    break
+                
+                start_index += 250
+                pages_checked += 1
+            else:
+                break
         
-        if response.status_code == 200:
-            result = response.json()
-            closed_tickets = result.get('requests', [])
-            
-            # All returned tickets are closed within the date range
-            metrics['closed_today'] = len(closed_tickets)
-            
-            # Also check if any were updated today
-            for ticket in closed_tickets:
-                updated_time = ticket.get('last_updated_time', {})
-                if isinstance(updated_time, dict):
-                    updated_ms = updated_time.get('value')
-                    if updated_ms and start_ms <= updated_ms <= end_ms:
-                        # Only count if not already counted
-                        if updated_ms != ticket.get('resolved_time', {}).get('value'):
-                            metrics['updated_today'] += 1
+        metrics['closed_today'] = closed_count
     
     except Exception as e:
         print(f"    ⚠️  Error getting closed tickets: {e}")
@@ -878,7 +907,7 @@ def main():
     print("="*70)
     print("🚀 TECHNICIAN MEETING LOAD & PERFORMANCE TRACKER")
     print("   (AUTO-DISCOVERY + PRIVACY MODE + 365-DAY BACKFILL)")
-    print("   ✨ FIXED: Now captures closed/resolved tickets accurately!")
+    print("   ✨ FIXED v2: Accurate closed ticket counts with manual validation!")
     print("="*70)
     print()
     
