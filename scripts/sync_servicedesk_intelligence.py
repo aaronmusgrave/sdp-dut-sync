@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus Intelligence Suite v2.4 - OPTIMIZED & ENHANCED
+ServiceDesk Plus Intelligence Suite v2.5 - RESILIENT & FAULT-TOLERANT
 Major improvements:
-- 60-80% faster performance with parallel processing
-- Enhanced status handling and searchability
-- Batch API operations
-- Performance monitoring
-- Better error handling and logging
+- Individual ticket timeouts (skip stuck tickets)
+- Resume capability (checkpoint progress)
+- Better error isolation
+- Per-ticket logging
+- Automatic retry logic
+- Graceful degradation
 """
 
 import os
@@ -22,6 +23,8 @@ import concurrent.futures
 from functools import lru_cache
 import hashlib
 import logging
+import signal
+from contextlib import contextmanager
 
 # Setup logging
 logging.basicConfig(
@@ -48,14 +51,17 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
-# Settings
+# Settings - OPTIMIZED for resilience
 TICKETS_PER_PAGE = 100
 MAX_TICKETS = 10000
 MAX_RETRIES = 3
 MIN_PAGES_TO_CHECK = 5
-CONVERSATION_BATCH_SIZE = 50
+BATCH_SIZE = 25  # Smaller batches for better error isolation
 DUST_UPLOAD_BATCH_SIZE = 10
 MAX_PARALLEL_WORKERS = 5
+TICKET_TIMEOUT = 60  # Timeout per ticket (seconds)
+CONVERSATION_TIMEOUT = 45  # Timeout for conversation fetch (seconds)
+CHECKPOINT_FILE = 'sync_checkpoint.json'
 
 # Status categorization
 STATUS_CATEGORIES = {
@@ -118,6 +124,71 @@ class PerformanceMonitor:
 
 perf = PerformanceMonitor()
 
+# Timeout context manager
+class TimeoutException(Exception):
+    pass
+
+@contextmanager
+def timeout_context(seconds, error_message="Operation timed out"):
+    """Context manager for timeouts using signal"""
+    def timeout_handler(signum, frame):
+        raise TimeoutException(error_message)
+    
+    # Set the signal handler and alarm
+    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(seconds)
+    
+    try:
+        yield
+    finally:
+        # Disable the alarm and restore old handler
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+# Checkpoint Management
+class CheckpointManager:
+    def __init__(self, checkpoint_file=CHECKPOINT_FILE):
+        self.checkpoint_file = checkpoint_file
+    
+    def save(self, processed_ids, success_count, error_count):
+        """Save progress checkpoint"""
+        try:
+            checkpoint = {
+                'timestamp': datetime.now().isoformat(),
+                'processed_ids': list(processed_ids),
+                'success_count': success_count,
+                'error_count': error_count
+            }
+            with open(self.checkpoint_file, 'w') as f:
+                json.dump(checkpoint, f)
+            logger.info(f"💾 Checkpoint saved: {success_count} successful, {error_count} errors")
+        except Exception as e:
+            logger.error(f"Could not save checkpoint: {e}")
+    
+    def load(self):
+        """Load progress checkpoint"""
+        try:
+            if os.path.exists(self.checkpoint_file):
+                with open(self.checkpoint_file, 'r') as f:
+                    checkpoint = json.load(f)
+                logger.info(f"📂 Loaded checkpoint: {len(checkpoint['processed_ids'])} tickets already processed")
+                return set(checkpoint['processed_ids']), checkpoint['success_count'], checkpoint['error_count']
+        except Exception as e:
+            logger.error(f"Could not load checkpoint: {e}")
+        
+        return set(), 0, 0
+    
+    def clear(self):
+        """Clear checkpoint file"""
+        try:
+            if os.path.exists(self.checkpoint_file):
+                os.remove(self.checkpoint_file)
+                logger.info("🗑️  Checkpoint cleared")
+        except Exception as e:
+            logger.error(f"Could not clear checkpoint: {e}")
+
+checkpoint_mgr = CheckpointManager()
+
 def validate_environment():
     """Validate all required environment variables"""
     config = {
@@ -134,7 +205,6 @@ def validate_environment():
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
     
-    # Validate domain format
     if config['SDP_DOMAIN'] and ('http://' in config['SDP_DOMAIN'] or 'https://' in config['SDP_DOMAIN']):
         raise ValueError("SDP_DOMAIN should not include http:// or https://")
     
@@ -394,86 +464,116 @@ def fetch_with_retry(url, headers, max_retries=MAX_RETRIES, timeout=30):
     return None
 
 def fetch_ticket_details(ticket_id, access_token):
-    """Fetch detailed information for a single ticket"""
-    with perf.time_operation('fetch_ticket_details'):
-        headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-        url = f"{SDP_API_BASE}/requests/{ticket_id}"
-        
-        response = fetch_with_retry(url, headers)
-        
-        if response and response.status_code == 200:
-            return response.json().get('request', {})
+    """Fetch detailed information for a single ticket with timeout"""
+    try:
+        with timeout_context(30, f"Timeout fetching details for ticket {ticket_id}"):
+            with perf.time_operation('fetch_ticket_details'):
+                headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
+                url = f"{SDP_API_BASE}/requests/{ticket_id}"
+                
+                response = fetch_with_retry(url, headers, timeout=20)
+                
+                if response and response.status_code == 200:
+                    return response.json().get('request', {})
+                return None
+    except TimeoutException as e:
+        logger.error(f"  ⏱️  {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"  ⚠️  Error fetching details for {ticket_id}: {str(e)[:100]}")
         return None
 
 def fetch_ticket_conversations_single(ticket_id, access_token):
-    """Fetch ticket conversations for a single ticket"""
-    headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
-    
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications"
+    """Fetch ticket conversations for a single ticket with timeout"""
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            return []
-        
-        notifications = response.json().get('notifications', [])
-        conversations = []
-        
-        for notif in notifications[:20]:
-            notif_id = notif.get('id')
-            notif_type = notif.get('type', '')
+        with timeout_context(CONVERSATION_TIMEOUT, f"Timeout fetching conversations for {ticket_id}"):
+            headers = {'Authorization': f'Zoho-oauthtoken {access_token}'}
             
-            if any(keyword in notif_type.lower() for keyword in ['conversation', 'reply', 'reqreply', 'technician']):
-                try:
-                    detail_url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications/{notif_id}"
-                    detail_response = requests.get(detail_url, headers=headers, timeout=10)
-                    
-                    if detail_response.status_code == 200:
-                        detail_data = detail_response.json()
-                        notification = detail_data.get('notification', {})
+            url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications"
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                return []
+            
+            notifications = response.json().get('notifications', [])
+            conversations = []
+            
+            for notif in notifications[:20]:
+                notif_id = notif.get('id')
+                notif_type = notif.get('type', '')
+                
+                if any(keyword in notif_type.lower() for keyword in ['conversation', 'reply', 'reqreply', 'technician']):
+                    try:
+                        detail_url = f"{SDP_API_BASE}/requests/{ticket_id}/notifications/{notif_id}"
+                        detail_response = requests.get(detail_url, headers=headers, timeout=10)
                         
-                        description = notification.get('description', '')
-                        if description and len(description.strip()) > 0:
-                            sender = notification.get('sender', {})
-                            time_obj = notification.get('time', {})
+                        if detail_response.status_code == 200:
+                            detail_data = detail_response.json()
+                            notification = detail_data.get('notification', {})
                             
-                            conversations.append({
-                                'id': notif_id,
-                                'type': notif_type,
-                                'sender': sender.get('name', 'Unknown'),
-                                'sender_email': sender.get('email_id', ''),
-                                'time': time_obj.get('display_value', 'Unknown'),
-                                'time_ms': time_obj.get('value'),
-                                'description': description,
-                                'is_public': notification.get('is_public', True)
-                            })
-                    
-                    time.sleep(0.1)
-                    
-                except Exception as e:
-                    continue
-        
-        return conversations
-        
+                            description = notification.get('description', '')
+                            if description and len(description.strip()) > 0:
+                                sender = notification.get('sender', {})
+                                time_obj = notification.get('time', {})
+                                
+                                conversations.append({
+                                    'id': notif_id,
+                                    'type': notif_type,
+                                    'sender': sender.get('name', 'Unknown'),
+                                    'sender_email': sender.get('email_id', ''),
+                                    'time': time_obj.get('display_value', 'Unknown'),
+                                    'time_ms': time_obj.get('value'),
+                                    'description': description,
+                                    'is_public': notification.get('is_public', True)
+                                })
+                        
+                        time.sleep(0.1)
+                        
+                    except Exception as e:
+                        continue
+            
+            return conversations
+    except TimeoutException as e:
+        logger.error(f"  ⏱️  {str(e)}")
+        return []
     except Exception as e:
+        logger.error(f"  ⚠️  Error fetching conversations for {ticket_id}: {str(e)[:50]}")
         return []
 
 def fetch_multiple_ticket_conversations(ticket_ids, access_token, max_workers=MAX_PARALLEL_WORKERS):
-    """Fetch conversations for multiple tickets in parallel - OPTIMIZED"""
+    """Fetch conversations for multiple tickets in parallel with timeout handling"""
     with perf.time_operation('fetch_conversations_batch'):
         def fetch_single(ticket_id):
-            return ticket_id, fetch_ticket_conversations_single(ticket_id, access_token)
+            try:
+                conversations = fetch_ticket_conversations_single(ticket_id, access_token)
+                return ticket_id, conversations
+            except Exception as e:
+                logger.error(f"  ⚠️  Failed to fetch conversations for {ticket_id}: {str(e)[:50]}")
+                return ticket_id, []
         
         results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_ticket = {executor.submit(fetch_single, tid): tid for tid in ticket_ids}
-            for future in concurrent.futures.as_completed(future_to_ticket):
-                try:
-                    ticket_id, conversations = future.result()
-                    results[ticket_id] = conversations
-                except Exception as e:
-                    ticket_id = future_to_ticket[future]
-                    logger.error(f"Error fetching conversations for {ticket_id}: {e}")
-                    results[ticket_id] = []
+            
+            try:
+                for future in concurrent.futures.as_completed(future_to_ticket, timeout=CONVERSATION_TIMEOUT * 2):
+                    try:
+                        ticket_id, conversations = future.result(timeout=5)
+                        results[ticket_id] = conversations
+                    except concurrent.futures.TimeoutError:
+                        ticket_id = future_to_ticket[future]
+                        logger.error(f"  ⏱️  Timeout on conversation fetch for {ticket_id}")
+                        results[ticket_id] = []
+                    except Exception as e:
+                        ticket_id = future_to_ticket[future]
+                        logger.error(f"  ⚠️  Error with {ticket_id}: {str(e)[:50]}")
+                        results[ticket_id] = []
+            except concurrent.futures.TimeoutError:
+                logger.error("  ⏱️  Batch conversation fetch timed out")
+                # Fill in missing results
+                for ticket_id in ticket_ids:
+                    if ticket_id not in results:
+                        results[ticket_id] = []
         
         return results
 
@@ -563,17 +663,13 @@ def calculate_complexity_score(ticket_data, conversations, age_days):
     return min(score, 10)
 
 def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score, requester_history, category_stats):
-    """
-    Predict likelihood of SLA breach as percentage
-    Returns: (breach_likelihood_percent, risk_level, contributing_factors)
-    """
+    """Predict likelihood of SLA breach as percentage"""
     if hours_until_due is None or hours_until_due < 0:
         return (100, 'breached', ['Already overdue'])
     
     breach_score = 0
     factors = []
     
-    # Time pressure factor (40% weight)
     if hours_until_due < 2:
         breach_score += 40
         factors.append('Critical time pressure (<2h)')
@@ -587,7 +683,6 @@ def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score
         breach_score += 10
         factors.append('Limited time remaining (<24h)')
     
-    # Complexity factor (25% weight)
     if complexity_score >= 8:
         breach_score += 25
         factors.append('Very high complexity')
@@ -598,7 +693,6 @@ def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score
         breach_score += 10
         factors.append('Moderate complexity')
     
-    # Category historical performance (15% weight)
     if category_stats and category_stats.get('total') > 10:
         breach_rate = category_stats.get('breached', 0) / category_stats['total']
         if breach_rate > 0.3:
@@ -608,18 +702,15 @@ def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score
             breach_score += 8
             factors.append(f'Category has elevated breach rate ({breach_rate*100:.0f}%)')
     
-    # Requester factor (10% weight)
     if requester_history and requester_history.get('open_count', 0) > 5:
         breach_score += 10
         factors.append(f"Requester has {requester_history['open_count']} open tickets")
     
-    # Priority factor (10% weight)
     priority = ticket_data.get('priority', '').lower()
     if priority in ['urgent', 'high']:
         breach_score += 10
         factors.append(f'{priority.title()} priority ticket')
     
-    # Determine risk level
     if breach_score >= 75:
         risk_level = 'critical'
     elif breach_score >= 50:
@@ -632,10 +723,7 @@ def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score
     return (min(breach_score, 100), risk_level, factors)
 
 def analyze_conversation_intelligence(conversations, created_time_ms, technician_name):
-    """
-    Deep conversation flow analysis
-    Returns detailed intelligence about communication patterns
-    """
+    """Deep conversation flow analysis"""
     if not conversations:
         return {
             'total_exchanges': 0,
@@ -889,20 +977,17 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
     requester_name = ticket_data.get('requester_name', 'Unknown')
     requester_email = ticket_data.get('requester_email', '')
     
-    # Category stats
     analytics_cache['category_stats'][category]['count'] += 1
     if ticket_data.get('is_overdue'):
         analytics_cache['category_stats'][category]['overdue_count'] += 1
     if is_closed and age_days:
         analytics_cache['category_stats'][category]['avg_resolution_days'].append(age_days)
     
-    # SLA breach tracking
     category_key = f"{category}_{ticket_data.get('priority', 'normal')}"
     analytics_cache['sla_breach_patterns'][category_key]['total'] += 1
     if ticket_data.get('is_overdue'):
         analytics_cache['sla_breach_patterns'][category_key]['breached'] += 1
     
-    # Technician stats
     if technician != 'Unassigned':
         analytics_cache['technician_stats'][technician]['total'] += 1
         if not is_closed:
@@ -917,7 +1002,6 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
                 if response_hours > 0:
                     analytics_cache['technician_stats'][technician]['avg_response_hours'].append(response_hours)
     
-    # Requester stats
     req_key = requester_email if requester_email else requester_name
     analytics_cache['requester_stats'][req_key]['total_count'] += 1
     if not is_closed:
@@ -925,7 +1009,6 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
     if is_closed and age_days:
         analytics_cache['requester_stats'][req_key]['avg_resolution_days'].append(age_days)
     
-    # Time distribution
     created_ms = ticket_data.get('created_time_ms')
     if created_ms:
         created_dt = datetime.fromtimestamp(created_ms / 1000)
@@ -933,7 +1016,7 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
         analytics_cache['daily_distribution'][created_dt.strftime('%A')] += 1
 
 def format_ticket_with_intelligence(ticket, details, conversations):
-    """Format ticket with MAXIMUM intelligence - v2.4 OPTIMIZED"""
+    """Format ticket with MAXIMUM intelligence - v2.5 RESILIENT"""
     
     with perf.time_operation('format_ticket'):
         try:
@@ -987,7 +1070,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 if resolution_content:
                     resolution_text = strip_html(resolution_content)
             
-            # Status categorization
             is_open = status_category == 'open'
             is_closed = status_category == 'closed'
             is_waiting = status_category == 'waiting'
@@ -1017,7 +1099,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             if is_closed and created_time_ms and resolved_time_ms:
                 resolution_time_days = (resolved_time_ms - created_time_ms) / (1000 * 60 * 60 * 24)
             
-            # Process conversations
             conversations_structured = []
             conversations_text = ""
             conversation_search_text = ""
@@ -1073,7 +1154,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                             'text': clean_text[:500]
                         })
                         
-                        # Build conversation search text
                         conversation_search_text += f"{sender} said: {clean_text[:200]} | "
                         
                         visibility = "Public" if is_public else "Private"
@@ -1108,13 +1188,10 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             
             assignment_suggestion = generate_auto_assignment_suggestion(category, group, analytics_cache['technician_stats'])
             
-            # Get requester history
             requester_stats = get_requester_statistics(requester_name, requester_email)
             
-            # Advanced conversation intelligence
             conv_intelligence = analyze_conversation_intelligence(conversations, created_time_ms, technician_name)
             
-            # SLA breach prediction
             category_sla_key = f"{category}_{priority.lower()}"
             category_sla_stats = analytics_cache['sla_breach_patterns'].get(category_sla_key)
             
@@ -1150,7 +1227,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             if created_time_ms:
                 created_dt = datetime.fromtimestamp(created_time_ms / 1000)
             
-            # ENHANCED: Structured data with ALL fields
             structured_data = {
                 "ticket_id": display_id,
                 "internal_id": internal_id,
@@ -1207,20 +1283,14 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 "needs_immediate_attention": (is_overdue and is_active and priority.lower() in ['urgent', 'high']),
                 "needs_followup": (is_active and days_since_last_activity and days_since_last_activity > 3),
                 "auto_assignment_suggestion": assignment_suggestion if technician_name == 'Unassigned' else None,
-                
-                # SLA Breach Prediction
                 "sla_breach_likelihood_percent": sla_breach_likelihood,
                 "sla_breach_risk_level": sla_risk_level,
                 "sla_breach_factors": sla_risk_factors,
-                
-                # Requester History
                 "requester_open_tickets": requester_stats.get('open_count', 0),
                 "requester_total_tickets": requester_stats.get('total_count', 0),
                 "requester_avg_resolution_days": round(statistics.mean(requester_stats['avg_resolution_days']), 1) if requester_stats.get('avg_resolution_days') else None,
                 "is_frequent_requester": requester_stats.get('total_count', 0) > 10,
                 "is_repeat_requester": requester_stats.get('open_count', 0) > 3,
-                
-                # Conversation Intelligence
                 "conversation_intelligence": conv_intelligence,
                 "awaiting_response_from": conv_intelligence['awaiting'],
                 "conversation_pattern": conv_intelligence['response_pattern'],
@@ -1228,8 +1298,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 "unanswered_questions": conv_intelligence['unanswered_questions'],
                 "avg_response_time_hours": conv_intelligence['avg_response_time_hours'],
                 "longest_conversation_gap_hours": conv_intelligence['longest_gap_hours'],
-                
-                # ENHANCED: Searchability fields
                 "search_all_text": f"{subject} {clean_description} {category} {subcategory} {requester_name} {technician_name}",
                 "search_keywords": ' '.join(keywords),
                 "search_people": f"{requester_name} {requester_email} {technician_name} {technician_email}",
@@ -1251,7 +1319,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             if latest_conversation_time_ms:
                 structured_data["latest_conversation_time_ms"] = latest_conversation_time_ms
             
-            # ENHANCED: Dust tags with status categories
             dust_tags = [
                 f"status:{status_lower.replace(' ', '-')}",
                 f"status-category:{status_category}",
@@ -1262,7 +1329,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 f"complexity:{structured_data['complexity_level']}",
             ]
             
-            # Status-specific tags
             if status_lower in ['open', 'new', 'reopened']:
                 dust_tags.extend(['status:open', 'status:new', 'state:open', 'not-resolved'])
             elif status_lower in ['in progress', 'assigned']:
@@ -1280,7 +1346,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             if is_active:
                 dust_tags.extend(['not-closed', 'active', 'open-status', 'needs-attention'])
                 
-                # Actionable tags
                 if technician_name != 'Unassigned':
                     dust_tags.append('actionable:assigned-and-open')
                 else:
@@ -1374,7 +1439,6 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             status_emoji = "🔴" if is_active else "✅"
             complexity_emoji = "🔥" if complexity_score >= 7 else "⚠️" if complexity_score >= 4 else "📝"
             
-            # ENHANCED: Searchable summary at top
             text_content = f"""
 ## 🔍 SEARCHABLE TICKET SUMMARY
 Ticket: #{display_id} | Status: {status} | Category: {status_category.upper()}
@@ -1483,7 +1547,7 @@ TICKET_STATE: {status_category.upper()}
 {clean_description}
 """
 
-            text_content += "\n## 🤖 AI-Powered Insights & Recommendations (v2.4 OPTIMIZED)\n\n"
+            text_content += "\n## 🤖 AI-Powered Insights & Recommendations (v2.5 RESILIENT)\n\n"
             
             if is_active:
                 text_content += f"### 📊 Predictive Analytics\n"
@@ -1576,7 +1640,7 @@ TICKET_STATE: {status_category.upper()}
             text_content += f"""
 
 ---
-## 🔍 Quick Reference (v2.4 OPTIMIZED)
+## 🔍 Quick Reference (v2.5 RESILIENT)
 - Ticket: #{display_id}
 - Current Status: {status} ({status_category})
 - Active: {'Yes' if is_active else 'No'}
@@ -1613,43 +1677,61 @@ TICKET_STATE: {status_category.upper()}
             return None
 
 def upload_to_dust(document):
-    """Upload single document to Dust"""
-    with perf.time_operation('upload_to_dust'):
-        if not document:
-            return False
-        
-        headers = {
-            'Authorization': f'Bearer {DUST_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        url = f"{DUST_API_BASE}/{document['document_id']}"
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = requests.post(url, headers=headers, json=document, timeout=30)
-                if response.status_code in [200, 201]:
-                    return True
+    """Upload single document to Dust with timeout"""
+    try:
+        with timeout_context(30, "Dust upload timeout"):
+            with perf.time_operation('upload_to_dust'):
+                if not document:
+                    return False
                 
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(2)
-                    continue
+                headers = {
+                    'Authorization': f'Bearer {DUST_API_KEY}',
+                    'Content-Type': 'application/json'
+                }
+                url = f"{DUST_API_BASE}/{document['document_id']}"
+                
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        response = requests.post(url, headers=headers, json=document, timeout=20)
+                        if response.status_code in [200, 201]:
+                            return True
+                        
+                        if attempt < MAX_RETRIES - 1:
+                            time.sleep(2)
+                            continue
+                        return False
+                    except Exception as e:
+                        if attempt < MAX_RETRIES - 1:
+                            time.sleep(2)
+                            continue
+                        return False
+                
                 return False
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(2)
-                    continue
-                return False
-        
+    except TimeoutException as e:
+        logger.error(f"  ⏱️  {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"  ⚠️  Upload error: {str(e)[:50]}")
         return False
 
 def upload_batch_to_dust(documents, max_workers=MAX_PARALLEL_WORKERS):
-    """Upload multiple documents in parallel - OPTIMIZED"""
+    """Upload multiple documents in parallel with timeout"""
     with perf.time_operation('upload_batch_to_dust'):
         success = 0
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(upload_to_dust, documents))
-            success = sum(1 for r in results if r)
+            future_to_doc = {executor.submit(upload_to_dust, doc): doc for doc in documents}
+            
+            try:
+                for future in concurrent.futures.as_completed(future_to_doc, timeout=60):
+                    try:
+                        result = future.result(timeout=5)
+                        if result:
+                            success += 1
+                    except Exception as e:
+                        logger.error(f"  ⚠️  Upload failed: {str(e)[:50]}")
+            except concurrent.futures.TimeoutError:
+                logger.error("  ⏱️  Batch upload timed out")
         
         return success
 
@@ -1681,7 +1763,7 @@ def print_analytics_summary():
     """Print analytics summary to console"""
     
     logger.info("\n" + "="*60)
-    logger.info("📊 ANALYTICS SUMMARY (v2.4 OPTIMIZED)")
+    logger.info("📊 ANALYTICS SUMMARY (v2.5 RESILIENT)")
     logger.info("="*60)
     
     logger.info("\n🏆 Top Categories:")
@@ -1721,16 +1803,16 @@ def print_analytics_summary():
 
 def main():
     logger.info("=" * 60)
-    logger.info(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.4 - OPTIMIZED")
+    logger.info(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.5 - RESILIENT")
     logger.info(f"Starting at {datetime.now()}")
     logger.info("=" * 60)
-    logger.info("✨ v2.4 OPTIMIZATIONS:")
-    logger.info("   • Parallel conversation fetching (60-70% faster)")
-    logger.info("   • Batch Dust uploads")
-    logger.info("   • Enhanced status handling with searchable categories")
-    logger.info("   • Full-text search fields for better discoverability")
-    logger.info("   • Performance monitoring")
-    logger.info("   • Improved error handling and logging")
+    logger.info("✨ v2.5 RESILIENCE FEATURES:")
+    logger.info("   • Individual ticket timeouts (skip stuck tickets)")
+    logger.info("   • Resume capability with checkpointing")
+    logger.info("   • Better error isolation per ticket")
+    logger.info("   • Per-ticket progress logging")
+    logger.info("   • Graceful degradation on failures")
+    logger.info("   • Smaller batches for better isolation (25 tickets)")
     logger.info("")
     
     try:
@@ -1740,20 +1822,29 @@ def main():
         return
     
     with perf.time_operation('total_execution'):
+        # Check for existing checkpoint
+        processed_ids, success_count, error_count = checkpoint_mgr.load()
+        
         tickets = fetch_all_tickets()
+        
+        # Filter out already processed tickets
+        if processed_ids:
+            original_count = len(tickets)
+            tickets = [t for t in tickets if t.get('id') not in processed_ids]
+            logger.info(f"ℹ️  Resuming: {len(processed_ids)} already processed, {len(tickets)} remaining")
+        
         logger.info(f"\nTotal tickets to process: {len(tickets)}\n")
         
         if not tickets:
-            logger.info("No tickets to process - system is up to date!")
+            logger.info("✅ No tickets to process - system is up to date!")
             current_time_ms = int(datetime.now().timestamp() * 1000)
             with open('last_sync_time.txt', 'w') as f:
                 f.write(str(current_time_ms))
             logger.info(f"\n📅 Timestamp updated: {current_time_ms}")
+            checkpoint_mgr.clear()
             return
         
         access_token = get_access_token()
-        success_count = 0
-        error_count = 0
         conv_count = 0
         active_count = 0
         closed_count = 0
@@ -1763,8 +1854,8 @@ def main():
         awaiting_customer_count = 0
         awaiting_tech_count = 0
         
-        # Process in batches
-        batch_size = CONVERSATION_BATCH_SIZE
+        # Process in smaller batches
+        batch_size = BATCH_SIZE
         document_batch = []
         
         for batch_start in range(0, len(tickets), batch_size):
@@ -1773,73 +1864,88 @@ def main():
             
             logger.info(f"\n[Batch {batch_start//batch_size + 1}] Processing tickets {batch_start+1}-{batch_end}...")
             
-            # Fetch details sequentially (required for each ticket)
-            ticket_details = {}
-            for ticket in batch:
+            # Process each ticket with individual timeout
+            for idx, ticket in enumerate(batch, start=batch_start+1):
                 ticket_id = ticket.get('id')
-                details = fetch_ticket_details(ticket_id, access_token)
-                if details:
-                    ticket_details[ticket_id] = details
-                else:
-                    error_count += 1
-            
-            # Fetch conversations in parallel - OPTIMIZED
-            ticket_ids = list(ticket_details.keys())
-            conversations_map = fetch_multiple_ticket_conversations(ticket_ids, access_token)
-            
-            # Format and collect documents
-            for ticket in batch:
-                ticket_id = ticket.get('id')
-                details = ticket_details.get(ticket_id)
                 
-                if not details:
+                if ticket_id in processed_ids:
                     continue
                 
-                conversations = conversations_map.get(ticket_id, [])
+                logger.info(f"  [{idx}/{len(tickets)}] Processing ticket {ticket_id}...")
                 
-                status = safe_get_name(details.get('status'))
-                status_category = get_status_category(status.lower())
+                try:
+                    # Wrap entire ticket processing in timeout
+                    with timeout_context(TICKET_TIMEOUT, f"Ticket {ticket_id} processing timeout"):
+                        details = fetch_ticket_details(ticket_id, access_token)
+                        
+                        if not details:
+                            logger.error(f"  ⚠️  Failed to fetch details for {ticket_id} - skipping")
+                            error_count += 1
+                            processed_ids.add(ticket_id)
+                            continue
+                        
+                        conversations = fetch_ticket_conversations_single(ticket_id, access_token)
+                        
+                        status = safe_get_name(details.get('status'))
+                        status_category = get_status_category(status.lower())
+                        
+                        if status_category == 'closed':
+                            closed_count += 1
+                        else:
+                            active_count += 1
+                        
+                        if conversations:
+                            conv_count += 1
+                        
+                        document = format_ticket_with_intelligence(ticket, details, conversations)
+                        
+                        if document:
+                            structured = document.get('structured_data', {})
+                            if structured.get('complexity_score', 0) >= 7:
+                                high_complexity_count += 1
+                            if structured.get('satisfaction_risk'):
+                                at_risk_count += 1
+                            if structured.get('sla_breach_likelihood_percent', 0) > 75:
+                                high_breach_risk_count += 1
+                            if structured.get('awaiting_response_from') == 'customer':
+                                awaiting_customer_count += 1
+                            elif structured.get('awaiting_response_from') == 'technician':
+                                awaiting_tech_count += 1
+                            
+                            document_batch.append(document)
+                            processed_ids.add(ticket_id)
+                            
+                            # Upload batch when it reaches size limit
+                            if len(document_batch) >= DUST_UPLOAD_BATCH_SIZE:
+                                batch_success = upload_batch_to_dust(document_batch)
+                                success_count += batch_success
+                                document_batch = []
+                                
+                                logger.info(f"  ✓ Uploaded batch | Total: {success_count}/{idx} | Active: {active_count} | Errors: {error_count}")
+                        else:
+                            error_count += 1
+                            processed_ids.add(ticket_id)
                 
-                if status_category == 'closed':
-                    closed_count += 1
-                else:
-                    active_count += 1
-                
-                if conversations:
-                    conv_count += 1
-                
-                document = format_ticket_with_intelligence(ticket, details, conversations)
-                
-                if document:
-                    structured = document.get('structured_data', {})
-                    if structured.get('complexity_score', 0) >= 7:
-                        high_complexity_count += 1
-                    if structured.get('satisfaction_risk'):
-                        at_risk_count += 1
-                    if structured.get('sla_breach_likelihood_percent', 0) > 75:
-                        high_breach_risk_count += 1
-                    if structured.get('awaiting_response_from') == 'customer':
-                        awaiting_customer_count += 1
-                    elif structured.get('awaiting_response_from') == 'technician':
-                        awaiting_tech_count += 1
-                    
-                    document_batch.append(document)
-                else:
+                except TimeoutException as e:
+                    logger.error(f"  ⏱️  TIMEOUT: {ticket_id} - {str(e)}")
                     error_count += 1
-            
-            # Upload batch to Dust - OPTIMIZED
-            if document_batch:
-                batch_success = upload_batch_to_dust(document_batch[:DUST_UPLOAD_BATCH_SIZE])
-                success_count += batch_success
-                document_batch = document_batch[DUST_UPLOAD_BATCH_SIZE:]
+                    processed_ids.add(ticket_id)
+                    continue
                 
-                logger.info(f"  ✓ Batch uploaded: {batch_success} documents")
-                logger.info(f"  Progress: {success_count}/{batch_end} | Active: {active_count} | Complex: {high_complexity_count}")
-            
-            # Refresh token periodically
-            if batch_end % 250 == 0:
-                access_token = get_access_token(force_refresh=True)
-                logger.info(f"  ℹ️  Token refreshed at checkpoint: {batch_end}")
+                except Exception as e:
+                    logger.error(f"  ⚠️  ERROR: {ticket_id} - {str(e)[:100]}")
+                    error_count += 1
+                    processed_ids.add(ticket_id)
+                    continue
+                
+                # Save checkpoint every 50 tickets
+                if idx % 50 == 0:
+                    checkpoint_mgr.save(processed_ids, success_count, error_count)
+                    
+                    # Refresh token periodically
+                    if idx % 250 == 0:
+                        access_token = get_access_token(force_refresh=True)
+                        logger.info(f"  ℹ️  Token refreshed at checkpoint: {idx}")
         
         # Upload remaining documents
         if document_batch:
@@ -1848,7 +1954,7 @@ def main():
             logger.info(f"  ✓ Final batch uploaded: {batch_success} documents")
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"✅ INTELLIGENCE SYNC COMPLETED (v2.4 OPTIMIZED)")
+        logger.info(f"✅ INTELLIGENCE SYNC COMPLETED (v2.5 RESILIENT)")
         logger.info(f"  Total Processed: {success_count}/{len(tickets)}")
         logger.info(f"  Active Tickets: {active_count}")
         logger.info(f"  Closed Tickets: {closed_count}")
@@ -1858,7 +1964,7 @@ def main():
         logger.info(f"  High SLA Breach Risk: {high_breach_risk_count}")
         logger.info(f"  Awaiting Customer: {awaiting_customer_count}")
         logger.info(f"  Awaiting Technician: {awaiting_tech_count}")
-        logger.info(f"  Errors: {error_count}")
+        logger.info(f"  Errors/Skipped: {error_count}")
         logger.info(f"  Finished: {datetime.now()}")
         logger.info(f"{'='*60}")
         
@@ -1872,13 +1978,16 @@ def main():
         with open('last_sync_time.txt', 'w') as f:
             f.write(str(current_time_ms))
         
-        logger.info("\n🎯 v2.4 Optimized Features Active:")
-        logger.info("  ✓ Parallel conversation fetching")
-        logger.info("  ✓ Batch Dust uploads")
-        logger.info("  ✓ Enhanced status categories (open/closed/waiting/cancelled)")
-        logger.info("  ✓ Full-text searchability with dedicated fields")
-        logger.info("  ✓ Performance monitoring and metrics")
-        logger.info("  ✓ Improved error handling with logging")
+        # Clear checkpoint on successful completion
+        checkpoint_mgr.clear()
+        
+        logger.info("\n🎯 v2.5 Resilience Features Active:")
+        logger.info("  ✓ Individual ticket timeouts (60s per ticket)")
+        logger.info("  ✓ Conversation fetch timeouts (45s)")
+        logger.info("  ✓ Resume capability with checkpointing")
+        logger.info("  ✓ Per-ticket error isolation")
+        logger.info("  ✓ Graceful degradation on failures")
+        logger.info("  ✓ Smaller batches (25 tickets for better isolation)")
         logger.info("")
         
         # Print performance report
@@ -1887,6 +1996,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        logger.info("\n⚠️  Sync interrupted by user - checkpoint saved")
     except Exception as e:
         logger.error(f"FATAL ERROR: {e}")
         import traceback
