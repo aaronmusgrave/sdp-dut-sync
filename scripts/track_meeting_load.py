@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-FIXED DIAGNOSTIC VERSION - Handles string date values
+DIAGNOSTIC v3 - Fetches individual tickets to get all fields
 """
 
 import os
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
 SDP_CLIENT_ID = os.environ.get('SDP_CLIENT_ID')
@@ -24,35 +24,42 @@ def get_sdp_token():
         'refresh_token': SDP_REFRESH_TOKEN,
         'grant_type': 'refresh_token'
     }
-    try:
-        response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
-        if response.status_code == 200:
-            token_data = response.json()
-            print("✓ ServiceDesk token obtained\n")
-            return token_data['access_token']
-        else:
-            raise Exception(f"Failed to get SDP token: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to connect to Zoho: {e}")
+    response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
+    if response.status_code == 200:
+        print("✓ Token obtained\n")
+        return response.json()['access_token']
+    raise Exception(f"Failed to get token: {response.status_code}")
 
-def safe_timestamp_to_date(timestamp_value):
-    """Safely convert timestamp to datetime, handling both string and int"""
-    if not timestamp_value:
+def safe_timestamp_to_date(value):
+    if not value:
         return None
     try:
-        # Convert to int if it's a string
-        if isinstance(timestamp_value, str):
-            timestamp_ms = int(timestamp_value)
-        else:
-            timestamp_ms = timestamp_value
-        
-        return datetime.fromtimestamp(timestamp_ms / 1000)
-    except (ValueError, TypeError):
+        if isinstance(value, dict):
+            value = value.get('value')
+        if isinstance(value, str):
+            value = int(value)
+        return datetime.fromtimestamp(value / 1000)
+    except:
         return None
+
+def get_ticket_details(ticket_id, sdp_token):
+    """Fetch full details for a specific ticket"""
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {sdp_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json().get('request', {})
+    except:
+        pass
+    return None
 
 def diagnostic_scan(sdp_token):
     print("="*80)
-    print("🔍 DIAGNOSTIC SCAN - Finding Your Closed Tickets")
+    print("🔍 DIAGNOSTIC SCAN - Fetching Full Ticket Details")
     print("="*80)
     print()
     
@@ -61,12 +68,10 @@ def diagnostic_scan(sdp_token):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    print("🔎 Searching for Aaron Musgrave's tickets...")
-    print()
-    
+    # Get list of tickets for Aaron
     list_info = {
         "list_info": {
-            "row_count": 50,
+            "row_count": 20,
             "start_index": 1,
             "search_criteria": [
                 {
@@ -75,7 +80,7 @@ def diagnostic_scan(sdp_token):
                     "value": "Aaron Musgrave"
                 }
             ],
-            "sort_field": "last_updated_time",
+            "sort_field": "created_time",
             "sort_order": "desc"
         }
     }
@@ -83,163 +88,133 @@ def diagnostic_scan(sdp_token):
     params = {'input_data': json.dumps(list_info)}
     url = f"{SDP_API_BASE}/requests"
     
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
-            tickets = result.get('requests', [])
-            
-            print(f"✓ Found {len(tickets)} recent tickets for Aaron Musgrave")
-            print()
-            print("="*80)
-            print("📊 STATUS SUMMARY")
-            print("="*80)
-            
-            status_counts = {}
-            for ticket in tickets:
-                status = ticket.get('status', {})
-                if isinstance(status, dict):
-                    status_name = status.get('name', 'Unknown')
-                    status_counts[status_name] = status_counts.get(status_name, 0) + 1
-            
-            for status_name, count in sorted(status_counts.items(), key=lambda x: x[1], reverse=True):
-                print(f"  {status_name}: {count} tickets")
-            
-            print()
-            print("="*80)
-            print("🎫 DETAILED TICKET INFORMATION (First 10)")
-            print("="*80)
-            print()
-            
-            today = datetime.now().date()
-            found_today = []
-            
-            for i, ticket in enumerate(tickets[:10], 1):
-                ticket_id = ticket.get('id', 'N/A')
-                subject = ticket.get('subject', 'No subject')[:50]
-                
-                status = ticket.get('status', {})
-                status_name = status.get('name', 'Unknown') if isinstance(status, dict) else 'Unknown'
-                
-                print(f"Ticket #{i} - ID: {ticket_id}")
-                print(f"  Subject: {subject}")
-                print(f"  Status: {status_name}")
-                print()
-                
-                # Check all date fields
-                created_time = ticket.get('created_time', {})
-                updated_time = ticket.get('last_updated_time', {})
-                resolved_time = ticket.get('resolved_time', {})
-                completed_time = ticket.get('completed_time', {})
-                closed_time = ticket.get('closed_time', {})
-                
-                print(f"  📅 Date Fields:")
-                
-                # Created time
-                if isinstance(created_time, dict) and created_time.get('value'):
-                    created_date = safe_timestamp_to_date(created_time.get('value'))
-                    if created_date:
-                        print(f"    - created_time: {created_date.strftime('%Y-%m-%d %H:%M:%S')}")
-                    else:
-                        print(f"    - created_time: {created_time.get('value')} (raw)")
-                else:
-                    print(f"    - created_time: Not available")
-                
-                # Updated time
-                if isinstance(updated_time, dict) and updated_time.get('value'):
-                    updated_date = safe_timestamp_to_date(updated_time.get('value'))
-                    if updated_date:
-                        print(f"    - last_updated_time: {updated_date.strftime('%Y-%m-%d %H:%M:%S')}")
-                        if updated_date.date() == today:
-                            print(f"      ✓ UPDATED TODAY!")
-                            found_today.append(ticket_id)
-                    else:
-                        print(f"    - last_updated_time: {updated_time.get('value')} (raw)")
-                else:
-                    print(f"    - last_updated_time: Not available")
-                
-                # Resolved time
-                if isinstance(resolved_time, dict) and resolved_time.get('value'):
-                    resolved_date = safe_timestamp_to_date(resolved_time.get('value'))
-                    if resolved_date:
-                        print(f"    - resolved_time: {resolved_date.strftime('%Y-%m-%d %H:%M:%S')} ⭐")
-                        if resolved_date.date() == today:
-                            print(f"      ✅ RESOLVED TODAY! (This is your closed ticket)")
-                            found_today.append(ticket_id)
-                    else:
-                        print(f"    - resolved_time: {resolved_time.get('value')} (raw)")
-                else:
-                    print(f"    - resolved_time: Not available")
-                
-                # Completed time
-                if isinstance(completed_time, dict) and completed_time.get('value'):
-                    completed_date = safe_timestamp_to_date(completed_time.get('value'))
-                    if completed_date:
-                        print(f"    - completed_time: {completed_date.strftime('%Y-%m-%d %H:%M:%S')} ⭐")
-                        if completed_date.date() == today:
-                            print(f"      ✅ COMPLETED TODAY!")
-                            found_today.append(ticket_id)
-                    else:
-                        print(f"    - completed_time: {completed_time.get('value')} (raw)")
-                else:
-                    print(f"    - completed_time: Not available")
-                
-                # Closed time
-                if isinstance(closed_time, dict) and closed_time.get('value'):
-                    closed_date = safe_timestamp_to_date(closed_time.get('value'))
-                    if closed_date:
-                        print(f"    - closed_time: {closed_date.strftime('%Y-%m-%d %H:%M:%S')} ⭐")
-                        if closed_date.date() == today:
-                            print(f"      ✅ CLOSED TODAY!")
-                            found_today.append(ticket_id)
-                    else:
-                        print(f"    - closed_time: {closed_time.get('value')} (raw)")
-                else:
-                    print(f"    - closed_time: Not available")
-                
-                print()
-                print("-"*80)
-                print()
-            
-            print()
-            print("="*80)
-            print("📝 SUMMARY & RECOMMENDATIONS")
-            print("="*80)
-            print()
-            
-            if found_today:
-                unique_today = list(set(found_today))
-                print(f"✅ Found {len(unique_today)} tickets with today's date!")
-                print(f"   Ticket IDs: {', '.join(map(str, unique_today))}")
-            else:
-                print("❌ No tickets found with today's date in any field")
-            
-            print()
-            print("🔍 Key Findings:")
-            print()
-            print(f"1. ✅ Status 'Closed' exists: {status_counts.get('Closed', 0)} tickets")
-            print(f"2. ✅ Status 'Resolved' exists: {status_counts.get('Resolved', 0)} tickets")
-            print(f"3. ⚠️  Date values are STRINGS, not integers (needs conversion)")
-            print()
-            print("📊 Fix Required:")
-            print("   The main script needs to convert string timestamps to integers")
-            print("   Example: int('1733032800000') before dividing by 1000")
-            
-        else:
-            print(f"❌ API Error: {response.status_code}")
-            print(f"Response: {response.text}")
+    response = requests.get(url, headers=headers, params=params, timeout=30)
     
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+    if response.status_code != 200:
+        print(f"❌ Failed to get ticket list: {response.status_code}")
+        return
+    
+    tickets = response.json().get('requests', [])
+    print(f"✓ Found {len(tickets)} tickets for Aaron Musgrave")
+    print(f"📥 Fetching full details for first 10 tickets...\n")
+    
+    today = datetime.now().date()
+    found_today = []
+    
+    for i, ticket_summary in enumerate(tickets[:10], 1):
+        ticket_id = ticket_summary.get('id')
+        
+        print(f"Ticket #{i} - ID: {ticket_id}")
+        print(f"  Fetching full details...")
+        
+        # Get full ticket details
+        ticket = get_ticket_details(ticket_id, sdp_token)
+        
+        if not ticket:
+            print(f"  ❌ Could not fetch details")
+            print()
+            continue
+        
+        subject = ticket.get('subject', 'No subject')[:60]
+        status = ticket.get('status', {})
+        status_name = status.get('name', 'Unknown') if isinstance(status, dict) else 'Unknown'
+        
+        print(f"  Subject: {subject}")
+        print(f"  Status: {status_name}")
+        print()
+        print(f"  📅 Date Fields (from full ticket details):")
+        
+        # Check ALL possible date fields
+        date_fields = [
+            'created_time',
+            'last_updated_time',
+            'resolved_time',
+            'completed_time',
+            'closed_time',
+            'due_by_time',
+            'first_response_due_by_time'
+        ]
+        
+        has_today_date = False
+        
+        for field_name in date_fields:
+            field_value = ticket.get(field_name)
+            
+            if field_value:
+                date_obj = safe_timestamp_to_date(field_value)
+                if date_obj:
+                    date_str = date_obj.strftime('%Y-%m-%d %H:%M:%S')
+                    marker = ""
+                    
+                    if date_obj.date() == today:
+                        marker = " ✅ TODAY!"
+                        has_today_date = True
+                        found_today.append({
+                            'id': ticket_id,
+                            'field': field_name,
+                            'date': date_obj,
+                            'status': status_name
+                        })
+                    
+                    print(f"    - {field_name}: {date_str}{marker}")
+                else:
+                    print(f"    - {field_name}: {field_value} (could not parse)")
+            else:
+                print(f"    - {field_name}: Not available")
+        
+        if has_today_date:
+            print(f"\n  🎯 THIS TICKET WAS UPDATED/CLOSED TODAY!")
+        
+        print()
+        print("-"*80)
+        print()
+    
+    print()
+    print("="*80)
+    print("📝 SUMMARY & RECOMMENDATIONS")
+    print("="*80)
+    print()
+    
+    if found_today:
+        print(f"✅ Found {len(found_today)} tickets with today's date!\n")
+        
+        for item in found_today:
+            print(f"   Ticket #{item['id']}")
+            print(f"     Status: {item['status']}")
+            print(f"     Field: {item['field']}")
+            print(f"     Time: {item['date'].strftime('%Y-%m-%d %H:%M:%S')}")
+            print()
+        
+        # Determine which field to use
+        field_usage = {}
+        for item in found_today:
+            field_usage[item['field']] = field_usage.get(item['field'], 0) + 1
+        
+        print("🔍 Which date field to use:")
+        for field, count in sorted(field_usage.items(), key=lambda x: x[1], reverse=True):
+            print(f"   {field}: {count} tickets")
+        
+        recommended_field = max(field_usage.items(), key=lambda x: x[1])[0]
+        print(f"\n   ✅ RECOMMENDATION: Use '{recommended_field}' field")
+        
+    else:
+        print("❌ No tickets found with today's date")
+        print("\n   Possible reasons:")
+        print("   1. No tickets closed today yet")
+        print("   2. Date fields not populated")
+        print("   3. Wrong technician name")
+    
+    print()
+    print("🔧 Next Steps:")
+    print("   1. The main script needs to fetch individual ticket details")
+    print("   2. Can't rely on the /requests search - it doesn't include all fields")
+    print("   3. Must use /requests/{id} endpoint for each ticket")
 
 def main():
     print()
     print("="*80)
-    print("🔬 SERVICEDESK DIAGNOSTIC TOOL (FIXED)")
-    print("   Handles string date values from API")
+    print("🔬 SERVICEDESK DIAGNOSTIC v3")
+    print("   Fetches full ticket details individually")
     print("="*80)
     print()
     
