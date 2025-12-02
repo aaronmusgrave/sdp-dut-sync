@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DIAGNOSTIC: Find Aaron's missing tickets
+DIAGNOSTIC: Find Aaron's missing tickets - FIXED
 """
 
 import os
@@ -56,7 +56,7 @@ def get_ticket_details(ticket_id, sdp_token):
 
 def main():
     print("="*80)
-    print("🔍 DIAGNOSTIC: Finding Aaron's 7 Tickets")
+    print("🔍 DIAGNOSTIC: Finding Aaron's Closed Tickets")
     print("="*80)
     print()
     
@@ -67,10 +67,13 @@ def main():
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    today = datetime.now().date()
-    today_str = today.strftime('%Y-%m-%d')
+    # Use YESTERDAY since it's now Dec 2
+    yesterday = datetime.now() - timedelta(days=1)
+    target_date = yesterday.date()
+    target_str = target_date.strftime('%Y-%m-%d')
     
-    print(f"📅 Searching for tickets closed TODAY ({today_str})\n")
+    print(f"📅 Searching for tickets closed on {target_str} (yesterday)\n")
+    print(f"   (Script is running on {datetime.now().strftime('%Y-%m-%d')})\n")
     
     # Search for Aaron's closed tickets
     list_info = {
@@ -107,19 +110,27 @@ def main():
     ticket_ids = [t['id'] for t in result.get('requests', [])]
     
     print(f"✓ Found {len(ticket_ids)} closed tickets assigned to Aaron Musgrave")
-    print(f"📥 Fetching details for first 20...\n")
+    print(f"📥 Fetching details for first 30...\n")
     
-    found_today = []
+    found_target = []
     found_other = []
     
-    for ticket_id in ticket_ids[:20]:
+    for ticket_id in ticket_ids[:30]:
         ticket = get_ticket_details(ticket_id, sdp_token)
         if not ticket:
+            print(f"  ⚠️  Could not fetch ticket #{ticket_id}")
             continue
         
         subject = ticket.get('subject', 'No subject')[:60]
-        status = ticket.get('status', {}).get('name', 'Unknown')
-        tech = ticket.get('technician', {}).get('name', 'Unknown')
+        status = ticket.get('status', {})
+        status_name = status.get('name', 'Unknown') if isinstance(status, dict) else 'Unknown'
+        
+        # FIXED: Handle technician field safely
+        tech_obj = ticket.get('technician')
+        if isinstance(tech_obj, dict):
+            tech = tech_obj.get('name', 'Unknown')
+        else:
+            tech = 'Unassigned'
         
         # Check all date fields
         created_time = safe_timestamp_to_date(ticket.get('created_time'))
@@ -128,27 +139,27 @@ def main():
         completed_time = safe_timestamp_to_date(ticket.get('completed_time'))
         closed_time = safe_timestamp_to_date(ticket.get('closed_time'))
         
-        is_today = False
+        is_target = False
         date_field_used = None
         date_value = None
         
-        if completed_time and completed_time.date() == today:
-            is_today = True
+        if completed_time and completed_time.date() == target_date:
+            is_target = True
             date_field_used = "completed_time"
             date_value = completed_time
-        elif resolved_time and resolved_time.date() == today:
-            is_today = True
+        elif resolved_time and resolved_time.date() == target_date:
+            is_target = True
             date_field_used = "resolved_time"
             date_value = resolved_time
-        elif closed_time and closed_time.date() == today:
-            is_today = True
+        elif closed_time and closed_time.date() == target_date:
+            is_target = True
             date_field_used = "closed_time"
             date_value = closed_time
         
         info = {
             'id': ticket_id,
             'subject': subject,
-            'status': status,
+            'status': status_name,
             'tech': tech,
             'created': created_time,
             'updated': updated_time,
@@ -157,19 +168,19 @@ def main():
             'closed': closed_time
         }
         
-        if is_today:
-            found_today.append((info, date_field_used, date_value))
+        if is_target:
+            found_target.append((info, date_field_used, date_value))
         else:
             found_other.append(info)
     
     print("="*80)
-    print(f"✅ TICKETS CLOSED TODAY ({today_str})")
+    print(f"✅ TICKETS CLOSED ON {target_str}")
     print("="*80)
     print()
     
-    if found_today:
-        print(f"Found {len(found_today)} tickets:\n")
-        for i, (info, field, date_val) in enumerate(found_today, 1):
+    if found_target:
+        print(f"Found {len(found_target)} tickets:\n")
+        for i, (info, field, date_val) in enumerate(found_target, 1):
             print(f"{i}. Ticket #{info['id']}")
             print(f"   Subject: {info['subject']}")
             print(f"   Technician: {info['tech']}")
@@ -177,45 +188,56 @@ def main():
             print(f"   ✅ {field}: {date_val.strftime('%Y-%m-%d %H:%M:%S')}")
             print()
     else:
-        print("❌ No tickets found with today's date!\n")
+        print(f"❌ No tickets found with date {target_str}!\n")
     
     print("="*80)
-    print(f"📊 OTHER RECENT CLOSED TICKETS (Not Today)")
+    print(f"📊 OTHER RECENT CLOSED TICKETS (Not {target_str})")
     print("="*80)
     print()
     
     if found_other:
-        print(f"Found {len(found_other)} recent closed tickets:\n")
-        for i, info in enumerate(found_other[:5], 1):
+        print(f"Showing first 10 of {len(found_other)} other closed tickets:\n")
+        for i, info in enumerate(found_other[:10], 1):
             print(f"{i}. Ticket #{info['id']}")
             print(f"   Subject: {info['subject']}")
             print(f"   Technician: {info['tech']}")
             print(f"   Status: {info['status']}")
-            print(f"   completed_time: {info['completed'].strftime('%Y-%m-%d %H:%M') if info['completed'] else 'Not set'}")
-            print(f"   resolved_time: {info['resolved'].strftime('%Y-%m-%d %H:%M') if info['resolved'] else 'Not set'}")
+            if info['completed']:
+                print(f"   completed_time: {info['completed'].strftime('%Y-%m-%d %H:%M')}")
+            elif info['resolved']:
+                print(f"   resolved_time: {info['resolved'].strftime('%Y-%m-%d %H:%M')}")
+            elif info['closed']:
+                print(f"   closed_time: {info['closed'].strftime('%Y-%m-%d %H:%M')}")
+            else:
+                print(f"   ⚠️  No date fields set!")
             print()
     
     print("="*80)
     print("📝 SUMMARY")
     print("="*80)
     print()
-    print(f"Tickets with TODAY's date: {len(found_today)}")
+    print(f"Date searched: {target_str}")
+    print(f"Tickets found: {len(found_target)}")
     print(f"Expected: 7 tickets")
     print()
     
-    if len(found_today) < 7:
+    if len(found_target) < 7:
         print("⚠️  MISSING TICKETS!")
         print()
         print("Possible reasons:")
-        print("1. Some tickets status is 'Resolved' not 'Closed'")
-        print("2. Some tickets don't have completed_time/resolved_time set")
-        print("3. Some tickets assigned to different technician")
-        print("4. Some tickets closed after this script ran")
+        print("1. ❓ Some tickets status is 'Resolved' not 'Closed'")
+        print("2. ❓ Some tickets don't have completed_time/resolved_time set")
+        print("3. ❓ Some tickets assigned to different technician")
+        print("4. ❓ Some tickets closed on a different date than you think")
         print()
-        print("💡 Check ServiceDesk and verify:")
-        print("   - All 7 tickets have status 'Closed' (not 'Resolved')")
-        print("   - All 7 tickets are assigned to 'Aaron Musgrave'")
-        print("   - All 7 tickets have 'Completed Time' field set to today")
+        print("💡 Next steps:")
+        print("   1. Check ServiceDesk for those 7 tickets manually")
+        print("   2. Verify they all show status 'Closed'")
+        print("   3. Check the 'Completed Time' or 'Resolved Time' field")
+        print("   4. Make sure they're assigned to 'Aaron Musgrave'")
+    else:
+        print("✅ All expected tickets found!")
 
 if __name__ == "__main__":
+    from datetime import timedelta
     main()
