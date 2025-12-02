@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FINAL v6: Simplified and reliable
+FINAL v7: Fetches individual tickets and properly validates dates
 """
 
 import os
@@ -66,34 +66,52 @@ def get_sdp_token():
         return response.json()['access_token']
     raise Exception(f"Failed to get SDP token")
 
+def safe_timestamp_to_date(value):
+    """Convert timestamp (string or int) to datetime"""
+    if not value:
+        return None
+    try:
+        if isinstance(value, dict):
+            value = value.get('value')
+        if isinstance(value, str):
+            value = int(value)
+        return datetime.fromtimestamp(value / 1000)
+    except:
+        return None
+
+def get_ticket_details(ticket_id, sdp_token):
+    """Fetch full details for a specific ticket"""
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {sdp_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json().get('request', {})
+    except:
+        pass
+    return None
+
 def discover_active_technicians(sdp_token):
     print("\n🔍 Auto-discovering technicians...")
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
-    
-    thirty_days_ago = datetime.now() - timedelta(days=30)
-    thirty_days_ms = int(thirty_days_ago.timestamp() * 1000)
-    
     list_info = {
         "list_info": {
             "row_count": 100,
             "start_index": 1,
             "search_criteria": [
-                {
-                    "field": "status.name",
-                    "condition": "is not",
-                    "values": ["Closed", "Cancelled"]
-                }
+                {"field": "status.name", "condition": "is not", "values": ["Closed", "Cancelled"]}
             ]
         }
     }
-    
     technicians = {}
     start_index = 1
     pages_checked = 0
-    
     while pages_checked < 20:
         list_info['list_info']['start_index'] = start_index
         params = {'input_data': json.dumps(list_info)}
@@ -112,8 +130,7 @@ def discover_active_technicians(sdp_token):
                         tech_email = tech.get('email_id')
                         if tech_name and tech_name != 'Unassigned':
                             if tech_name not in technicians:
-                                technicians[tech_name] = {'email': tech_email, 'count': 0}
-                            technicians[tech_name]['count'] += 1
+                                technicians[tech_name] = {'email': tech_email}
                 if not result.get('list_info', {}).get('has_more_rows', False):
                     break
                 start_index += 100
@@ -122,7 +139,6 @@ def discover_active_technicians(sdp_token):
                 break
         except:
             break
-    
     print(f"✓ Discovered {len(technicians)} active technicians")
     return technicians
 
@@ -188,46 +204,110 @@ def get_tech_meetings(email, graph_token, date=None):
         pass
     return {'meeting_count': 0, 'total_hours': 0}
 
-def count_closed_tickets(tech_name, sdp_token, date=None):
+def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
+    """
+    ACCURATE VERSION: Fetches individual tickets and validates
+    - Gets list of closed tickets for this tech
+    - Fetches each one individually (to get date fields)
+    - Validates technician name AND completed_time date
+    - Returns accurate count
+    """
     if date is None:
         date = datetime.now()
     if date.date() >= datetime.now().date():
         date = datetime.now() - timedelta(days=1)
+    
     start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_day = date.replace(hour=23, minute=59, second=59, microsecond=999999)
-    start_ms = int(start_of_day.timestamp() * 1000)
-    end_ms = int(end_of_day.timestamp() * 1000)
+    
     debug_print(f"Counting closed for {tech_name} on {date.strftime('%Y-%m-%d')}")
-    headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
+    
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {sdp_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
+    
+    # Get list of closed tickets for this tech (IDs only)
     list_info = {
         "list_info": {
-            "row_count": 250,
+            "row_count": 50,  # Limit to 50 most recent
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
-                {"field": "status.name", "condition": "is", "values": ["Closed"]},
-                {"field": "completed_time", "condition": "between", "value": f"{start_ms},{end_ms}"}
-            ]
+                {"field": "status.name", "condition": "is", "values": ["Closed"]}
+            ],
+            "sort_field": "created_time",
+            "sort_order": "desc"
         }
     }
+    
     try:
         params = {'input_data': json.dumps(list_info)}
         url = f"{SDP_API_BASE}/requests"
         response = requests.get(url, headers=headers, params=params, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            count = len(result.get('requests', []))
-            debug_print(f"Found {count} closed tickets")
-            return count
-        return 0
-    except:
+        
+        if response.status_code != 200:
+            debug_print(f"Search failed: {response.status_code}")
+            return 0
+        
+        result = response.json()
+        ticket_ids = [t['id'] for t in result.get('requests', [])]
+        
+        debug_print(f"Found {len(ticket_ids)} closed tickets, checking dates...")
+        
+        count = 0
+        
+        # Fetch each ticket individually to get date fields
+        for ticket_id in ticket_ids:
+            ticket = get_ticket_details(ticket_id, sdp_token)
+            if not ticket:
+                continue
+            
+            # CRITICAL: Verify technician name
+            tech_obj = ticket.get('technician')
+            if isinstance(tech_obj, dict):
+                ticket_tech_name = tech_obj.get('name', '')
+            else:
+                ticket_tech_name = ''
+            
+            if ticket_tech_name != tech_name:
+                debug_print(f"  Ticket {ticket_id} belongs to {ticket_tech_name}, skipping")
+                continue
+            
+            # Check completed_time (primary)
+            completed_time = safe_timestamp_to_date(ticket.get('completed_time'))
+            if completed_time and start_of_day <= completed_time <= end_of_day:
+                count += 1
+                debug_print(f"  ✓ Ticket {ticket_id} completed on {completed_time.strftime('%Y-%m-%d')}")
+                continue
+            
+            # Fallback: resolved_time
+            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+            if resolved_time and start_of_day <= resolved_time <= end_of_day:
+                count += 1
+                debug_print(f"  ✓ Ticket {ticket_id} resolved on {resolved_time.strftime('%Y-%m-%d')}")
+                continue
+            
+            # Fallback: closed_time
+            closed_time = safe_timestamp_to_date(ticket.get('closed_time'))
+            if closed_time and start_of_day <= closed_time <= end_of_day:
+                count += 1
+                debug_print(f"  ✓ Ticket {ticket_id} closed on {closed_time.strftime('%Y-%m-%d')}")
+        
+        debug_print(f"✅ {tech_name}: {count} tickets closed on {date.strftime('%Y-%m-%d')}")
+        return count
+        
+    except Exception as e:
+        debug_print(f"Error: {e}")
         return 0
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     if date is None:
         date = datetime.now()
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
-    metrics = {'active_tickets': 0, 'closed_today': 0, 'updated_today': 0, 'overdue_count': 0}
+    metrics = {'active_tickets': 0, 'closed_today': 0}
+    
+    # Get active tickets
     active_list_info = {
         "list_info": {
             "row_count": 250,
@@ -247,7 +327,9 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
             metrics['active_tickets'] = len(result.get('requests', []))
     except:
         pass
-    metrics['closed_today'] = count_closed_tickets(tech_name, sdp_token, date)
+    
+    # Count closed tickets ACCURATELY
+    metrics['closed_today'] = count_closed_tickets_accurate(tech_name, sdp_token, date)
     return metrics
 
 def calculate_adjusted_performance(meeting_data, ticket_metrics):
@@ -308,7 +390,8 @@ def main():
     args = parser.parse_args()
     DEBUG = args.debug
     print("="*70)
-    print("🚀 TECHNICIAN PERFORMANCE TRACKER v6")
+    print("🚀 TECHNICIAN PERFORMANCE TRACKER v7 FINAL")
+    print("   ✨ Accurately validates each ticket individually")
     print("="*70)
     print()
     graph_token = get_graph_token()
@@ -317,7 +400,8 @@ def main():
         target_date = datetime.strptime(args.date, '%Y-%m-%d')
     else:
         target_date = datetime.now() - timedelta(days=1)
-    print(f"📅 Processing: {target_date.strftime('%Y-%m-%d')}\n")
+    print(f"📅 Processing: {target_date.strftime('%Y-%m-%d')}")
+    print(f"   (Fetching individual tickets - may take 1-2 min)\n")
     technicians_info = discover_active_technicians(sdp_token)
     if not technicians_info:
         print("❌ No technicians found")
@@ -329,7 +413,7 @@ def main():
     tech_data = {}
     print(f"\n📊 Analyzing {len(technicians_info)} technicians...\n")
     for tech_name, tech_info in technicians_info.items():
-        print(f"{tech_name}...", end=' ')
+        print(f"{tech_name}...", end=' ', flush=True)
         meetings = get_tech_meetings(tech_info.get('email'), graph_token, target_date)
         tickets = get_tech_ticket_metrics(tech_name, sdp_token, target_date)
         performance = calculate_adjusted_performance(meetings, tickets)
