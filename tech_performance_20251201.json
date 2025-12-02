@@ -205,13 +205,13 @@
     },
     "tickets": {
       "active_tickets": 100,
-      "closed_today": 3,
+      "closed_today": 2,
       "updated_today": 0
     },
     "performance": {
       "available_hours": 8.0,
-      "velocity_closed": 0.38,
-      "adjusted_score": 3.8,
+      "velocity_closed": 0.25,
+      "adjusted_score": 2.5,
       "meeting_percentage": 0.0
     }
   },
@@ -277,13 +277,13 @@
     },
     "tickets": {
       "active_tickets": 100,
-      "closed_today": 4,
+      "closed_today": 7,
       "updated_today": 0
     },
     "performance": {
       "available_hours": 8.0,
-      "velocity_closed": 0.5,
-      "adjusted_score": 5.0,
+      "velocity_closed": 0.88,
+      "adjusted_score": 8.8,
       "meeting_percentage": 0.0
     }
   }
