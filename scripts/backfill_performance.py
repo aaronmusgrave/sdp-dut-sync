@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Backfill performance data - WORKING VERSION
-Gradually expand: 7 → 14 → 30 → 60 → 90 days
+Backfill performance data - WITH REAL-TIME PROGRESS
+Shows each date as it completes
 """
 
 import subprocess
@@ -12,11 +12,11 @@ import sys
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# Configuration - ADJUST THIS TO EXPAND
-DAYS_TO_BACKFILL = 14  # Start with 14, then increase to 30, 60, 90
+# Configuration
+DAYS_TO_BACKFILL = 60  # Adjust as needed: 7, 14, 30, 60, 90
 SCRIPT_PATH = 'scripts/track_meeting_load.py'
 PARALLEL_WORKERS = 4
-TIMEOUT_PER_DAY = 600  # 10 minutes per date
+TIMEOUT_PER_DAY = 600
 PROGRESS_FILE = 'backfill_progress.json'
 
 def load_progress():
@@ -45,6 +45,9 @@ def format_duration(seconds):
 
 def process_single_date(date_str):
     """Process a single date with environment passed"""
+    # Print start message (with flush for real-time output)
+    print(f"🔄 Processing {date_str}...", flush=True)
+    
     start_time = time.time()
     try:
         env = os.environ.copy()
@@ -99,14 +102,17 @@ def process_single_date(date_str):
         }
 
 def main():
-    print("="*70)
-    print(f"🚀 PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS")
-    print(f"   Environment: ✓ | Workers: {PARALLEL_WORKERS} | Timeout: 10min/date")
-    print("="*70)
-    print()
+    # Disable output buffering
+    sys.stdout.reconfigure(line_buffering=True)
+    
+    print("="*70, flush=True)
+    print(f"🚀 PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
+    print(f"   Environment: ✓ | Workers: {PARALLEL_WORKERS} | Timeout: 10min/date", flush=True)
+    print("="*70, flush=True)
+    print(flush=True)
     
     if not os.path.exists(SCRIPT_PATH):
-        print(f"❌ Script not found: {SCRIPT_PATH}")
+        print(f"❌ Script not found: {SCRIPT_PATH}", flush=True)
         sys.exit(1)
     
     required_vars = [
@@ -117,11 +123,11 @@ def main():
     
     missing = [var for var in required_vars if not os.environ.get(var)]
     if missing:
-        print(f"❌ Missing environment variables: {', '.join(missing)}")
+        print(f"❌ Missing environment variables: {', '.join(missing)}", flush=True)
         sys.exit(1)
     
-    print("✓ All environment variables found")
-    print()
+    print("✓ All environment variables found", flush=True)
+    print(flush=True)
     
     progress = load_progress()
     
@@ -137,33 +143,32 @@ def main():
     ]
     
     if len(dates_to_process) == 0:
-        print("✅ All dates already processed!")
-        print(f"   Completed: {len(progress['completed_dates'])} days")
+        print("✅ All dates already processed!", flush=True)
+        print(f"   Completed: {len(progress['completed_dates'])} days", flush=True)
         return
     
-    print(f"📅 Date Range: {all_dates[0]} to {all_dates[-1]}")
-    print(f"📊 Total: {len(all_dates)} | Remaining: {len(dates_to_process)}")
-    print()
+    print(f"📅 Date Range: {all_dates[0]} to {all_dates[-1]}", flush=True)
+    print(f"📊 Total: {len(all_dates)} | Remaining: {len(dates_to_process)}", flush=True)
+    print(flush=True)
     
-    # Estimate (6 minutes per date observed)
     estimated_minutes = (len(dates_to_process) * 6) / PARALLEL_WORKERS
-    print(f"⏱️  Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)")
-    print(f"   (Based on ~6 min/date observed performance)")
-    print()
+    print(f"⏱️  Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
+    print(f"   (Based on ~6 min/date observed performance)", flush=True)
+    print(flush=True)
     
     if sys.stdin.isatty() and len(dates_to_process) > 10:
         try:
             response = input("Continue? (yes/no): ")
             if response.lower() not in ['yes', 'y']:
-                print("Cancelled.")
+                print("Cancelled.", flush=True)
                 return
-            print()
+            print(flush=True)
         except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
+            print("\nCancelled.", flush=True)
             return
     elif len(dates_to_process) > 10:
-        print("⚠️  Automated mode - proceeding...")
-        print()
+        print("⚠️  Automated mode - proceeding...", flush=True)
+        print(flush=True)
     
     start_time = time.time()
     successful = 0
@@ -171,10 +176,16 @@ def main():
     completed_count = 0
     total_file_size = 0
     
-    print(f"{'='*70}")
-    print(f"⚡ PROCESSING {len(dates_to_process)} DAYS WITH {PARALLEL_WORKERS} WORKERS")
-    print('='*70)
-    print()
+    print(f"{'='*70}", flush=True)
+    print(f"⚡ PROCESSING {len(dates_to_process)} DAYS WITH {PARALLEL_WORKERS} WORKERS", flush=True)
+    print('='*70, flush=True)
+    print(flush=True)
+    
+    # Show which dates are being submitted
+    print(f"📋 Submitting {min(PARALLEL_WORKERS, len(dates_to_process))} dates to workers...", flush=True)
+    for i, date in enumerate(dates_to_process[:PARALLEL_WORKERS]):
+        print(f"   Worker {i+1}: {date}", flush=True)
+    print(flush=True)
     
     try:
         with ProcessPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
@@ -185,6 +196,9 @@ def main():
             
             progress['in_progress'] = dates_to_process.copy()
             save_progress(progress)
+            
+            print("⏳ Workers running... Results will appear as dates complete", flush=True)
+            print(flush=True)
             
             for future in as_completed(future_to_date):
                 completed_count += 1
@@ -209,68 +223,73 @@ def main():
                         status_icon = "⚠️ "
                         status = "(small)"
                     
-                    print(f"{status_icon} [{completed_count:3d}/{len(dates_to_process)}] {result['date']} {status} in {format_duration(result['duration'])} | Progress: {progress_pct:5.1f}% | ETA: {format_duration(eta)}")
+                    # REAL-TIME OUTPUT with flush=True
+                    print(f"{status_icon} [{completed_count:3d}/{len(dates_to_process)}] {result['date']} {status} in {format_duration(result['duration'])} | Progress: {progress_pct:5.1f}% | ETA: {format_duration(eta)}", flush=True)
                 else:
                     failed += 1
                     progress['failed_dates'].append(result['date'])
                     error_msg = result['stderr'][:50] if result['stderr'] else 'Unknown'
-                    print(f"❌ [{completed_count:3d}/{len(dates_to_process)}] {result['date']} FAILED: {error_msg}")
+                    print(f"❌ [{completed_count:3d}/{len(dates_to_process)}] {result['date']} FAILED: {error_msg}", flush=True)
                 
                 if result['date'] in progress.get('in_progress', []):
                     progress['in_progress'].remove(result['date'])
                 
+                # Save progress every 5 completions
                 if completed_count % 5 == 0:
                     save_progress(progress)
+                    print(f"💾 Progress saved ({completed_count} completed)", flush=True)
             
             progress['in_progress'] = []
             save_progress(progress)
     
     except KeyboardInterrupt:
-        print("\n\n🛑 INTERRUPTED")
+        print("\n\n🛑 INTERRUPTED", flush=True)
         save_progress(progress)
         sys.exit(0)
     
     total_time = time.time() - start_time
-    print(f"\n{'='*70}")
-    print("✅ BACKFILL COMPLETE")
-    print('='*70)
-    print(f"\n📊 Summary:")
-    print(f"   Total time: {format_duration(total_time)}")
-    print(f"   Successful: {successful}/{len(dates_to_process)}")
-    print(f"   Failed: {failed}/{len(dates_to_process)}")
+    print(f"\n{'='*70}", flush=True)
+    print("✅ BACKFILL COMPLETE", flush=True)
+    print('='*70, flush=True)
+    print(f"\n📊 Summary:", flush=True)
+    print(f"   Total time: {format_duration(total_time)}", flush=True)
+    print(f"   Successful: {successful}/{len(dates_to_process)}", flush=True)
+    print(f"   Failed: {failed}/{len(dates_to_process)}", flush=True)
     
     if successful + failed > 0:
         success_rate = successful/(successful+failed)*100
-        print(f"   Success rate: {success_rate:.1f}%")
+        print(f"   Success rate: {success_rate:.1f}%", flush=True)
     
     if successful > 0:
-        print(f"   Total data: {total_file_size/1024:.1f} MB")
+        print(f"   Total data: {total_file_size/1024:.1f} MB", flush=True)
         avg_size = total_file_size / successful if successful > 0 else 0
-        print(f"   Avg file size: {avg_size:.1f} KB")
+        print(f"   Avg file size: {avg_size:.1f} KB", flush=True)
         avg_time = total_time / successful if successful > 0 else 0
-        print(f"   Avg time/date: {format_duration(avg_time)}")
+        print(f"   Avg time/date: {format_duration(avg_time)}", flush=True)
     
     if progress['failed_dates']:
-        print(f"\n❌ Failed: {len(progress['failed_dates'])}")
+        print(f"\n❌ Failed: {len(progress['failed_dates'])}", flush=True)
         for i, date in enumerate(progress['failed_dates'][:5], 1):
-            print(f"   {i}. {date}")
+            print(f"   {i}. {date}", flush=True)
     
     if failed == 0 and os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
-        print(f"\n✓ Progress file removed")
+        print(f"\n✓ Progress file removed", flush=True)
     
-    print()
-    print("="*70)
-    print(f"💡 To backfill more days, increase DAYS_TO_BACKFILL")
-    print(f"   Current: {DAYS_TO_BACKFILL} days")
-    print(f"   Next: Try 30 days (~1.5 hours)")
-    print("="*70)
+    print(flush=True)
+    print("="*70, flush=True)
+    print(f"💡 To backfill more days, increase DAYS_TO_BACKFILL", flush=True)
+    print(f"   Current: {DAYS_TO_BACKFILL} days", flush=True)
+    if DAYS_TO_BACKFILL < 90:
+        next_target = min(DAYS_TO_BACKFILL * 2, 90)
+        print(f"   Next: Try {next_target} days", flush=True)
+    print("="*70, flush=True)
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n❌ FATAL ERROR: {e}")
+        print(f"\n❌ FATAL ERROR: {e}", flush=True)
         import traceback
         traceback.print_exc()
         sys.exit(1)
