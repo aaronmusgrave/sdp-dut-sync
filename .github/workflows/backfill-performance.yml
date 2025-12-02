@@ -48,178 +48,24 @@ jobs:
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "days=7" >> $GITHUB_OUTPUT
-            echo "Running in TEST MODE (7 days)"
+            echo "🧪 Running in TEST MODE (7 days)"
           else
             echo "days=${{ inputs.days }}" >> $GITHUB_OUTPUT
-            echo "Running FULL BACKFILL (${{ inputs.days }} days)"
+            echo "🚀 Running FULL BACKFILL (${{ inputs.days }} days)"
           fi
           echo "delay=${{ inputs.delay }}" >> $GITHUB_OUTPUT
       
-      - name: Create backfill script
+      - name: Update backfill script configuration
         run: |
-          cat > backfill_performance.py << 'EOFMARKER'
-          #!/usr/bin/env python3
-          """
-          Backfill historical performance data
-          Resumes from where it left off if interrupted
-          """
+          # Update the configuration in scripts/backfill_performance.py
+          sed -i "s/DAYS_TO_BACKFILL = .*/DAYS_TO_BACKFILL = ${{ steps.config.outputs.days }}/" scripts/backfill_performance.py
+          sed -i "s/DELAY_BETWEEN_RUNS = .*/DELAY_BETWEEN_RUNS = ${{ steps.config.outputs.delay }}/" scripts/backfill_performance.py
           
-          import subprocess
-          import time
-          import json
-          import os
-          import sys
-          from datetime import datetime, timedelta
-          
-          # Configuration from environment
-          DAYS_TO_BACKFILL = int(os.environ.get('BACKFILL_DAYS', '365'))
-          DELAY_BETWEEN_RUNS = int(os.environ.get('BACKFILL_DELAY', '2'))
-          SCRIPT_PATH = 'scripts/track_meeting_load.py'
-          TIMEOUT_PER_DAY = 300
-          PROGRESS_FILE = 'backfill_progress.json'
-          
-          def load_progress():
-              if os.path.exists(PROGRESS_FILE):
-                  try:
-                      with open(PROGRESS_FILE, 'r') as f:
-                          return json.load(f)
-                  except:
-                      pass
-              return {'completed_dates': [], 'failed_dates': [], 'last_processed': None}
-          
-          def save_progress(progress):
-              with open(PROGRESS_FILE, 'w') as f:
-                  json.dump(progress, f, indent=2)
-          
-          def format_duration(seconds):
-              hours = int(seconds // 3600)
-              minutes = int((seconds % 3600) // 60)
-              secs = int(seconds % 60)
-              if hours > 0:
-                  return f"{hours}h {minutes}m {secs}s"
-              elif minutes > 0:
-                  return f"{minutes}m {secs}s"
-              else:
-                  return f"{secs}s"
-          
-          def main():
-              print("="*70)
-              print(f"🚀 BACKFILL: {DAYS_TO_BACKFILL} DAYS")
-              print("="*70)
-              print()
-              
-              if not os.path.exists(SCRIPT_PATH):
-                  print(f"❌ Script not found: {SCRIPT_PATH}")
-                  sys.exit(1)
-              
-              progress = load_progress()
-              
-              all_dates = []
-              for days_ago in range(DAYS_TO_BACKFILL, 0, -1):
-                  date = datetime.now() - timedelta(days=days_ago)
-                  all_dates.append(date.strftime('%Y-%m-%d'))
-              
-              dates_to_process = [d for d in all_dates if d not in progress['completed_dates']]
-              
-              print(f"📅 Range: {all_dates[0]} to {all_dates[-1]}")
-              print(f"📊 Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}")
-              print()
-              
-              if len(dates_to_process) == 0:
-                  print("✅ All dates already processed!")
-                  return
-              
-              start_time = time.time()
-              successful = 0
-              failed = 0
-              
-              for i, date_str in enumerate(dates_to_process, 1):
-                  remaining = len(dates_to_process) - i
-                  elapsed = time.time() - start_time
-                  avg_time = elapsed / i if i > 0 else 0
-                  eta = remaining * avg_time
-                  
-                  print(f"\n{'='*70}")
-                  print(f"📅 {i}/{len(dates_to_process)}: {date_str} | ETA: ~{format_duration(eta)}")
-                  print('='*70)
-                  
-                  day_start = time.time()
-                  
-                  try:
-                      result = subprocess.run(
-                          ['python', SCRIPT_PATH, '--date', date_str],
-                          capture_output=True,
-                          text=True,
-                          timeout=TIMEOUT_PER_DAY
-                      )
-                      
-                      duration = time.time() - day_start
-                      
-                      if result.returncode == 0:
-                          print(f"✅ SUCCESS in {format_duration(duration)}")
-                          successful += 1
-                          progress['completed_dates'].append(date_str)
-                          
-                          filename = f"tech_performance_{date_str.replace('-', '')}.json"
-                          if os.path.exists(filename):
-                              size = os.path.getsize(filename) / 1024
-                              print(f"📁 {filename} ({size:.1f} KB)")
-                      else:
-                          print(f"❌ FAILED: {result.returncode}")
-                          if result.stderr:
-                              print(f"   {result.stderr[:200]}")
-                          failed += 1
-                          progress['failed_dates'].append(date_str)
-                      
-                      save_progress(progress)
-                      
-                  except subprocess.TimeoutExpired:
-                      print(f"⏱️  TIMEOUT")
-                      failed += 1
-                      progress['failed_dates'].append(date_str)
-                      save_progress(progress)
-                  
-                  except Exception as e:
-                      print(f"❌ ERROR: {e}")
-                      failed += 1
-                      progress['failed_dates'].append(date_str)
-                      save_progress(progress)
-                  
-                  if i < len(dates_to_process):
-                      time.sleep(DELAY_BETWEEN_RUNS)
-              
-              total_time = time.time() - start_time
-              print(f"\n{'='*70}")
-              print("✅ BACKFILL COMPLETE")
-              print('='*70)
-              print(f"⏱️  Total: {format_duration(total_time)}")
-              print(f"✅ Success: {successful}/{len(dates_to_process)} ({successful/(successful+failed)*100:.1f}%)")
-              print(f"❌ Failed: {failed}/{len(dates_to_process)}")
-              
-              if progress['failed_dates']:
-                  print(f"\n❌ Failed dates:")
-                  for date in progress['failed_dates'][:10]:
-                      print(f"   - {date}")
-                  if len(progress['failed_dates']) > 10:
-                      print(f"   ... and {len(progress['failed_dates']) - 10} more")
-              
-              if failed == 0:
-                  os.remove(PROGRESS_FILE)
-          
-          if __name__ == "__main__":
-              try:
-                  main()
-              except KeyboardInterrupt:
-                  print("\n🛑 INTERRUPTED")
-                  sys.exit(1)
-              except Exception as e:
-                  print(f"\n❌ FATAL: {e}")
-                  import traceback
-                  traceback.print_exc()
-                  sys.exit(1)
-          EOFMARKER
-          
-          chmod +x backfill_performance.py
+          echo "📝 Configuration updated:"
+          echo "   Days: ${{ steps.config.outputs.days }}"
+          echo "   Delay: ${{ steps.config.outputs.delay }} seconds"
+          echo ""
+          echo "📂 Using: scripts/backfill_performance.py"
       
       - name: Run backfill
         env:
@@ -233,10 +79,8 @@ jobs:
           DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
           EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
-          BACKFILL_DAYS: ${{ steps.config.outputs.days }}
-          BACKFILL_DELAY: ${{ steps.config.outputs.delay }}
         run: |
-          python backfill_performance.py
+          python scripts/backfill_performance.py
       
       - name: Upload all performance files
         if: always()
@@ -276,8 +120,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ -f backfill_progress.json ]; then
-            COMPLETED=$(cat backfill_progress.json | python3 -c "import sys, json; print(len(json.load(sys.stdin)['completed_dates']))")
-            FAILED=$(cat backfill_progress.json | python3 -c "import sys, json; print(len(json.load(sys.stdin)['failed_dates']))")
+            COMPLETED=$(cat backfill_progress.json | python3 -c "import sys, json; print(len(json.load(sys.stdin)['completed_dates']))" 2>/dev/null || echo "0")
+            FAILED=$(cat backfill_progress.json | python3 -c "import sys, json; print(len(json.load(sys.stdin)['failed_dates']))" 2>/dev/null || echo "0")
             
             echo "- ✅ Completed: **$COMPLETED** days" >> $GITHUB_STEP_SUMMARY
             echo "- ❌ Failed: **$FAILED** days" >> $GITHUB_STEP_SUMMARY
@@ -285,7 +129,7 @@ jobs:
             if [ "$FAILED" -gt "0" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "### Failed Dates" >> $GITHUB_STEP_SUMMARY
-              cat backfill_progress.json | python3 -c "import sys, json; print('\n'.join(['- ' + d for d in json.load(sys.stdin)['failed_dates'][:20]]))" >> $GITHUB_STEP_SUMMARY
+              cat backfill_progress.json | python3 -c "import sys, json; print('\n'.join(['- ' + d for d in json.load(sys.stdin)['failed_dates'][:20]]))" 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "- Could not parse failed dates" >> $GITHUB_STEP_SUMMARY
             fi
           else
             echo "- ✅ All dates processed successfully!" >> $GITHUB_STEP_SUMMARY
@@ -293,11 +137,11 @@ jobs:
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📁 Files Created" >> $GITHUB_STEP_SUMMARY
-          FILE_COUNT=$(ls tech_performance_*.json 2>/dev/null | wc -l)
+          FILE_COUNT=$(ls tech_performance_*.json 2>/dev/null | wc -l || echo "0")
           echo "- JSON files: **$FILE_COUNT**" >> $GITHUB_STEP_SUMMARY
           
           if [ "$FILE_COUNT" -gt "0" ]; then
-            TOTAL_SIZE=$(du -sh tech_performance_*.json 2>/dev/null | awk '{print $1}' | head -1)
+            TOTAL_SIZE=$(du -sh tech_performance_*.json 2>/dev/null | tail -1 | awk '{print $1}' || echo "Unknown")
             echo "- Total size: **$TOTAL_SIZE**" >> $GITHUB_STEP_SUMMARY
           fi
       
