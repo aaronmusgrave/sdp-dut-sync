@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Backfill historical performance data for 365 days
-Resumes from where it left off if interrupted
+OPTIMIZED Backfill with parallel processing - MAXIMUM SPEED
+8 parallel workers - Can reduce 18 hours down to ~2.5 hours
 """
 
 import subprocess
 import time
 import json
 import os
+import sys
 from datetime import datetime, timedelta
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 # Configuration
 DAYS_TO_BACKFILL = 365
 SCRIPT_PATH = 'scripts/track_meeting_load.py'
-DELAY_BETWEEN_RUNS = 2  # seconds
+PARALLEL_WORKERS = 8  # MAXIMUM SPEED - Process 8 days simultaneously
 TIMEOUT_PER_DAY = 300  # 5 minutes
 PROGRESS_FILE = 'backfill_progress.json'
 
@@ -29,7 +31,8 @@ def load_progress():
     return {
         'completed_dates': [],
         'failed_dates': [],
-        'last_processed': None
+        'last_processed': None,
+        'in_progress': []
     }
 
 def save_progress(progress):
@@ -49,17 +52,71 @@ def format_duration(seconds):
     else:
         return f"{secs}s"
 
+def process_single_date(date_str):
+    """Process a single date - designed to run in parallel"""
+    start_time = time.time()
+    
+    try:
+        result = subprocess.run(
+            ['python', SCRIPT_PATH, '--date', date_str],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_PER_DAY
+        )
+        
+        duration = time.time() - start_time
+        success = result.returncode == 0
+        
+        # Check if file was created
+        filename = f"tech_performance_{date_str.replace('-', '')}.json"
+        file_size = 0
+        if os.path.exists(filename):
+            file_size = os.path.getsize(filename) / 1024
+        
+        return {
+            'date': date_str,
+            'success': success,
+            'returncode': result.returncode,
+            'stderr': result.stderr[:200] if result.stderr else '',
+            'filename': filename if success else None,
+            'file_size': file_size if success else 0,
+            'duration': duration
+        }
+        
+    except subprocess.TimeoutExpired:
+        duration = time.time() - start_time
+        return {
+            'date': date_str,
+            'success': False,
+            'returncode': -1,
+            'stderr': 'Timeout',
+            'filename': None,
+            'file_size': 0,
+            'duration': duration
+        }
+    except Exception as e:
+        duration = time.time() - start_time
+        return {
+            'date': date_str,
+            'success': False,
+            'returncode': -2,
+            'stderr': str(e)[:200],
+            'filename': None,
+            'file_size': 0,
+            'duration': duration
+        }
+
 def main():
     print("="*70)
-    print("🚀 PERFORMANCE DATA BACKFILL - 365 DAYS")
+    print("🚀 OPTIMIZED PERFORMANCE DATA BACKFILL - MAXIMUM SPEED")
+    print(f"   ⚡ Parallel processing with {PARALLEL_WORKERS} workers")
     print("="*70)
     print()
     
     # Check if script exists
     if not os.path.exists(SCRIPT_PATH):
         print(f"❌ Script not found: {SCRIPT_PATH}")
-        print(f"   Make sure you're running from the project root directory")
-        return
+        sys.exit(1)
     
     # Load previous progress
     progress = load_progress()
@@ -68,11 +125,13 @@ def main():
     all_dates = []
     for days_ago in range(DAYS_TO_BACKFILL, 0, -1):
         date = datetime.now() - timedelta(days=days_ago)
-        date_str = date.strftime('%Y-%m-%d')
-        all_dates.append(date_str)
+        all_dates.append(date.strftime('%Y-%m-%d'))
     
     # Filter out already completed dates
-    dates_to_process = [d for d in all_dates if d not in progress['completed_dates']]
+    dates_to_process = [
+        d for d in all_dates 
+        if d not in progress['completed_dates'] and d not in progress.get('in_progress', [])
+    ]
     
     if len(dates_to_process) == 0:
         print("✅ All dates already processed!")
@@ -92,98 +151,121 @@ def main():
     print()
     
     if progress['completed_dates']:
-        print(f"📍 Resuming from: {dates_to_process[0]}")
+        print(f"📍 Resuming from where we left off")
         print()
     
-    estimated_time = len(dates_to_process) * (TIMEOUT_PER_DAY / 60 + DELAY_BETWEEN_RUNS / 60)
+    # Calculate estimated time with parallel processing
+    estimated_time = (len(dates_to_process) * (TIMEOUT_PER_DAY / 60)) / PARALLEL_WORKERS
+    sequential_time = len(dates_to_process) * 3  # ~3 min per day sequential
+    speedup = sequential_time / (estimated_time * 60) if estimated_time > 0 else 0
+    
     print(f"⏱️  Estimated time: ~{estimated_time:.0f} minutes ({estimated_time/60:.1f} hours)")
+    print(f"   Sequential would take: ~{sequential_time/60:.1f} hours")
+    print(f"   ⚡ Speedup: ~{speedup:.1f}x faster with {PARALLEL_WORKERS} workers")
     print()
     
-    # Confirm before starting
-    if len(dates_to_process) > 30:
-        response = input("Continue? (yes/no): ")
-        if response.lower() not in ['yes', 'y']:
-            print("Cancelled.")
+    # Skip confirmation in non-interactive mode
+    if sys.stdin.isatty() and len(dates_to_process) > 30:
+        try:
+            print(f"⚠️  Warning: This will process {PARALLEL_WORKERS} days simultaneously")
+            print(f"   This creates higher API load but completes much faster")
+            print()
+            response = input("Continue? (yes/no): ")
+            if response.lower() not in ['yes', 'y']:
+                print("Cancelled.")
+                return
+            print()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
             return
+    elif len(dates_to_process) > 30:
+        print("⚠️  Running in automated mode (CI detected)")
+        print(f"   Processing with {PARALLEL_WORKERS} parallel workers...")
         print()
     
-    # Process dates
+    # Process dates in parallel
     start_time = time.time()
     successful = 0
     failed = 0
+    completed_count = 0
+    total_file_size = 0
     
-    for i, date_str in enumerate(dates_to_process, 1):
-        remaining = len(dates_to_process) - i
-        elapsed = time.time() - start_time
-        avg_time_per_day = elapsed / i if i > 0 else 0
-        estimated_remaining = remaining * avg_time_per_day
-        
-        print(f"\n{'='*70}")
-        print(f"📅 Day {i}/{len(dates_to_process)}: {date_str}")
-        print(f"⏱️  Elapsed: {format_duration(elapsed)} | Remaining: ~{format_duration(estimated_remaining)}")
-        print('='*70)
-        
-        day_start = time.time()
-        
-        try:
-            # Run the script for this date
-            result = subprocess.run(
-                ['python', SCRIPT_PATH, '--date', date_str],
-                capture_output=True,
-                text=True,
-                timeout=TIMEOUT_PER_DAY
-            )
+    print(f"\n{'='*70}")
+    print(f"⚡ PROCESSING {len(dates_to_process)} DAYS WITH {PARALLEL_WORKERS} WORKERS")
+    print('='*70)
+    print()
+    
+    try:
+        with ProcessPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+            # Submit all dates for processing
+            future_to_date = {
+                executor.submit(process_single_date, date_str): date_str 
+                for date_str in dates_to_process
+            }
             
-            day_duration = time.time() - day_start
+            # Mark as in progress
+            progress['in_progress'] = dates_to_process.copy()
+            save_progress(progress)
             
-            if result.returncode == 0:
-                print(f"✅ SUCCESS in {format_duration(day_duration)}")
-                successful += 1
-                progress['completed_dates'].append(date_str)
-                progress['last_processed'] = date_str
+            # Process results as they complete
+            for future in as_completed(future_to_date):
+                completed_count += 1
+                result = future.result()
                 
-                # Check if file was created
-                filename = f"tech_performance_{date_str.replace('-', '')}.json"
-                if os.path.exists(filename):
-                    file_size = os.path.getsize(filename) / 1024
-                    print(f"📁 Created: {filename} ({file_size:.1f} KB)")
-            else:
-                print(f"❌ FAILED after {format_duration(day_duration)}")
-                print(f"   Error code: {result.returncode}")
-                if result.stderr:
-                    print(f"   Error: {result.stderr[:200]}")
-                failed += 1
-                progress['failed_dates'].append(date_str)
+                elapsed = time.time() - start_time
+                remaining = len(dates_to_process) - completed_count
+                avg_time = elapsed / completed_count if completed_count > 0 else 0
+                eta = remaining * avg_time
+                
+                # Calculate progress percentage
+                progress_pct = (completed_count / len(dates_to_process)) * 100
+                
+                if result['success']:
+                    successful += 1
+                    total_file_size += result['file_size']
+                    progress['completed_dates'].append(result['date'])
+                    progress['last_processed'] = result['date']
+                    
+                    print(f"✅ [{completed_count:3d}/{len(dates_to_process)}] {result['date']} "
+                          f"({result['file_size']:5.1f} KB) "
+                          f"in {format_duration(result['duration'])} | "
+                          f"Progress: {progress_pct:5.1f}% | "
+                          f"ETA: {format_duration(eta)}")
+                else:
+                    failed += 1
+                    progress['failed_dates'].append(result['date'])
+                    
+                    error_msg = result['stderr'][:40] if result['stderr'] else 'Unknown error'
+                    print(f"❌ [{completed_count:3d}/{len(dates_to_process)}] {result['date']} "
+                          f"FAILED: {error_msg}")
+                
+                # Remove from in_progress
+                if result['date'] in progress.get('in_progress', []):
+                    progress['in_progress'].remove(result['date'])
+                
+                # Save progress every 10 completions or every 5 minutes
+                if completed_count % 10 == 0 or elapsed % 300 < 1:
+                    save_progress(progress)
             
-            # Save progress after each date
+            # Clear in_progress
+            progress['in_progress'] = []
             save_progress(progress)
-            
-        except subprocess.TimeoutExpired:
-            day_duration = time.time() - day_start
-            print(f"⏱️  TIMEOUT after {format_duration(day_duration)}")
-            failed += 1
-            progress['failed_dates'].append(date_str)
-            save_progress(progress)
-            
-        except KeyboardInterrupt:
-            print("\n\n🛑 INTERRUPTED BY USER")
-            print(f"\n📊 Progress saved to: {PROGRESS_FILE}")
-            print(f"   Successful: {successful}")
-            print(f"   Failed: {failed}")
-            print(f"   Last processed: {date_str}")
-            print(f"\n💡 Run this script again to resume from where you left off")
-            save_progress(progress)
-            return
-        
-        except Exception as e:
-            print(f"❌ ERROR: {e}")
-            failed += 1
-            progress['failed_dates'].append(date_str)
-            save_progress(progress)
-        
-        # Delay between runs to avoid rate limits
-        if i < len(dates_to_process):
-            time.sleep(DELAY_BETWEEN_RUNS)
+    
+    except KeyboardInterrupt:
+        print("\n\n🛑 INTERRUPTED BY USER")
+        print(f"\n📊 Progress saved to: {PROGRESS_FILE}")
+        print(f"   Successful: {successful}")
+        print(f"   Failed: {failed}")
+        print(f"   Completed: {completed_count}/{len(dates_to_process)}")
+        print(f"\n💡 Run this script again to resume from where you left off")
+        print(f"   {len(dates_to_process) - completed_count} days remaining")
+        save_progress(progress)
+        sys.exit(0)
+    
+    except Exception as e:
+        print(f"\n❌ UNEXPECTED ERROR: {e}")
+        save_progress(progress)
+        raise
     
     # Final summary
     total_time = time.time() - start_time
@@ -194,21 +276,46 @@ def main():
     print(f"   Total time: {format_duration(total_time)}")
     print(f"   Successful: {successful}/{len(dates_to_process)}")
     print(f"   Failed: {failed}/{len(dates_to_process)}")
-    print(f"   Success rate: {successful/(successful+failed)*100:.1f}%")
+    
+    if successful + failed > 0:
+        success_rate = successful/(successful+failed)*100
+        print(f"   Success rate: {success_rate:.1f}%")
+    
+    if successful > 0:
+        avg_time_per_day = total_time / len(dates_to_process)
+        print(f"   Avg time per day: {format_duration(avg_time_per_day)}")
+        print(f"   Total data size: {total_file_size/1024:.1f} MB")
+        
+        # Calculate actual speedup vs sequential
+        estimated_sequential = len(dates_to_process) * 180  # ~3 min per day
+        actual_speedup = estimated_sequential / total_time if total_time > 0 else 0
+        print(f"   ⚡ Actual speedup: {actual_speedup:.1f}x faster than sequential")
+        
+        # Throughput stats
+        days_per_hour = (successful / total_time) * 3600 if total_time > 0 else 0
+        print(f"   📈 Throughput: {days_per_hour:.1f} days/hour")
     
     if progress['failed_dates']:
         print(f"\n❌ Failed dates ({len(progress['failed_dates'])}):")
-        for date in progress['failed_dates'][:20]:
-            print(f"   - {date}")
+        for i, date in enumerate(progress['failed_dates'][:20], 1):
+            print(f"   {i:2d}. {date}")
         if len(progress['failed_dates']) > 20:
             print(f"   ... and {len(progress['failed_dates']) - 20} more")
-        print(f"\n💡 You can retry failed dates manually:")
+        
+        print(f"\n💡 Retry failed dates:")
         print(f"   python scripts/track_meeting_load.py --date YYYY-MM-DD")
+        print(f"\n   Or retry all failed dates:")
+        print(f"   for date in {' '.join(progress['failed_dates'][:5])}; do")
+        print(f"       python scripts/track_meeting_load.py --date $date")
+        print(f"   done")
     
-    # Cleanup progress file on success
-    if failed == 0:
+    # Cleanup progress file on complete success
+    if failed == 0 and os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
-        print(f"\n🗑️  Removed progress file (all dates completed)")
+        print(f"\n🗑️  Removed progress file (all dates completed successfully)")
+    
+    print()
+    print("="*70)
 
 if __name__ == "__main__":
     try:
@@ -217,3 +324,4 @@ if __name__ == "__main__":
         print(f"\n❌ FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
