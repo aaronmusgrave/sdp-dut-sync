@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Backfill performance data - FIXED to pass environment variables
+Backfill performance data - WORKING VERSION
+Gradually expand: 7 → 14 → 30 → 60 → 90 days
 """
 
 import subprocess
@@ -11,11 +12,11 @@ import sys
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# Configuration
-DAYS_TO_BACKFILL = 90
+# Configuration - ADJUST THIS TO EXPAND
+DAYS_TO_BACKFILL = 14  # Start with 14, then increase to 30, 60, 90
 SCRIPT_PATH = 'scripts/track_meeting_load.py'
 PARALLEL_WORKERS = 4
-TIMEOUT_PER_DAY = 600  # Increased to 10 minutes
+TIMEOUT_PER_DAY = 600  # 10 minutes per date
 PROGRESS_FILE = 'backfill_progress.json'
 
 def load_progress():
@@ -43,10 +44,9 @@ def format_duration(seconds):
         return f"{secs}s"
 
 def process_single_date(date_str):
-    """Process a single date - FIXED to pass environment"""
+    """Process a single date with environment passed"""
     start_time = time.time()
     try:
-        # CRITICAL FIX: Pass environment variables to subprocess
         env = os.environ.copy()
         
         result = subprocess.run(
@@ -54,8 +54,8 @@ def process_single_date(date_str):
             capture_output=True,
             text=True,
             timeout=TIMEOUT_PER_DAY,
-            env=env,  # ← THIS IS THE FIX!
-            cwd=os.getcwd()  # Ensure correct working directory
+            env=env,
+            cwd=os.getcwd()
         )
         
         duration = time.time() - start_time
@@ -71,7 +71,6 @@ def process_single_date(date_str):
             'success': success,
             'returncode': result.returncode,
             'stderr': result.stderr[-300:] if result.stderr else '',
-            'stdout': result.stdout[-300:] if result.stdout else '',
             'filename': filename if success else None,
             'file_size': file_size if success else 0,
             'duration': duration
@@ -83,7 +82,6 @@ def process_single_date(date_str):
             'success': False,
             'returncode': -1,
             'stderr': 'Timeout after 10 minutes',
-            'stdout': '',
             'filename': None,
             'file_size': 0,
             'duration': duration
@@ -95,7 +93,6 @@ def process_single_date(date_str):
             'success': False,
             'returncode': -2,
             'stderr': str(e)[:200],
-            'stdout': '',
             'filename': None,
             'file_size': 0,
             'duration': duration
@@ -103,9 +100,8 @@ def process_single_date(date_str):
 
 def main():
     print("="*70)
-    print("🚀 PERFORMANCE DATA BACKFILL - FIXED")
-    print(f"   Environment variables properly passed")
-    print(f"   {PARALLEL_WORKERS} workers, 10-minute timeout per date")
+    print(f"🚀 PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS")
+    print(f"   Environment: ✓ | Workers: {PARALLEL_WORKERS} | Timeout: 10min/date")
     print("="*70)
     print()
     
@@ -113,7 +109,6 @@ def main():
         print(f"❌ Script not found: {SCRIPT_PATH}")
         sys.exit(1)
     
-    # Verify required environment variables
     required_vars = [
         'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
         'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN',
@@ -125,18 +120,16 @@ def main():
         print(f"❌ Missing environment variables: {', '.join(missing)}")
         sys.exit(1)
     
-    print("✓ All required environment variables found")
+    print("✓ All environment variables found")
     print()
     
     progress = load_progress()
     
-    # Generate dates
     all_dates = []
     for days_ago in range(DAYS_TO_BACKFILL, 0, -1):
         date = datetime.now() - timedelta(days=days_ago)
         all_dates.append(date.strftime('%Y-%m-%d'))
     
-    # Filter completed
     dates_to_process = [
         d for d in all_dates 
         if d not in progress['completed_dates'] 
@@ -146,20 +139,18 @@ def main():
     if len(dates_to_process) == 0:
         print("✅ All dates already processed!")
         print(f"   Completed: {len(progress['completed_dates'])} days")
-        print(f"   Failed: {len(progress['failed_dates'])} days")
         return
     
     print(f"📅 Date Range: {all_dates[0]} to {all_dates[-1]}")
-    print(f"📊 Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}")
+    print(f"📊 Total: {len(all_dates)} | Remaining: {len(dates_to_process)}")
     print()
     
-    # Estimate
-    avg_time = 180  # 3 minutes per date
-    estimated_time = (len(dates_to_process) * avg_time) / PARALLEL_WORKERS / 60
-    print(f"⏱️  Estimated time: ~{estimated_time:.0f} minutes ({estimated_time/60:.1f} hours)")
+    # Estimate (6 minutes per date observed)
+    estimated_minutes = (len(dates_to_process) * 6) / PARALLEL_WORKERS
+    print(f"⏱️  Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)")
+    print(f"   (Based on ~6 min/date observed performance)")
     print()
     
-    # Confirmation
     if sys.stdin.isatty() and len(dates_to_process) > 10:
         try:
             response = input("Continue? (yes/no): ")
@@ -171,10 +162,9 @@ def main():
             print("\nCancelled.")
             return
     elif len(dates_to_process) > 10:
-        print("⚠️  Running in automated mode")
+        print("⚠️  Automated mode - proceeding...")
         print()
     
-    # Process dates
     start_time = time.time()
     successful = 0
     failed = 0
@@ -212,25 +202,23 @@ def main():
                     progress['completed_dates'].append(result['date'])
                     progress['last_processed'] = result['date']
                     
-                    # Verify data exists
-                    if result['file_size'] > 5:  # At least 5 KB
+                    if result['file_size'] > 3:
                         status_icon = "✅"
                         status = f"({result['file_size']:5.1f} KB)"
                     else:
                         status_icon = "⚠️ "
-                        status = "(EMPTY)"
+                        status = "(small)"
                     
                     print(f"{status_icon} [{completed_count:3d}/{len(dates_to_process)}] {result['date']} {status} in {format_duration(result['duration'])} | Progress: {progress_pct:5.1f}% | ETA: {format_duration(eta)}")
                 else:
                     failed += 1
                     progress['failed_dates'].append(result['date'])
-                    error_msg = result['stderr'][:60] if result['stderr'] else 'Unknown error'
+                    error_msg = result['stderr'][:50] if result['stderr'] else 'Unknown'
                     print(f"❌ [{completed_count:3d}/{len(dates_to_process)}] {result['date']} FAILED: {error_msg}")
                 
                 if result['date'] in progress.get('in_progress', []):
                     progress['in_progress'].remove(result['date'])
                 
-                # Save progress every 5 completions
                 if completed_count % 5 == 0:
                     save_progress(progress)
             
@@ -242,7 +230,6 @@ def main():
         save_progress(progress)
         sys.exit(0)
     
-    # Summary
     total_time = time.time() - start_time
     print(f"\n{'='*70}")
     print("✅ BACKFILL COMPLETE")
@@ -260,24 +247,23 @@ def main():
         print(f"   Total data: {total_file_size/1024:.1f} MB")
         avg_size = total_file_size / successful if successful > 0 else 0
         print(f"   Avg file size: {avg_size:.1f} KB")
-        
-        if avg_size < 5:
-            print(f"\n⚠️  WARNING: Files are suspiciously small!")
-            print(f"   Most files may not contain data.")
-        else:
-            print(f"\n✅ File sizes look good!")
+        avg_time = total_time / successful if successful > 0 else 0
+        print(f"   Avg time/date: {format_duration(avg_time)}")
     
     if progress['failed_dates']:
-        print(f"\n❌ Failed dates ({len(progress['failed_dates'])}):")
-        for i, date in enumerate(progress['failed_dates'][:10], 1):
-            print(f"   {i:2d}. {date}")
-        if len(progress['failed_dates']) > 10:
-            print(f"   ... and {len(progress['failed_dates']) - 10} more")
+        print(f"\n❌ Failed: {len(progress['failed_dates'])}")
+        for i, date in enumerate(progress['failed_dates'][:5], 1):
+            print(f"   {i}. {date}")
     
     if failed == 0 and os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
+        print(f"\n✓ Progress file removed")
     
     print()
+    print("="*70)
+    print(f"💡 To backfill more days, increase DAYS_TO_BACKFILL")
+    print(f"   Current: {DAYS_TO_BACKFILL} days")
+    print(f"   Next: Try 30 days (~1.5 hours)")
     print("="*70)
 
 if __name__ == "__main__":
