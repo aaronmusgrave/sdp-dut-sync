@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FINAL v8: Saves JSON file + improved date validation
+FINAL v9: Uses last_updated_time for closed tickets (correct field for your ServiceDesk)
 """
 
 import os
@@ -205,13 +205,16 @@ def get_tech_meetings(email, graph_token, date=None):
     return {'meeting_count': 0, 'total_hours': 0}
 
 def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
-    """ACCURATE: Fetches individual tickets and validates with EXACT date match"""
+    """
+    FINAL ACCURATE VERSION: Uses last_updated_time as primary field
+    This is what your ServiceDesk actually updates when tickets are closed
+    """
     if date is None:
         date = datetime.now()
     if date.date() >= datetime.now().date():
         date = datetime.now() - timedelta(days=1)
     
-    target_date = date.date()  # Just the date, no time
+    target_date = date.date()
     
     debug_print(f"Counting closed for {tech_name} on {target_date}")
     
@@ -220,7 +223,7 @@ def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Get ALL closed tickets for this tech (up to 100)
+    # Get ALL closed tickets for this tech, sorted by last_updated_time
     list_info = {
         "list_info": {
             "row_count": 100,
@@ -229,7 +232,7 @@ def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
                 {"field": "technician.name", "condition": "is", "value": tech_name},
                 {"field": "status.name", "condition": "is", "values": ["Closed"]}
             ],
-            "sort_field": "created_time",
+            "sort_field": "last_updated_time",
             "sort_order": "desc"
         }
     }
@@ -263,29 +266,48 @@ def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
                 ticket_tech_name = ''
             
             if ticket_tech_name != tech_name:
+                debug_print(f"  ⏭️  Ticket {ticket_id} belongs to {ticket_tech_name}, skipping")
                 continue
             
-            # Check completed_time (primary)
+            # Verify status is Closed
+            status_obj = ticket.get('status')
+            if isinstance(status_obj, dict):
+                status_name = status_obj.get('name', '')
+            else:
+                status_name = ''
+            
+            if status_name != 'Closed':
+                debug_print(f"  ⏭️  Ticket {ticket_id} status is {status_name}, skipping")
+                continue
+            
+            # PRIMARY: Check last_updated_time (this is what ServiceDesk updates!)
+            updated_time = safe_timestamp_to_date(ticket.get('last_updated_time'))
+            if updated_time and updated_time.date() == target_date:
+                count += 1
+                debug_print(f"  ✓ Ticket {ticket_id} updated on {updated_time.strftime('%Y-%m-%d %H:%M')}")
+                continue
+            
+            # Fallback 1: completed_time
             completed_time = safe_timestamp_to_date(ticket.get('completed_time'))
             if completed_time and completed_time.date() == target_date:
                 count += 1
                 debug_print(f"  ✓ Ticket {ticket_id} completed on {completed_time.strftime('%Y-%m-%d %H:%M')}")
                 continue
             
-            # Fallback: resolved_time
+            # Fallback 2: resolved_time
             resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
             if resolved_time and resolved_time.date() == target_date:
                 count += 1
                 debug_print(f"  ✓ Ticket {ticket_id} resolved on {resolved_time.strftime('%Y-%m-%d %H:%M')}")
                 continue
             
-            # Fallback: closed_time
+            # Fallback 3: closed_time
             closed_time = safe_timestamp_to_date(ticket.get('closed_time'))
             if closed_time and closed_time.date() == target_date:
                 count += 1
                 debug_print(f"  ✓ Ticket {ticket_id} closed on {closed_time.strftime('%Y-%m-%d %H:%M')}")
         
-        debug_print(f"✅ {tech_name}: {count} tickets")
+        debug_print(f"✅ {tech_name}: {count} tickets closed on {target_date}")
         return count
         
     except Exception as e:
@@ -298,6 +320,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     metrics = {'active_tickets': 0, 'closed_today': 0}
     
+    # Get active tickets
     active_list_info = {
         "list_info": {
             "row_count": 250,
@@ -318,6 +341,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     except:
         pass
     
+    # Count closed tickets ACCURATELY
     metrics['closed_today'] = count_closed_tickets_accurate(tech_name, sdp_token, date)
     return metrics
 
@@ -398,7 +422,8 @@ def main():
     args = parser.parse_args()
     DEBUG = args.debug
     print("="*70)
-    print("🚀 TECHNICIAN PERFORMANCE TRACKER v8 FINAL")
+    print("🚀 TECHNICIAN PERFORMANCE TRACKER v9 FINAL")
+    print("   ✨ Uses last_updated_time for closed tickets")
     print("="*70)
     print()
     graph_token = get_graph_token()
