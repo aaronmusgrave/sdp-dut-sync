@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FINAL v7: Fetches individual tickets and properly validates dates
+FINAL v8: Saves JSON file + improved date validation
 """
 
 import os
@@ -205,32 +205,25 @@ def get_tech_meetings(email, graph_token, date=None):
     return {'meeting_count': 0, 'total_hours': 0}
 
 def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
-    """
-    ACCURATE VERSION: Fetches individual tickets and validates
-    - Gets list of closed tickets for this tech
-    - Fetches each one individually (to get date fields)
-    - Validates technician name AND completed_time date
-    - Returns accurate count
-    """
+    """ACCURATE: Fetches individual tickets and validates with EXACT date match"""
     if date is None:
         date = datetime.now()
     if date.date() >= datetime.now().date():
         date = datetime.now() - timedelta(days=1)
     
-    start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+    target_date = date.date()  # Just the date, no time
     
-    debug_print(f"Counting closed for {tech_name} on {date.strftime('%Y-%m-%d')}")
+    debug_print(f"Counting closed for {tech_name} on {target_date}")
     
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Get list of closed tickets for this tech (IDs only)
+    # Get ALL closed tickets for this tech (up to 100)
     list_info = {
         "list_info": {
-            "row_count": 50,  # Limit to 50 most recent
+            "row_count": 100,
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
@@ -253,17 +246,16 @@ def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
         result = response.json()
         ticket_ids = [t['id'] for t in result.get('requests', [])]
         
-        debug_print(f"Found {len(ticket_ids)} closed tickets, checking dates...")
+        debug_print(f"Found {len(ticket_ids)} total closed tickets, checking dates...")
         
         count = 0
         
-        # Fetch each ticket individually to get date fields
         for ticket_id in ticket_ids:
             ticket = get_ticket_details(ticket_id, sdp_token)
             if not ticket:
                 continue
             
-            # CRITICAL: Verify technician name
+            # Verify technician name
             tech_obj = ticket.get('technician')
             if isinstance(tech_obj, dict):
                 ticket_tech_name = tech_obj.get('name', '')
@@ -271,30 +263,29 @@ def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
                 ticket_tech_name = ''
             
             if ticket_tech_name != tech_name:
-                debug_print(f"  Ticket {ticket_id} belongs to {ticket_tech_name}, skipping")
                 continue
             
             # Check completed_time (primary)
             completed_time = safe_timestamp_to_date(ticket.get('completed_time'))
-            if completed_time and start_of_day <= completed_time <= end_of_day:
+            if completed_time and completed_time.date() == target_date:
                 count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} completed on {completed_time.strftime('%Y-%m-%d')}")
+                debug_print(f"  ✓ Ticket {ticket_id} completed on {completed_time.strftime('%Y-%m-%d %H:%M')}")
                 continue
             
             # Fallback: resolved_time
             resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-            if resolved_time and start_of_day <= resolved_time <= end_of_day:
+            if resolved_time and resolved_time.date() == target_date:
                 count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} resolved on {resolved_time.strftime('%Y-%m-%d')}")
+                debug_print(f"  ✓ Ticket {ticket_id} resolved on {resolved_time.strftime('%Y-%m-%d %H:%M')}")
                 continue
             
             # Fallback: closed_time
             closed_time = safe_timestamp_to_date(ticket.get('closed_time'))
-            if closed_time and start_of_day <= closed_time <= end_of_day:
+            if closed_time and closed_time.date() == target_date:
                 count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} closed on {closed_time.strftime('%Y-%m-%d')}")
+                debug_print(f"  ✓ Ticket {ticket_id} closed on {closed_time.strftime('%Y-%m-%d %H:%M')}")
         
-        debug_print(f"✅ {tech_name}: {count} tickets closed on {date.strftime('%Y-%m-%d')}")
+        debug_print(f"✅ {tech_name}: {count} tickets")
         return count
         
     except Exception as e:
@@ -307,7 +298,6 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     metrics = {'active_tickets': 0, 'closed_today': 0}
     
-    # Get active tickets
     active_list_info = {
         "list_info": {
             "row_count": 250,
@@ -328,7 +318,6 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     except:
         pass
     
-    # Count closed tickets ACCURATELY
     metrics['closed_today'] = count_closed_tickets_accurate(tech_name, sdp_token, date)
     return metrics
 
@@ -352,6 +341,25 @@ def calculate_adjusted_performance(meeting_data, ticket_metrics):
         'adjusted_score': round(score, 1),
         'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1)
     }
+
+def save_metrics_to_file(tech_data, date):
+    """Save daily metrics to JSON file"""
+    filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
+    output = {}
+    for tech, data in tech_data.items():
+        output[tech] = {
+            'date': date.isoformat(),
+            'meetings': {
+                'count': data['meetings']['meeting_count'],
+                'hours': data['meetings']['total_hours']
+            },
+            'tickets': data['tickets'],
+            'performance': data['performance']
+        }
+    with open(filename, 'w') as f:
+        json.dump(output, f, indent=2)
+    print(f"\n📁 Metrics saved to: {filename}")
+    return filename
 
 def upload_to_dust(tech_data, date):
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
@@ -390,8 +398,7 @@ def main():
     args = parser.parse_args()
     DEBUG = args.debug
     print("="*70)
-    print("🚀 TECHNICIAN PERFORMANCE TRACKER v7 FINAL")
-    print("   ✨ Accurately validates each ticket individually")
+    print("🚀 TECHNICIAN PERFORMANCE TRACKER v8 FINAL")
     print("="*70)
     print()
     graph_token = get_graph_token()
@@ -401,7 +408,7 @@ def main():
     else:
         target_date = datetime.now() - timedelta(days=1)
     print(f"📅 Processing: {target_date.strftime('%Y-%m-%d')}")
-    print(f"   (Fetching individual tickets - may take 1-2 min)\n")
+    print(f"   (May take 1-2 min)\n")
     technicians_info = discover_active_technicians(sdp_token)
     if not technicians_info:
         print("❌ No technicians found")
@@ -427,6 +434,11 @@ def main():
         t = data['tickets']
         p = data['performance']
         print(f"{tech_name:25} | {t['closed_today']:2} closed | {m['meeting_count']:2} mtgs ({m['total_hours']:4.1f}h) | Score: {p['adjusted_score']:5.1f}")
+    
+    # Save JSON file
+    save_metrics_to_file(tech_data, target_date)
+    
+    # Upload to Dust
     upload_to_dust(tech_data, target_date)
 
 if __name__ == "__main__":
