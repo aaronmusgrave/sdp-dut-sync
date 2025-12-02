@@ -1,76 +1,60 @@
-name: Daily Meeting Load & Performance Tracker
+name: Daily Performance Tracking
 
 on:
   schedule:
-    - cron: '0 23 * * *'  # 5 PM CST = 11 PM UTC (CST is UTC-6)
-  workflow_dispatch:  # Manual trigger
+    - cron: '0 1 * * *'  # Run at 1 AM UTC (7 PM CST previous day)
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   track-performance:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
       
-      - name: 📦 Install dependencies
-        run: pip install requests
+      - name: Install dependencies
+        run: |
+          pip install requests
       
-      - name: 📊 Track today's meeting load and performance
+      - name: Run performance tracker
         env:
-          # Azure/M365 credentials
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
-          
-          # ServiceDesk credentials
           SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
           SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
           SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
-          
-          # Dust credentials
           DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+          EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
         run: |
           echo "📊 Running daily performance tracker for $(date +%Y-%m-%d)"
-          python -u scripts/track_meeting_load.py
+          python scripts/track_meeting_load.py
       
-      - name: 📁 Upload daily performance report
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: daily-performance-${{ github.run_number }}
+          name: performance-data
           path: tech_performance_*.json
-          retention-days: 30
+          if-no-files-found: error
       
-      - name: 💾 Commit daily metrics to repo
-        if: success()
+      - name: Commit and push if changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Add today's performance file
-          git add tech_performance_$(date +%Y%m%d).json
-          
-          # Commit
-          git commit -m "📊 Daily performance metrics: $(date +%Y-%m-%d)" || echo "No changes to commit"
-          
-          # Push
-          git push || echo "Nothing to push"
+          git add tech_performance_*.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Daily performance tracking: $(date +%Y-%m-%d)" && git push)
+        continue-on-error: true
       
-      - name: 📧 Notify on failure (optional)
+      - name: Notify on failure
         if: failure()
         run: |
           echo "❌ Daily performance tracking failed!"
           echo "Check the logs for details"
-          # Add email/Slack notification here if desired
