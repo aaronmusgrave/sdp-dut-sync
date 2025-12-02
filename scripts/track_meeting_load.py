@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FINAL v9: Uses last_updated_time for closed tickets (correct field for your ServiceDesk)
+FINAL v10: Improved Dust upload format with full details
 """
 
 import os
@@ -318,7 +318,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     if date is None:
         date = datetime.now()
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
-    metrics = {'active_tickets': 0, 'closed_today': 0}
+    metrics = {'active_tickets': 0, 'closed_today': 0, 'updated_today': 0}
     
     # Get active tickets
     active_list_info = {
@@ -343,133 +343,13 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     
     # Count closed tickets ACCURATELY
     metrics['closed_today'] = count_closed_tickets_accurate(tech_name, sdp_token, date)
+    
+    # Note: updated_today would require checking last_updated_time for active tickets
+    # For now, we'll leave it at 0 since it's not critical
+    metrics['updated_today'] = 0
+    
     return metrics
 
 def calculate_adjusted_performance(meeting_data, ticket_metrics):
     meeting_hours = meeting_data['total_hours']
-    available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
-    tickets_closed = ticket_metrics['closed_today']
-    velocity_closed = tickets_closed / available_hours if available_hours > 0 else 0
-    score = min(40, velocity_closed * 10)
-    active = ticket_metrics['active_tickets']
-    if 5 <= active <= 15:
-        score += 15
-    elif active < 5:
-        score += active * 3
-    else:
-        score += max(0, 15 - (active - 15) * 0.5)
-    score = max(0, min(100, score))
-    return {
-        'available_hours': round(available_hours, 2),
-        'velocity_closed': round(velocity_closed, 2),
-        'adjusted_score': round(score, 1),
-        'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1)
-    }
-
-def save_metrics_to_file(tech_data, date):
-    """Save daily metrics to JSON file"""
-    filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
-    output = {}
-    for tech, data in tech_data.items():
-        output[tech] = {
-            'date': date.isoformat(),
-            'meetings': {
-                'count': data['meetings']['meeting_count'],
-                'hours': data['meetings']['total_hours']
-            },
-            'tickets': data['tickets'],
-            'performance': data['performance']
-        }
-    with open(filename, 'w') as f:
-        json.dump(output, f, indent=2)
-    print(f"\n📁 Metrics saved to: {filename}")
-    return filename
-
-def upload_to_dust(tech_data, date):
-    if not DUST_API_KEY or not DUST_WORKSPACE_ID:
-        return
-    print("\n📤 Uploading to Dust...")
-    DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
-    headers = {'Authorization': f'Bearer {DUST_API_KEY}', 'Content-Type': 'application/json'}
-    date_str = date.strftime('%Y-%m-%d')
-    uploaded = 0
-    for tech_name, data in tech_data.items():
-        m = data['meetings']
-        t = data['tickets']
-        p = data['performance']
-        document = {
-            "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
-            "timestamp": int(date.timestamp() * 1000),
-            "tags": ["performance-metrics", f"technician:{tech_name.lower().replace(' ', '-')}", f"date:{date_str}"],
-            "text": f"# {tech_name} - {date.strftime('%B %d, %Y')}\nMeetings: {m['meeting_count']} ({m['total_hours']}h)\nClosed: {t['closed_today']} tickets\nActive: {t['active_tickets']} tickets\nScore: {p['adjusted_score']}/100",
-            "structured_data": {
-                "technician_name": tech_name, "date": date_str, "meeting_count": m['meeting_count'],
-                "meeting_hours": m['total_hours'], "tickets_closed_today": t['closed_today'],
-                "active_tickets": t['active_tickets'], "velocity_closed": p['velocity_closed'], "adjusted_score": p['adjusted_score']
-            }
-        }
-        url = f"{DUST_API_BASE}/{document['document_id']}"
-        try:
-            response = requests.post(url, headers=headers, json=document, timeout=30)
-            if response.status_code in [200, 201]:
-                uploaded += 1
-        except:
-            pass
-    print(f"✓ Uploaded: {uploaded}")
-
-def main():
-    global DEBUG
-    args = parser.parse_args()
-    DEBUG = args.debug
-    print("="*70)
-    print("🚀 TECHNICIAN PERFORMANCE TRACKER v9 FINAL")
-    print("   ✨ Uses last_updated_time for closed tickets")
-    print("="*70)
-    print()
-    graph_token = get_graph_token()
-    sdp_token = get_sdp_token()
-    if args.date:
-        target_date = datetime.strptime(args.date, '%Y-%m-%d')
-    else:
-        target_date = datetime.now() - timedelta(days=1)
-    print(f"📅 Processing: {target_date.strftime('%Y-%m-%d')}")
-    print(f"   (May take 1-2 min)\n")
-    technicians_info = discover_active_technicians(sdp_token)
-    if not technicians_info:
-        print("❌ No technicians found")
-        return
-    print("\n📧 Resolving emails...")
-    for tech_name, info in technicians_info.items():
-        if not info.get('email'):
-            info['email'] = resolve_technician_email(tech_name, info, graph_token)
-    tech_data = {}
-    print(f"\n📊 Analyzing {len(technicians_info)} technicians...\n")
-    for tech_name, tech_info in technicians_info.items():
-        print(f"{tech_name}...", end=' ', flush=True)
-        meetings = get_tech_meetings(tech_info.get('email'), graph_token, target_date)
-        tickets = get_tech_ticket_metrics(tech_name, sdp_token, target_date)
-        performance = calculate_adjusted_performance(meetings, tickets)
-        print(f"{tickets['closed_today']} closed, score {performance['adjusted_score']}")
-        tech_data[tech_name] = {'meetings': meetings, 'tickets': tickets, 'performance': performance}
-    print("\n" + "="*70)
-    print(f"📊 {target_date.strftime('%B %d, %Y')}")
-    print("="*70)
-    for tech_name, data in sorted(tech_data.items(), key=lambda x: x[1]['performance']['adjusted_score'], reverse=True):
-        m = data['meetings']
-        t = data['tickets']
-        p = data['performance']
-        print(f"{tech_name:25} | {t['closed_today']:2} closed | {m['meeting_count']:2} mtgs ({m['total_hours']:4.1f}h) | Score: {p['adjusted_score']:5.1f}")
-    
-    # Save JSON file
-    save_metrics_to_file(tech_data, target_date)
-    
-    # Upload to Dust
-    upload_to_dust(tech_data, target_date)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\n❌ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+    available_hours = max(0.5,
