@@ -132,7 +132,7 @@ def resolve_technician_email(tech_name, tech_info, graph_token):
         if response.status_code == 200:
             users = response.json().get('value', [])
             if users:
-                return users[0].get('mail') or users[0].get('userPrincipalName']
+                return users[0].get('mail') or users[0].get('userPrincipalName')
     except Exception as e:
         logger.debug(f"Error resolving email for {tech_name}: {e}")
     name_parts = tech_name.lower().split()
