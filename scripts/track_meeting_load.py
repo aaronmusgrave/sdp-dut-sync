@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-FINAL v10: Improved Dust upload format with full details
+v14.6: TEST - Date range filter on resolved_time
+- Tests if date filtering works with resolved_time (correct field)
+- Fetches 500 rows as baseline
+- If filter works: Should be 1-2 min/date
+- If filter doesn't help: Will be ~5 min/date
 """
 
 import os
 import requests
 import json
 import argparse
+import logging
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 parser = argparse.ArgumentParser(description='Track technician meeting load and performance')
 parser.add_argument('--date', type=str, metavar='YYYY-MM-DD', help='Process specific date')
 parser.add_argument('--debug', action='store_true', help='Show debug output')
+parser.add_argument('--diagnose', action='store_true', help='Run diagnostic mode')
+parser.add_argument('--technician', type=str, help='Technician name for diagnostic')
 
 TENANT_ID = os.environ.get('AZURE_TENANT_ID')
 CLIENT_ID = os.environ.get('AZURE_CLIENT_ID')
@@ -27,42 +35,31 @@ DUST_API_KEY = os.environ.get('DUST_API_KEY')
 DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
 
 WORK_HOURS_PER_DAY = 8
+PARALLEL_TECHNICIANS = 8
+PARALLEL_TICKETS = 10
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'motorad.com')
 
-DEBUG = False
-
-def debug_print(message):
-    if DEBUG:
-        print(f"  [DEBUG] {message}")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
+logger = logging.getLogger(__name__)
 
 def get_graph_token():
-    print("Getting Microsoft Graph token...")
+    logger.info("Getting Microsoft Graph token...")
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-    data = {
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-        'scope': 'https://graph.microsoft.com/.default',
-        'grant_type': 'client_credentials'
-    }
+    data = {'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET, 'scope': 'https://graph.microsoft.com/.default', 'grant_type': 'client_credentials'}
     response = requests.post(url, data=data)
     if response.status_code == 200:
-        print("✓ Graph token obtained")
+        logger.info("OK Graph token obtained")
         return response.json()['access_token']
     raise Exception(f"Failed to get Graph token")
 
 def get_sdp_token():
-    print("Getting ServiceDesk token...")
-    payload = {
-        'client_id': SDP_CLIENT_ID,
-        'client_secret': SDP_CLIENT_SECRET,
-        'refresh_token': SDP_REFRESH_TOKEN,
-        'grant_type': 'refresh_token'
-    }
+    logger.info("Getting ServiceDesk token...")
+    payload = {'client_id': SDP_CLIENT_ID, 'client_secret': SDP_CLIENT_SECRET, 'refresh_token': SDP_REFRESH_TOKEN, 'grant_type': 'refresh_token'}
     response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
     if response.status_code == 200:
-        print("✓ ServiceDesk token obtained")
+        logger.info("OK ServiceDesk token obtained")
         return response.json()['access_token']
     raise Exception(f"Failed to get SDP token")
 
@@ -79,10 +76,7 @@ def safe_timestamp_to_date(value):
         return None
 
 def get_ticket_details(ticket_id, sdp_token):
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {sdp_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
+    headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     url = f"{SDP_API_BASE}/requests/{ticket_id}"
     try:
         response = requests.get(url, headers=headers, timeout=30)
@@ -93,20 +87,9 @@ def get_ticket_details(ticket_id, sdp_token):
     return None
 
 def discover_active_technicians(sdp_token):
-    print("\n🔍 Auto-discovering technicians...")
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {sdp_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    list_info = {
-        "list_info": {
-            "row_count": 100,
-            "start_index": 1,
-            "search_criteria": [
-                {"field": "status.name", "condition": "is not", "values": ["Closed", "Cancelled"]}
-            ]
-        }
-    }
+    logger.info("Auto-discovering technicians...")
+    headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
+    list_info = {"list_info": {"row_count": 100, "start_index": 1, "search_criteria": [{"field": "status.name", "condition": "is not", "values": ["Closed", "Cancelled"]}]}}
     technicians = {}
     start_index = 1
     pages_checked = 0
@@ -135,9 +118,10 @@ def discover_active_technicians(sdp_token):
                 pages_checked += 1
             else:
                 break
-        except:
+        except Exception as e:
+            logger.warning(f"Error during discovery: {e}")
             break
-    print(f"✓ Discovered {len(technicians)} active technicians")
+    logger.info(f"OK Discovered {len(technicians)} active technicians")
     return technicians
 
 def resolve_technician_email(tech_name, tech_info, graph_token):
@@ -147,13 +131,13 @@ def resolve_technician_email(tech_name, tech_info, graph_token):
         headers = {'Authorization': f'Bearer {graph_token}', 'ConsistencyLevel': 'eventual'}
         url = "https://graph.microsoft.com/v1.0/users"
         params = {'$filter': f"displayName eq '{tech_name}'", '$select': 'mail,userPrincipalName'}
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=10)
         if response.status_code == 200:
             users = response.json().get('value', [])
             if users:
                 return users[0].get('mail') or users[0].get('userPrincipalName')
-    except:
-        pass
+    except Exception as e:
+        logger.debug(f"Error resolving email for {tech_name}: {e}")
     name_parts = tech_name.lower().split()
     if len(name_parts) >= 2:
         return f"{name_parts[0]}.{name_parts[-1]}@{EMAIL_DOMAIN}"
@@ -168,13 +152,9 @@ def get_tech_meetings(email, graph_token, date=None):
     end_time = date.replace(hour=17, minute=0, second=0, microsecond=0)
     url = f"https://graph.microsoft.com/v1.0/users/{email}/calendar/calendarView"
     headers = {'Authorization': f'Bearer {graph_token}', 'Prefer': 'outlook.timezone="Central Standard Time"'}
-    params = {
-        'startDateTime': start_time.isoformat(),
-        'endDateTime': end_time.isoformat(),
-        '$select': 'isAllDay,isCancelled,responseStatus,start,end'
-    }
+    params = {'startDateTime': start_time.isoformat(), 'endDateTime': end_time.isoformat(), '$select': 'isAllDay,isCancelled,responseStatus,start,end'}
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         if response.status_code == 200:
             events = response.json().get('value', [])
             total_minutes = 0
@@ -198,87 +178,122 @@ def get_tech_meetings(email, graph_token, date=None):
                 count += 1
             total_minutes = min(total_minutes, WORK_HOURS_PER_DAY * 60)
             return {'meeting_count': count, 'total_hours': round(total_minutes / 60, 2)}
-    except:
-        pass
+    except Exception as e:
+        logger.debug(f"Error fetching meetings for {email}: {e}")
     return {'meeting_count': 0, 'total_hours': 0}
 
-def count_closed_tickets_accurate(tech_name, sdp_token, date=None):
+def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
+    """
+    v14.6: TEST - Date range filter on resolved_time
+    - Tests if API supports date filtering on resolved_time
+    - Uses 'between' condition for date range
+    - Fetches 500 rows (should be more than enough if filter works)
+    """
     if date is None:
         date = datetime.now()
     if date.date() >= datetime.now().date():
         date = datetime.now() - timedelta(days=1)
+    
     target_date = date.date()
-    debug_print(f"Counting closed for {tech_name} on {target_date}")
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {sdp_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
+    target_date_str = target_date.strftime('%Y-%m-%d')
+    
+    logger.debug(f"Counting closed for {tech_name} on {target_date}")
+    
+    headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
+    
+    # TEST: Try date range filter on resolved_time
     list_info = {
         "list_info": {
-            "row_count": 100,
+            "row_count": 500,
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
-                {"field": "status.name", "condition": "is", "values": ["Closed"]}
+                {"field": "status.name", "condition": "is", "values": ["Closed"]},
+                {
+                    "field": "resolved_time",
+                    "condition": "between",
+                    "values": [
+                        f"{target_date_str} 00:00:00",
+                        f"{target_date_str} 23:59:59"
+                    ]
+                }
             ],
-            "sort_field": "last_updated_time",
+            "sort_field": "resolved_time",
             "sort_order": "desc"
         }
     }
+    
     try:
         params = {'input_data': json.dumps(list_info)}
         url = f"{SDP_API_BASE}/requests"
         response = requests.get(url, headers=headers, params=params, timeout=30)
+        
         if response.status_code != 200:
-            debug_print(f"Search failed: {response.status_code}")
+            logger.warning(f"Ticket search failed for {tech_name}: {response.status_code}")
             return 0
+        
         result = response.json()
-        ticket_ids = [t['id'] for t in result.get('requests', [])]
-        debug_print(f"Found {len(ticket_ids)} total closed tickets, checking dates...")
-        count = 0
-        for ticket_id in ticket_ids:
-            ticket = get_ticket_details(ticket_id, sdp_token)
-            if not ticket:
-                continue
-            tech_obj = ticket.get('technician')
-            if isinstance(tech_obj, dict):
-                ticket_tech_name = tech_obj.get('name', '')
-            else:
-                ticket_tech_name = ''
-            if ticket_tech_name != tech_name:
-                debug_print(f"  ⏭️  Ticket {ticket_id} belongs to {ticket_tech_name}, skipping")
-                continue
-            status_obj = ticket.get('status')
-            if isinstance(status_obj, dict):
-                status_name = status_obj.get('name', '')
-            else:
-                status_name = ''
-            if status_name != 'Closed':
-                debug_print(f"  ⏭️  Ticket {ticket_id} status is {status_name}, skipping")
-                continue
-            updated_time = safe_timestamp_to_date(ticket.get('last_updated_time'))
-            if updated_time and updated_time.date() == target_date:
-                count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} updated on {updated_time.strftime('%Y-%m-%d %H:%M')}")
-                continue
-            completed_time = safe_timestamp_to_date(ticket.get('completed_time'))
-            if completed_time and completed_time.date() == target_date:
-                count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} completed on {completed_time.strftime('%Y-%m-%d %H:%M')}")
-                continue
-            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-            if resolved_time and resolved_time.date() == target_date:
-                count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} resolved on {resolved_time.strftime('%Y-%m-%d %H:%M')}")
-                continue
-            closed_time = safe_timestamp_to_date(ticket.get('closed_time'))
-            if closed_time and closed_time.date() == target_date:
-                count += 1
-                debug_print(f"  ✓ Ticket {ticket_id} closed on {closed_time.strftime('%Y-%m-%d %H:%M')}")
-        debug_print(f"✅ {tech_name}: {count} tickets closed on {target_date}")
-        return count
+        tickets = result.get('requests', [])
+        
+        logger.debug(f"  Date filter returned {len(tickets)} tickets for {tech_name}")
+        
+        # CHECK: Is resolved_time in the list response?
+        if tickets and 'resolved_time' in tickets[0]:
+            logger.debug(f"  OK resolved_time IS in list - using fast filter!")
+            
+            # FAST PATH: Filter client-side (verify date filter worked)
+            count = 0
+            for ticket in tickets:
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                if resolved_time and resolved_time.date() == target_date:
+                    count += 1
+                    logger.debug(f"    OK Ticket {ticket.get('id')} on {target_date}")
+            
+            logger.debug(f"  OK {tech_name}: {count} tickets (fast path with date filter)")
+            return count
+        
+        else:
+            # SLOW PATH: Fetch full details
+            logger.debug(f"  -- resolved_time NOT in list - using slow path")
+            
+            ticket_ids = [t['id'] for t in tickets]
+            count = 0
+            
+            def fetch_and_verify_ticket(ticket_id):
+                ticket = get_ticket_details(ticket_id, sdp_token)
+                if not ticket:
+                    return False
+                
+                tech = ticket.get('technician')
+                if not tech or not isinstance(tech, dict) or tech.get('name', '') != tech_name:
+                    return False
+                
+                status = ticket.get('status')
+                if not status or not isinstance(status, dict) or status.get('name', '') != 'Closed':
+                    return False
+                
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                
+                if not resolved_time:
+                    return False
+                
+                if resolved_time.date() == target_date:
+                    logger.debug(f"    OK Ticket {ticket_id} resolved on {target_date}")
+                    return True
+                
+                return False
+            
+            with ThreadPoolExecutor(max_workers=PARALLEL_TICKETS) as executor:
+                futures = [executor.submit(fetch_and_verify_ticket, tid) for tid in ticket_ids]
+                for future in as_completed(futures):
+                    if future.result():
+                        count += 1
+            
+            logger.debug(f"  OK {tech_name}: {count} tickets (slow path)")
+            return count
+        
     except Exception as e:
-        debug_print(f"Error: {e}")
+        logger.warning(f"Error counting tickets for {tech_name}: {e}")
         return 0
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
@@ -286,6 +301,7 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
         date = datetime.now()
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     metrics = {'active_tickets': 0, 'closed_today': 0, 'updated_today': 0}
+    
     active_list_info = {
         "list_info": {
             "row_count": 250,
@@ -303,9 +319,10 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
         if response.status_code == 200:
             result = response.json()
             metrics['active_tickets'] = len(result.get('requests', []))
-    except:
-        pass
-    metrics['closed_today'] = count_closed_tickets_accurate(tech_name, sdp_token, date)
+    except Exception as e:
+        logger.debug(f"Error getting active tickets for {tech_name}: {e}")
+    
+    metrics['closed_today'] = count_closed_tickets_optimized(tech_name, sdp_token, date)
     metrics['updated_today'] = 0
     return metrics
 
@@ -330,6 +347,14 @@ def calculate_adjusted_performance(meeting_data, ticket_metrics):
         'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1)
     }
 
+def process_single_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
+    logger.info(f"  Processing {tech_name}...")
+    meetings = get_tech_meetings(tech_info.get('email'), graph_token, target_date)
+    tickets = get_tech_ticket_metrics(tech_name, sdp_token, target_date)
+    performance = calculate_adjusted_performance(meetings, tickets)
+    logger.info(f"    -> {tickets['closed_today']} closed, {meetings['meeting_count']} meetings, score {performance['adjusted_score']}")
+    return {'name': tech_name, 'meetings': meetings, 'tickets': tickets, 'performance': performance}
+
 def save_metrics_to_file(tech_data, date):
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     output = {}
@@ -342,17 +367,19 @@ def save_metrics_to_file(tech_data, date):
         }
     with open(filename, 'w') as f:
         json.dump(output, f, indent=2)
-    print(f"\n📁 Metrics saved to: {filename}")
+    logger.info(f"File saved: {filename}")
     return filename
 
 def upload_to_dust(tech_data, date):
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
+        logger.warning("Dust API credentials not found, skipping upload")
         return
-    print("\n📤 Uploading to Dust...")
+    logger.info("Uploading to Dust...")
     DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
     headers = {'Authorization': f'Bearer {DUST_API_KEY}', 'Content-Type': 'application/json'}
     date_str = date.strftime('%Y-%m-%d')
     uploaded = 0
+    failed = 0
     for tech_name, data in tech_data.items():
         m = data['meetings']
         t = data['tickets']
@@ -363,17 +390,17 @@ def upload_to_dust(tech_data, date):
             "tags": ["performance-metrics", f"technician:{tech_name.lower().replace(' ', '-')}", f"date:{date_str}"],
             "text": f"""# {tech_name} - {date.strftime('%B %d, %Y')}
 
-## 📅 Calendar & Availability
+## Calendar & Availability
 - **Meetings:** {m['meeting_count']} meetings
 - **Meeting Time:** {m['total_hours']} hours ({p['meeting_percentage']}%)
 - **Available:** {p['available_hours']} hours
 
-## 🎫 Ticket Activity
+## Ticket Activity
 - **Closed:** {t['closed_today']}
 - **Updated:** {t['updated_today']}
 - **Active:** {t['active_tickets']}
 
-## ⚡ Performance
+## Performance
 - **Velocity:** {p['velocity_closed']} tickets/hour
 - **Score:** {p['adjusted_score']}/100
 """,
@@ -396,57 +423,79 @@ def upload_to_dust(tech_data, date):
             response = requests.post(url, headers=headers, json=document, timeout=30)
             if response.status_code in [200, 201]:
                 uploaded += 1
-        except:
-            pass
-    print(f"✓ Uploaded: {uploaded}")
+            else:
+                failed += 1
+        except Exception as e:
+            failed += 1
+    logger.info(f"OK Uploaded: {uploaded}/{len(tech_data)} (failed: {failed})")
 
 def main():
-    global DEBUG
     args = parser.parse_args()
-    DEBUG = args.debug
-    print("="*70)
-    print("🚀 TECHNICIAN PERFORMANCE TRACKER v10 FINAL")
-    print("="*70)
-    print()
+    
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+    
+    # NORMAL MODE
+    print("="*70, flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.6 - DATE FILTER TEST!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | resolved_time filter", flush=True)
+    print("   Testing if date range filtering works!", flush=True)
+    print("="*70, flush=True)
+    print(flush=True)
+    
     graph_token = get_graph_token()
     sdp_token = get_sdp_token()
+    
     if args.date:
         target_date = datetime.strptime(args.date, '%Y-%m-%d')
     else:
         target_date = datetime.now() - timedelta(days=1)
-    print(f"📅 Processing: {target_date.strftime('%Y-%m-%d')}\n")
+    
+    logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
+    
     technicians_info = discover_active_technicians(sdp_token)
+    
     if not technicians_info:
-        print("❌ No technicians found")
+        logger.error("No technicians found")
         return
-    print("\n📧 Resolving emails...")
+    
+    logger.info("Resolving emails...")
     for tech_name, info in technicians_info.items():
         if not info.get('email'):
             info['email'] = resolve_technician_email(tech_name, info, graph_token)
+    
     tech_data = {}
-    print(f"\n📊 Analyzing {len(technicians_info)} technicians...\n")
-    for tech_name, tech_info in technicians_info.items():
-        print(f"{tech_name}...", end=' ', flush=True)
-        meetings = get_tech_meetings(tech_info.get('email'), graph_token, target_date)
-        tickets = get_tech_ticket_metrics(tech_name, sdp_token, target_date)
-        performance = calculate_adjusted_performance(meetings, tickets)
-        print(f"{tickets['closed_today']} closed, score {performance['adjusted_score']}")
-        tech_data[tech_name] = {'meetings': meetings, 'tickets': tickets, 'performance': performance}
-    print("\n" + "="*70)
-    print(f"📊 {target_date.strftime('%B %d, %Y')}")
-    print("="*70)
+    logger.info(f"Analyzing {len(technicians_info)} technicians with parallel processing...")
+    
+    with ThreadPoolExecutor(max_workers=PARALLEL_TECHNICIANS) as executor:
+        future_to_tech = {
+            executor.submit(process_single_technician, tech_name, tech_info, graph_token, sdp_token, target_date): tech_name
+            for tech_name, tech_info in technicians_info.items()
+        }
+        
+        for future in as_completed(future_to_tech):
+            result = future.result()
+            tech_data[result['name']] = {'meetings': result['meetings'], 'tickets': result['tickets'], 'performance': result['performance']}
+    
+    print("\n" + "="*70, flush=True)
+    print(f"{target_date.strftime('%B %d, %Y')}", flush=True)
+    print("="*70, flush=True)
+    
     for tech_name, data in sorted(tech_data.items(), key=lambda x: x[1]['performance']['adjusted_score'], reverse=True):
         m = data['meetings']
         t = data['tickets']
         p = data['performance']
-        print(f"{tech_name:25} | {t['closed_today']:2} closed | {m['meeting_count']:2} mtgs ({m['total_hours']:4.1f}h) | Score: {p['adjusted_score']:5.1f}")
+        print(f"{tech_name:25} | {t['closed_today']:2} closed | {m['meeting_count']:2} mtgs ({m['total_hours']:4.1f}h) | Score: {p['adjusted_score']:5.1f}", flush=True)
+    
     save_metrics_to_file(tech_data, target_date)
     upload_to_dust(tech_data, target_date)
+    
+    logger.info("Complete!")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
+        logger.error(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
