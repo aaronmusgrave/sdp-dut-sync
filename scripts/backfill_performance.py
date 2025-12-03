@@ -16,8 +16,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================================
 # CONFIGURATION - CHANGE THESE VALUES (or set via workflow)
 # ============================================================================
-DAYS_TO_BACKFILL = 60        # ← SET THIS: Number of days to backfill
-PARALLEL_WORKERS = 4          # ← Process 4 dates simultaneously (reduce API load)
+DAYS_TO_BACKFILL = 60        # SET THIS: Number of days to backfill
+PARALLEL_WORKERS = 4          # Process 4 dates simultaneously (reduce API load)
 TIMEOUT_PER_DAY = 600         # Max 10 minutes per date
 DELAY_BETWEEN_RUNS = 1        # Delay between date submissions (seconds)
 # ============================================================================
@@ -109,13 +109,13 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
     
     print("="*70, flush=True)
-    print(f"🚀 PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   ⚡ {PARALLEL_WORKERS} WORKERS | v14.2 tracker | Fast & Accurate!", flush=True)
+    print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.2 tracker | Fast & Accurate!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
     if not os.path.exists(SCRIPT_PATH):
-        print(f"❌ Script not found: {SCRIPT_PATH}", flush=True)
+        print(f"Script not found: {SCRIPT_PATH}", flush=True)
         sys.exit(1)
     
     required_vars = [
@@ -126,10 +126,10 @@ def main():
     
     missing = [var for var in required_vars if not os.environ.get(var)]
     if missing:
-        print(f"❌ Missing environment variables: {', '.join(missing)}", flush=True)
+        print(f"Missing environment variables: {', '.join(missing)}", flush=True)
         sys.exit(1)
     
-    print("✓ All environment variables found", flush=True)
+    print("All environment variables found", flush=True)
     print(flush=True)
     
     progress = load_progress()
@@ -147,22 +147,22 @@ def main():
     ]
     
     if len(dates_to_process) == 0:
-        print("✅ All dates already processed!", flush=True)
+        print("All dates already processed!", flush=True)
         print(f"   Completed: {len(progress['completed_dates'])} days", flush=True)
         if progress['failed_dates']:
             print(f"   Failed: {len(progress['failed_dates'])} days", flush=True)
-            print(f"\n❌ Failed dates:", flush=True)
+            print(f"\nFailed dates:", flush=True)
             for date in progress['failed_dates'][:10]:
                 print(f"      {date}", flush=True)
         return
     
-    print(f"📅 Date Range: {all_dates[0]} to {all_dates[-1]}", flush=True)
-    print(f"📊 Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}", flush=True)
+    print(f"Date Range: {all_dates[0]} to {all_dates[-1]}", flush=True)
+    print(f"Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}", flush=True)
     print(flush=True)
     
     # Estimate with v14.2 performance (~4 min per date with 4 workers)
     estimated_minutes = (len(dates_to_process) * 4) / PARALLEL_WORKERS
-    print(f"⏱️  Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
+    print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
     print(f"   (Based on v14.2 with {PARALLEL_WORKERS} workers + 500 rows + completed_time sort)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
@@ -179,7 +179,7 @@ def main():
             print("\nCancelled.", flush=True)
             return
     elif len(dates_to_process) > 10:
-        print("⚠️  Automated mode - proceeding...", flush=True)
+        print("Automated mode - proceeding...", flush=True)
         print(flush=True)
     
     start_time = time.time()
@@ -189,12 +189,12 @@ def main():
     total_file_size = 0
     
     print(f"{'='*70}", flush=True)
-    print(f"⚡ PROCESSING {len(dates_to_process)} DAYS WITH {PARALLEL_WORKERS} WORKERS", flush=True)
+    print(f"PROCESSING {len(dates_to_process)} DAYS WITH {PARALLEL_WORKERS} WORKERS", flush=True)
     print('='*70, flush=True)
     print(flush=True)
     
     # Show which dates are being submitted
-    print(f"📋 Submitting first {min(PARALLEL_WORKERS, len(dates_to_process))} dates to workers...", flush=True)
+    print(f"Submitting first {min(PARALLEL_WORKERS, len(dates_to_process))} dates to workers...", flush=True)
     for i, date in enumerate(dates_to_process[:PARALLEL_WORKERS]):
         print(f"   Worker {i+1}: {date}", flush=True)
     print(flush=True)
@@ -212,7 +212,7 @@ def main():
             progress['in_progress'] = dates_to_process.copy()
             save_progress(progress)
             
-            print("⏳ Workers running... Results will appear as dates complete", flush=True)
+            print("Workers running... Results will appear as dates complete", flush=True)
             print(flush=True)
             
             for future in as_completed(future_to_date):
@@ -232,10 +232,10 @@ def main():
                     progress['last_processed'] = result['date']
                     
                     if result['file_size'] > 3:
-                        status_icon = " = "✅"
+                        status_icon = "OK"
                         status = f"({result['file_size']:5.1f} KB)"
                     else:
-                        status_icon = "⚠️ "
+                        status_icon = "WARN"
                         status = "(small)"
                     
                     # REAL-TIME OUTPUT with flush=True
@@ -244,7 +244,7 @@ def main():
                     failed += 1
                     progress['failed_dates'].append(result['date'])
                     error_msg = result['stderr'][:50] if result['stderr'] else 'Unknown'
-                    print(f"❌ [{completed_count:3d}/{len(dates_to_process)}] {result['date']} FAILED: {error_msg}", flush=True)
+                    print(f"FAIL [{completed_count:3d}/{len(dates_to_process)}] {result['date']} FAILED: {error_msg}", flush=True)
                 
                 if result['date'] in progress.get('in_progress', []):
                     progress['in_progress'].remove(result['date'])
@@ -252,21 +252,21 @@ def main():
                 # Save progress every 5 completions
                 if completed_count % 5 == 0:
                     save_progress(progress)
-                    print(f"💾 Progress saved ({completed_count} completed)", flush=True)
+                    print(f"Progress saved ({completed_count} completed)", flush=True)
             
             progress['in_progress'] = []
             save_progress(progress)
     
     except KeyboardInterrupt:
-        print("\n\n🛑 INTERRUPTED", flush=True)
+        print("\n\nINTERRUPTED", flush=True)
         save_progress(progress)
         sys.exit(0)
     
     total_time = time.time() - start_time
     print(f"\n{'='*70}", flush=True)
-    print("✅ BACKFILL COMPLETE", flush=True)
+    print("BACKFILL COMPLETE", flush=True)
     print('='*70, flush=True)
-    print(f"\n📊 Summary:", flush=True)
+    print(f"\nSummary:", flush=True)
     print(f"   Total time: {format_duration(total_time)}", flush=True)
     print(f"   Successful: {successful}/{len(dates_to_process)}", flush=True)
     print(f"   Failed: {failed}/{len(dates_to_process)}", flush=True)
@@ -283,7 +283,7 @@ def main():
         print(f"   Avg time/date: {format_duration(avg_time)}", flush=True)
     
     if progress['failed_dates']:
-        print(f"\n❌ Failed: {len(progress['failed_dates'])}", flush=True)
+        print(f"\nFailed: {len(progress['failed_dates'])}", flush=True)
         for i, date in enumerate(progress['failed_dates'][:5], 1):
             print(f"   {i}. {date}", flush=True)
         if len(progress['failed_dates']) > 5:
@@ -291,14 +291,14 @@ def main():
     
     if failed == 0 and os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
-        print(f"\n✓ Progress file removed", flush=True)
+        print(f"\nProgress file removed", flush=True)
     else:
-        print(f"\n💾 Progress saved to: {PROGRESS_FILE}", flush=True)
+        print(f"\nProgress saved to: {PROGRESS_FILE}", flush=True)
         print(f"   Run again to retry failed dates", flush=True)
     
     print(flush=True)
     print("="*70, flush=True)
-    print(f"💡 Configuration:", flush=True)
+    print(f"Configuration:", flush=True)
     print(f"   Days to backfill: {DAYS_TO_BACKFILL}", flush=True)
     print(f"   Parallel workers: {PARALLEL_WORKERS}", flush=True)
     print(f"   Delay between runs: {DELAY_BETWEEN_RUNS}s", flush=True)
@@ -309,7 +309,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n❌ FATAL ERROR: {e}", flush=True)
+        print(f"\nFATAL ERROR: {e}", flush=True)
         import traceback
         traceback.print_exc()
         sys.exit(1)
