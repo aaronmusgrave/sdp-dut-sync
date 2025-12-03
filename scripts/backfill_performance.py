@@ -16,8 +16,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================================
 # CONFIGURATION - CHANGE THESE VALUES
 # ============================================================================
-DAYS_TO_BACKFILL = 8        # ← CHANGE THIS: 7, 14, 30, 60, 90, 180, 365
-PARALLEL_WORKERS = 8          # ← Process 8 dates simultaneously
+DAYS_TO_BACKFILL = 4        # ← CHANGE THIS: 7, 14, 30, 60, 90, 180, 365
+PARALLEL_WORKERS = 4          # ← Process 8 dates simultaneously
 TIMEOUT_PER_DAY = 600         # Max 10 minutes per date
 # ============================================================================
 
