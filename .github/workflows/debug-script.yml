@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       
@@ -37,17 +37,42 @@ jobs:
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
           EMAIL_DOMAIN: \${{ secrets.EMAIL_DOMAIN }}
         run: |
+          echo "================================"
           echo "Testing date: \${{ github.event.inputs.date }}"
+          echo "================================"
           python scripts/track_meeting_load.py --date \${{ github.event.inputs.date }} --debug 2>&1 | tee debug_output.log
-          echo "Exit code: \$?"
+          EXIT_CODE=\$?
+          echo ""
+          echo "================================"
+          echo "Exit code: \$EXIT_CODE"
+          echo "================================"
+          
+      - name: Show last 100 lines of output
+        if: always()
+        run: |
+          echo "Last 100 lines of debug output:"
+          tail -100 debug_output.log || echo "No log file"
           
       - name: Upload debug log
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: debug-log
+          name: debug-log-\${{ github.event.inputs.date }}
           path: debug_output.log
+          retention-days: 7
           
       - name: Check if file was created
+        if: always()
         run: |
-          ls -lh tech_performance_*.json || echo "No files created"
+          echo ""
+          echo "================================"
+          echo "Checking for generated files:"
+          echo "================================"
+          ls -lh tech_performance_*.json 2>/dev/null || echo "❌ No files created"
+          echo ""
+          if [ -f "tech_performance_\${{ github.event.inputs.date }}.json" ]; then
+            echo "✅ File exists! First 20 lines:"
+            head -20 "tech_performance_\${{ github.event.inputs.date }}.json"
+          else
+            echo "❌ File NOT created for \${{ github.event.inputs.date }}"
+          fi
