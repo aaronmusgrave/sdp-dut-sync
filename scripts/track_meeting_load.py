@@ -184,7 +184,7 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     v14.5.3: BUG FIX - Corrected pagination logic
     - Starts with 1000 rows (covers ~10-15 days back)
     - If target date not found, fetches next 1000 rows
-    - FIX: Checks ALL tickets in page before deciding to stop
+    - FIX: Checks OLDEST ticket in page (not each ticket) before stopping
     - Continues until clearly past target date (max 5000 rows)
     """
     if date is None:
