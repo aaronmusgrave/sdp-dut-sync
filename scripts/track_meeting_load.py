@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.5.2: SMART PAGINATION - Handles ANY historical date
-- resolved_time = when technician actually resolved the ticket
-- Starts with 1000 rows (covers recent ~10-15 days)
-- Automatically paginates for older dates
-- Stops when target date found or exhausted
-- Fast for recent dates, reliable for old dates
+v14.5.3: BUG FIX - Pagination logic corrected
+- Fixed: Don't break in middle of page when checking dates
+- Collects ALL tickets from target date before stopping
+- Same smart pagination, but now actually works!
 """
 
 import os
@@ -183,11 +181,11 @@ def get_tech_meetings(email, graph_token, date=None):
 
 def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     """
-    v14.5.2: SMART PAGINATION - Handles any historical date
+    v14.5.3: BUG FIX - Corrected pagination logic
     - Starts with 1000 rows (covers ~10-15 days back)
     - If target date not found, fetches next 1000 rows
-    - Continues until target date found or exhausted (max 5000 rows)
-    - Fast for recent dates (1 page), reliable for old dates (multiple pages)
+    - FIX: Checks ALL tickets in page before deciding to stop
+    - Continues until clearly past target date (max 5000 rows)
     """
     if date is None:
         date = datetime.now()
@@ -204,8 +202,8 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     all_tickets = []
     start_index = 1
     page_num = 1
-    target_date_found = False
-    max_rows = 5000  # Safety limit: don't fetch more than 5000 rows
+    passed_target_date = False
+    max_rows = 5000  # Safety limit
     
     while start_index <= max_rows:
         # Fetch 1000 tickets sorted by resolved_time (newest first)
@@ -244,21 +242,17 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
             
             # CHECK: Is resolved_time in the list response?
             if tickets and 'resolved_time' in tickets[0]:
-                # FAST PATH: Check if we found tickets from target date in this page
-                for ticket in tickets:
-                    resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-                    if resolved_time:
-                        if resolved_time.date() == target_date:
-                            target_date_found = True
-                        elif resolved_time.date() < target_date:
-                            # We've gone past the target date - stop paginating
-                            logger.debug(f"  Passed target date, stopping pagination")
-                            target_date_found = True  # Consider found even if 0 tickets (date exists in range)
-                            break
+                # Check the OLDEST ticket in this page
+                # (Since sorted DESC, last ticket is oldest)
+                oldest_ticket_in_page = tickets[-1]
+                oldest_time = safe_timestamp_to_date(oldest_ticket_in_page.get('resolved_time'))
                 
-                # If we found the target date (or passed it), no need to fetch more
-                if target_date_found:
-                    break
+                if oldest_time and oldest_time.date() < target_date:
+                    # The oldest ticket in this page is older than target
+                    # This means we've passed the target date
+                    passed_target_date = True
+                    logger.debug(f"  Oldest ticket in page is {oldest_time.date()}, passed target {target_date}")
+                    break  # Stop pagination - we have all tickets from target date
             
             # Check if more pages exist
             has_more = result.get('list_info', {}).get('has_more_rows', False)
@@ -471,9 +465,9 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.5.2 - SMART PAGINATION!", flush=True)
-    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Auto-pagination", flush=True)
-    print("   Fast for recent dates | Reliable for ALL historical dates", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.3 - BUG FIX!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Smart pagination FIXED", flush=True)
+    print("   Fast for recent dates | Accurate for ALL historical dates", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
