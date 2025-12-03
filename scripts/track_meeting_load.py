@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.7.1: SCALABLE & BULLETPROOF
-- Date range filter on resolved_time (proven to work!)
-- Pagination support for 100+ tickets per day
-- Safety buffer (row_count=500)
-- Scales to any ticket volume
-- Clean, maintainable code
-- ~3 min per date for normal cases
+v14.5.1: HISTORICAL DATA - Uses resolved_time + 1000 row fetch
+- resolved_time = when technician actually resolved the ticket (CORRECT!)
+- completed_time = when status changed to completed (often days later)
+- Fetches 1000 tickets to ensure historical accuracy (covers ~100 days)
+- NO date filtering (works for any historical date)
+- ~5-6 min per date (reliable for backfill)
 """
 
 import os
@@ -36,6 +35,7 @@ DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
 
 WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
+PARALLEL_TICKETS = 10
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'motorad.com')
@@ -44,7 +44,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def get_graph_token():
-    """Get Microsoft Graph API token"""
     logger.info("Getting Microsoft Graph token...")
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET, 'scope': 'https://graph.microsoft.com/.default', 'grant_type': 'client_credentials'}
@@ -55,7 +54,6 @@ def get_graph_token():
     raise Exception(f"Failed to get Graph token")
 
 def get_sdp_token():
-    """Get ServiceDesk Plus API token"""
     logger.info("Getting ServiceDesk token...")
     payload = {'client_id': SDP_CLIENT_ID, 'client_secret': SDP_CLIENT_SECRET, 'refresh_token': SDP_REFRESH_TOKEN, 'grant_type': 'refresh_token'}
     response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
@@ -65,7 +63,6 @@ def get_sdp_token():
     raise Exception(f"Failed to get SDP token")
 
 def safe_timestamp_to_date(value):
-    """Convert ServiceDesk timestamp to datetime"""
     if not value:
         return None
     try:
@@ -77,20 +74,28 @@ def safe_timestamp_to_date(value):
     except:
         return None
 
+def get_ticket_details(ticket_id, sdp_token):
+    headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json().get('request', {})
+    except:
+        pass
+    return None
+
 def discover_active_technicians(sdp_token):
-    """Find all active technicians from open tickets"""
     logger.info("Auto-discovering technicians...")
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     list_info = {"list_info": {"row_count": 100, "start_index": 1, "search_criteria": [{"field": "status.name", "condition": "is not", "values": ["Closed", "Cancelled"]}]}}
     technicians = {}
     start_index = 1
     pages_checked = 0
-    
     while pages_checked < 20:
         list_info['list_info']['start_index'] = start_index
         params = {'input_data': json.dumps(list_info)}
         url = f"{SDP_API_BASE}/requests"
-        
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             if response.status_code == 200:
@@ -98,7 +103,6 @@ def discover_active_technicians(sdp_token):
                 tickets = result.get('requests', [])
                 if not tickets:
                     break
-                
                 for ticket in tickets:
                     tech = ticket.get('technician')
                     if tech and isinstance(tech, dict):
@@ -107,7 +111,6 @@ def discover_active_technicians(sdp_token):
                         if tech_name and tech_name != 'Unassigned':
                             if tech_name not in technicians:
                                 technicians[tech_name] = {'email': tech_email}
-                
                 if not result.get('list_info', {}).get('has_more_rows', False):
                     break
                 start_index += 100
@@ -117,15 +120,12 @@ def discover_active_technicians(sdp_token):
         except Exception as e:
             logger.warning(f"Error during discovery: {e}")
             break
-    
     logger.info(f"OK Discovered {len(technicians)} active technicians")
     return technicians
 
 def resolve_technician_email(tech_name, tech_info, graph_token):
-    """Resolve technician email from name"""
     if tech_info.get('email'):
         return tech_info['email']
-    
     try:
         headers = {'Authorization': f'Bearer {graph_token}', 'ConsistencyLevel': 'eventual'}
         url = "https://graph.microsoft.com/v1.0/users"
@@ -137,37 +137,30 @@ def resolve_technician_email(tech_name, tech_info, graph_token):
                 return users[0].get('mail') or users[0].get('userPrincipalName')
     except Exception as e:
         logger.debug(f"Error resolving email for {tech_name}: {e}")
-    
-    # Fallback: construct from name
     name_parts = tech_name.lower().split()
     if len(name_parts) >= 2:
         return f"{name_parts[0]}.{name_parts[-1]}@{EMAIL_DOMAIN}"
     return None
 
 def get_tech_meetings(email, graph_token, date=None):
-    """Get meeting count and hours for technician on specific date"""
     if not email:
         return {'meeting_count': 0, 'total_hours': 0}
     if date is None:
         date = datetime.now()
-    
     start_time = date.replace(hour=8, minute=0, second=0, microsecond=0)
     end_time = date.replace(hour=17, minute=0, second=0, microsecond=0)
     url = f"https://graph.microsoft.com/v1.0/users/{email}/calendar/calendarView"
     headers = {'Authorization': f'Bearer {graph_token}', 'Prefer': 'outlook.timezone="Central Standard Time"'}
-    params = {'startDateTime': start_time.isoformat(), 'endDateTime': end_time.isoformat(), '$select': 'isAllDay,isCancelled,responseStatus,start,end'}
-    
+    params = {'startDateTime': start_time.isoformat(), 'endDateTime': end_time.isoformat(), '\$select': 'isAllDay,isCancelled,responseStatus,start,end'}
     try:
         response = requests.get(url, headers=headers, params=params, timeout=30)
         if response.status_code == 200:
             events = response.json().get('value', [])
             total_minutes = 0
             count = 0
-            
             for event in events:
                 if event.get('isCancelled') or event.get('responseStatus', {}).get('response') == 'declined':
                     continue
-                
                 if event.get('isAllDay'):
                     duration_minutes = WORK_HOURS_PER_DAY * 60
                 else:
@@ -179,26 +172,22 @@ def get_tech_meetings(email, graph_token, date=None):
                         duration_minutes = (meeting_end - meeting_start).total_seconds() / 60
                     else:
                         continue
-                
                 duration_minutes = min(duration_minutes, WORK_HOURS_PER_DAY * 60)
                 total_minutes += duration_minutes
                 count += 1
-            
             total_minutes = min(total_minutes, WORK_HOURS_PER_DAY * 60)
             return {'meeting_count': count, 'total_hours': round(total_minutes / 60, 2)}
     except Exception as e:
         logger.debug(f"Error fetching meetings for {email}: {e}")
-    
     return {'meeting_count': 0, 'total_hours': 0}
 
-def count_closed_tickets(tech_name, sdp_token, date=None):
+def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     """
-    Count tickets closed by technician on specific date
-    v14.7.1: SCALABLE with pagination support
-    - Uses date range filter on resolved_time
-    - row_count=500 (safety buffer, date filter limits results)
-    - Pagination for 500+ tickets per day (rare but handled)
-    - Scales to any ticket volume
+    v14.5.1: Uses resolved_time + fetches 1000 tickets for deep history
+    - resolved_time = when technician actually closed the ticket
+    - Fetches 1000 tickets to cover ~100 days of history
+    - NO date filter (works for ALL historical dates)
+    - Uses fast client-side filtering when resolved_time is in list response
     """
     if date is None:
         date = datetime.now()
@@ -206,103 +195,106 @@ def count_closed_tickets(tech_name, sdp_token, date=None):
         date = datetime.now() - timedelta(days=1)
     
     target_date = date.date()
-    target_date_str = target_date.strftime('%Y-%m-%d')
     
     logger.debug(f"Counting closed for {tech_name} on {target_date}")
     
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     
-    all_tickets = []
-    start_index = 1
-    page_num = 1
-    
-    # Pagination loop (handles 500+ tickets per day)
-    while True:
-        # Date range filter on resolved_time
-        list_info = {
-            "list_info": {
-                "row_count": 500,  # Safety buffer (date filter limits results)
-                "start_index": start_index,
-                "search_criteria": [
-                    {"field": "technician.name", "condition": "is", "value": tech_name},
-                    {"field": "status.name", "condition": "is", "values": ["Closed"]},
-                    {
-                        "field": "resolved_time",
-                        "condition": "between",
-                        "values": [f"{target_date_str} 00:00:00", f"{target_date_str} 23:59:59"]
-                    }
-                ],
-                "sort_field": "resolved_time",
-                "sort_order": "desc"
-            }
+    # Fetch 1000 tickets sorted by resolved_time (covers ~100 days)
+    list_info = {
+        "list_info": {
+            "row_count": 1000,
+            "start_index": 1,
+            "search_criteria": [
+                {"field": "technician.name", "condition": "is", "value": tech_name},
+                {"field": "status.name", "condition": "is", "values": ["Closed"]}
+            ],
+            "sort_field": "resolved_time",
+            "sort_order": "desc"
         }
+    }
+    
+    try:
+        params = {'input_data': json.dumps(list_info)}
+        url = f"{SDP_API_BASE}/requests"
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         
-        try:
-            params = {'input_data': json.dumps(list_info)}
-            url = f"{SDP_API_BASE}/requests"
-            response = requests.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code != 200:
+            logger.warning(f"Ticket search failed for {tech_name}: {response.status_code}")
+            return 0
+        
+        result = response.json()
+        tickets = result.get('requests', [])
+        
+        logger.debug(f"  Fetched {len(tickets)} tickets for {tech_name}")
+        
+        # CHECK: Is resolved_time in the list response?
+        if tickets and 'resolved_time' in tickets[0]:
+            logger.debug(f"  OK resolved_time IS in list - using fast filter!")
             
-            if response.status_code != 200:
-                logger.warning(f"Ticket search failed for {tech_name}: {response.status_code}")
-                break
+            # FAST PATH: Filter client-side
+            count = 0
+            for ticket in tickets:
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                if resolved_time and resolved_time.date() == target_date:
+                    count += 1
+                    logger.debug(f"    OK Ticket {ticket.get('id')} on {target_date}")
             
-            result = response.json()
-            tickets = result.get('requests', [])
+            logger.debug(f"  OK {tech_name}: {count} tickets (fast path)")
+            return count
+        
+        else:
+            # SLOW PATH: Fetch full details
+            logger.debug(f"  -- resolved_time NOT in list - using slow path")
             
-            if not tickets:
-                break
+            ticket_ids = [t['id'] for t in tickets]
+            count = 0
             
-            all_tickets.extend(tickets)
+            def fetch_and_verify_ticket(ticket_id):
+                ticket = get_ticket_details(ticket_id, sdp_token)
+                if not ticket:
+                    return False
+                
+                tech = ticket.get('technician')
+                if not tech or not isinstance(tech, dict) or tech.get('name', '') != tech_name:
+                    return False
+                
+                status = ticket.get('status')
+                if not status or not isinstance(status, dict) or status.get('name', '') != 'Closed':
+                    return False
+                
+                # Check resolved_time
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                
+                if not resolved_time:
+                    logger.debug(f"    -- Ticket {ticket_id} has no resolved_time")
+                    return False
+                
+                if resolved_time.date() == target_date:
+                    logger.debug(f"    OK Ticket {ticket_id} resolved on {target_date}")
+                    return True
+                
+                return False
             
-            # Check if more pages exist
-            has_more = result.get('list_info', {}).get('has_more_rows', False)
+            with ThreadPoolExecutor(max_workers=PARALLEL_TICKETS) as executor:
+                futures = [executor.submit(fetch_and_verify_ticket, tid) for tid in ticket_ids]
+                for future in as_completed(futures):
+                    if future.result():
+                        count += 1
             
-            if page_num == 1:
-                logger.debug(f"  API returned {len(tickets)} tickets for {tech_name}")
-            else:
-                logger.debug(f"  Page {page_num}: {len(tickets)} tickets (has_more: {has_more})")
-            
-            # Break if no more pages or didn't hit row limit
-            if not has_more or len(tickets) < 500:
-                break
-            
-            # Continue to next page
-            start_index += 500
-            page_num += 1
-            
-        except Exception as e:
-            logger.warning(f"Error counting tickets for {tech_name}: {e}")
-            break
-    
-    # Client-side verification (double-check date filter worked)
-    count = 0
-    if all_tickets and 'resolved_time' in all_tickets[0]:
-        # resolved_time is in response, verify dates match
-        for ticket in all_tickets:
-            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-            if resolved_time and resolved_time.date() == target_date:
-                count += 1
-                logger.debug(f"    OK Ticket {ticket.get('id')} on {target_date}")
-    else:
-        # resolved_time not in response, trust date filter worked
-        count = len(all_tickets)
-    
-    if page_num > 1:
-        logger.info(f"  {tech_name}: {count} tickets (paginated {page_num} pages)")
-    else:
-        logger.debug(f"  OK {tech_name}: {count} tickets")
-    
-    return count
+            logger.debug(f"  OK {tech_name}: {count} tickets (slow path)")
+            return count
+        
+    except Exception as e:
+        logger.warning(f"Error counting tickets for {tech_name}: {e}")
+        return 0
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
-    """Get all ticket metrics for technician"""
     if date is None:
         date = datetime.now()
-    
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     metrics = {'active_tickets': 0, 'closed_today': 0, 'updated_today': 0}
     
-    # Get active ticket count
     active_list_info = {
         "list_info": {
             "row_count": 250,
@@ -313,7 +305,6 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
             ]
         }
     }
-    
     try:
         params = {'input_data': json.dumps(active_list_info)}
         url = f"{SDP_API_BASE}/requests"
@@ -324,18 +315,16 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     except Exception as e:
         logger.debug(f"Error getting active tickets for {tech_name}: {e}")
     
-    metrics['closed_today'] = count_closed_tickets(tech_name, sdp_token, date)
+    metrics['closed_today'] = count_closed_tickets_optimized(tech_name, sdp_token, date)
     metrics['updated_today'] = 0
     return metrics
 
 def calculate_adjusted_performance(meeting_data, ticket_metrics):
-    """Calculate performance score based on meetings and tickets"""
     meeting_hours = meeting_data['total_hours']
     available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
     tickets_closed = ticket_metrics['closed_today']
     velocity_closed = tickets_closed / available_hours if available_hours > 0 else 0
     score = min(40, velocity_closed * 10)
-    
     active = ticket_metrics['active_tickets']
     if 5 <= active <= 15:
         score += 15
@@ -343,9 +332,7 @@ def calculate_adjusted_performance(meeting_data, ticket_metrics):
         score += active * 3
     else:
         score += max(0, 15 - (active - 15) * 0.5)
-    
     score = max(0, min(100, score))
-    
     return {
         'available_hours': round(available_hours, 2),
         'velocity_closed': round(velocity_closed, 2),
@@ -354,7 +341,6 @@ def calculate_adjusted_performance(meeting_data, ticket_metrics):
     }
 
 def process_single_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
-    """Process a single technician - for parallel execution"""
     logger.info(f"  Processing {tech_name}...")
     meetings = get_tech_meetings(tech_info.get('email'), graph_token, target_date)
     tickets = get_tech_ticket_metrics(tech_name, sdp_token, target_date)
@@ -363,7 +349,6 @@ def process_single_technician(tech_name, tech_info, graph_token, sdp_token, targ
     return {'name': tech_name, 'meetings': meetings, 'tickets': tickets, 'performance': performance}
 
 def save_metrics_to_file(tech_data, date):
-    """Save metrics to JSON file"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     output = {}
     for tech, data in tech_data.items():
@@ -379,18 +364,15 @@ def save_metrics_to_file(tech_data, date):
     return filename
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust data source"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         logger.warning("Dust API credentials not found, skipping upload")
         return
-    
     logger.info("Uploading to Dust...")
     DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
     headers = {'Authorization': f'Bearer {DUST_API_KEY}', 'Content-Type': 'application/json'}
     date_str = date.strftime('%Y-%m-%d')
     uploaded = 0
     failed = 0
-    
     for tech_name, data in tech_data.items():
         m = data['meetings']
         t = data['tickets']
@@ -438,7 +420,6 @@ def upload_to_dust(tech_data, date):
                 failed += 1
         except Exception as e:
             failed += 1
-    
     logger.info(f"OK Uploaded: {uploaded}/{len(tech_data)} (failed: {failed})")
 
 def main():
@@ -448,9 +429,9 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.7.1 - SCALABLE & FAST!", flush=True)
-    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Date filtering + pagination", flush=True)
-    print("   Scales to any ticket volume | ~3 min per date", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.1 - RELIABLE!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | 1000 row fetch", flush=True)
+    print("   NO date filter | Works for ALL historical dates", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -476,9 +457,8 @@ def main():
             info['email'] = resolve_technician_email(tech_name, info, graph_token)
     
     tech_data = {}
-    logger.info(f"Analyzing {len(technicians_info)} technicians...")
+    logger.info(f"Analyzing {len(technicians_info)} technicians with parallel processing...")
     
-    # Process all technicians in parallel
     with ThreadPoolExecutor(max_workers=PARALLEL_TECHNICIANS) as executor:
         future_to_tech = {
             executor.submit(process_single_technician, tech_name, tech_info, graph_token, sdp_token, target_date): tech_name
@@ -487,13 +467,8 @@ def main():
         
         for future in as_completed(future_to_tech):
             result = future.result()
-            tech_data[result['name']] = {
-                'meetings': result['meetings'],
-                'tickets': result['tickets'],
-                'performance': result['performance']
-            }
+            tech_data[result['name']] = {'meetings': result['meetings'], 'tickets': result['tickets'], 'performance': result['performance']}
     
-    # Display results
     print("\n" + "="*70, flush=True)
     print(f"{target_date.strftime('%B %d, %Y')}", flush=True)
     print("="*70, flush=True)
