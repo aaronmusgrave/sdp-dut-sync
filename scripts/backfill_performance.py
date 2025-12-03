@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses v14.5.1 tracker script (1000 row fetch, no date filter)
+Uses v14.5.2 tracker script (smart pagination)
 Processes dates in REVERSE (newest first - December before November)
 """
 
@@ -16,10 +16,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================================
 # CONFIGURATION - CHANGE THESE VALUES (or set via workflow)
 # ============================================================================
-DAYS_TO_BACKFILL = 90        # SET THIS: Number of days to backfill
-PARALLEL_WORKERS = 5          # Process 4 dates simultaneously
+DAYS_TO_BACKFILL = 25        # SET THIS: Number of days to backfill
+PARALLEL_WORKERS = 5          # Process 5 dates simultaneously
 TIMEOUT_PER_DAY = 600         # Max 10 minutes per date
-DELAY_BETWEEN_RUNS = 1        # Delay between date submissions (seconds)
+DELAY_BETWEEN_RUNS = 2        # Delay between date submissions (seconds)
 # ============================================================================
 
 SCRIPT_PATH = 'scripts/track_meeting_load.py'
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.1 (1000 rows) | NEWEST FIRST!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.2 (smart pagination) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -138,7 +138,7 @@ def main():
     for days_ago in range(1, DAYS_TO_BACKFILL + 1):  # Changed: process recent first
         date = datetime.now() - timedelta(days=days_ago)
         all_dates.append(date.strftime('%Y-%m-%d'))
-    # all_dates is now: [yesterday, 2 days ago, ..., 90 days ago]
+    # all_dates is now: [yesterday, 2 days ago, ..., N days ago]
     
     dates_to_process = [
         d for d in all_dates 
@@ -157,9 +157,9 @@ def main():
     print(f"Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}", flush=True)
     print(flush=True)
     
-    estimated_minutes = (len(dates_to_process) * 5) / PARALLEL_WORKERS
+    estimated_minutes = (len(dates_to_process) * 3) / PARALLEL_WORKERS
     print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
-    print(f"   (Based on v14.5.1 with {PARALLEL_WORKERS} workers - no date filter)", flush=True)
+    print(f"   (Based on v14.5.2 with {PARALLEL_WORKERS} workers - smart pagination)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
     print(flush=True)
