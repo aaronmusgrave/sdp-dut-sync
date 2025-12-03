@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses v14.5.5 tracker script (dynamic page limits!)
+Uses v14.5.6 tracker script (dynamic page limits!)
 Processes dates in REVERSE (newest first - December before November)
 """
 
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.5 (BULLETPROOF!) | NEWEST FIRST!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.6 (TOKEN RETRY!) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
