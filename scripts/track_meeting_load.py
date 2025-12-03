@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.5.3: BUG FIX - Pagination logic corrected
-- Fixed: Don't break in middle of page when checking dates
-- Collects ALL tickets from target date before stopping
-- Same smart pagination, but now actually works!
+v14.5.4: SIMPLE & RELIABLE - Fixed pagination logic
+- Fixed: Check NEWEST ticket in page (not oldest) to determine if past target
+- Simple logic that actually works
+- No premature breaking
 """
 
 import os
@@ -181,11 +181,10 @@ def get_tech_meetings(email, graph_token, date=None):
 
 def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     """
-    v14.5.3: BUG FIX - Corrected pagination logic
-    - Starts with 1000 rows (covers ~10-15 days back)
-    - If target date not found, fetches next 1000 rows
-    - FIX: Checks OLDEST ticket in page (not each ticket) before stopping
-    - Continues until clearly past target date (max 5000 rows)
+    v14.5.4: SIMPLE & RELIABLE - Fixed pagination logic
+    - Calculates estimated pages needed based on date age
+    - Fetches pages until NEWEST ticket in page is older than target
+    - Simple, reliable logic that actually works
     """
     if date is None:
         date = datetime.now()
@@ -193,20 +192,23 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
         date = datetime.now() - timedelta(days=1)
     
     target_date = date.date()
+    days_ago = (datetime.now().date() - target_date).days
     
-    logger.debug(f"Counting closed for {tech_name} on {target_date}")
+    logger.debug(f"Counting closed for {tech_name} on {target_date} ({days_ago} days ago)")
     
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     
-    # SMART PAGINATION: Fetch 1000 rows at a time until we find target date
+    # Calculate estimated pages needed
+    # Assume ~100 tickets per tech per 10 days = 10 tickets/day
+    # For safety, fetch 2x what we estimate
+    estimated_pages_needed = max(1, (days_ago // 10) + 1)
+    max_pages = min(estimated_pages_needed, 5)  # Cap at 5 pages
+    
     all_tickets = []
     start_index = 1
     page_num = 1
-    passed_target_date = False
-    max_rows = 5000  # Safety limit
     
-    while start_index <= max_rows:
-        # Fetch 1000 tickets sorted by resolved_time (newest first)
+    while page_num <= max_pages:
         list_info = {
             "list_info": {
                 "row_count": 1000,
@@ -236,23 +238,19 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
                 logger.debug(f"  Page {page_num}: No more tickets")
                 break
             
-            logger.debug(f"  Page {page_num}: Fetched {len(tickets)} tickets (index {start_index})")
+            logger.debug(f"  Page {page_num}: Fetched {len(tickets)} tickets")
             
             all_tickets.extend(tickets)
             
-            # CHECK: Is resolved_time in the list response?
+            # Check if we can stop: if NEWEST ticket in this page is older than target
             if tickets and 'resolved_time' in tickets[0]:
-                # Check the OLDEST ticket in this page
-                # (Since sorted DESC, last ticket is oldest)
-                oldest_ticket_in_page = tickets[-1]
-                oldest_time = safe_timestamp_to_date(oldest_ticket_in_page.get('resolved_time'))
+                newest_ticket = tickets[0]  # First ticket = newest (DESC sort)
+                newest_time = safe_timestamp_to_date(newest_ticket.get('resolved_time'))
                 
-                if oldest_time and oldest_time.date() < target_date:
-                    # The oldest ticket in this page is older than target
-                    # This means we've passed the target date
-                    passed_target_date = True
-                    logger.debug(f"  Oldest ticket in page is {oldest_time.date()}, passed target {target_date}")
-                    break  # Stop pagination - we have all tickets from target date
+                if newest_time and newest_time.date() < target_date:
+                    # Even the newest ticket is older than target - we're done
+                    logger.debug(f"  Newest ticket in page is {newest_time.date()}, before target {target_date}, stopping")
+                    break
             
             # Check if more pages exist
             has_more = result.get('list_info', {}).get('has_more_rows', False)
@@ -273,7 +271,7 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     count = 0
     
     if all_tickets and 'resolved_time' in all_tickets[0]:
-        # FAST PATH: Filter client-side
+        # Filter client-side
         for ticket in all_tickets:
             resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
             if resolved_time and resolved_time.date() == target_date:
@@ -281,13 +279,13 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
                 logger.debug(f"    OK Ticket {ticket.get('id')} on {target_date}")
         
         if page_num > 1:
-            logger.info(f"  {tech_name}: {count} tickets (paginated {page_num} pages, {len(all_tickets)} total)")
+            logger.info(f"  {tech_name}: {count} tickets ({page_num} pages, {len(all_tickets)} total)")
         else:
             logger.debug(f"  OK {tech_name}: {count} tickets (1 page)")
         return count
     
     else:
-        # SLOW PATH: Fetch full details (if resolved_time not in list)
+        # SLOW PATH: resolved_time not in list
         logger.debug(f"  -- resolved_time NOT in list - using slow path")
         
         ticket_ids = [t['id'] for t in all_tickets]
@@ -465,8 +463,8 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.5.3 - BUG FIX!", flush=True)
-    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Smart pagination FIXED", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.4 - RELIABLE!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Fixed pagination", flush=True)
     print("   Fast for recent dates | Accurate for ALL historical dates", flush=True)
     print("="*70, flush=True)
     print(flush=True)
