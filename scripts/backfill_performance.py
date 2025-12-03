@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # CONFIGURATION - CHANGE THESE VALUES (or set via workflow)
 # ============================================================================
 DAYS_TO_BACKFILL = 90        # SET THIS: Number of days to backfill
-PARALLEL_WORKERS = 4          # Process 4 dates simultaneously
+PARALLEL_WORKERS = 5          # Process 4 dates simultaneously
 TIMEOUT_PER_DAY = 600         # Max 10 minutes per date
 DELAY_BETWEEN_RUNS = 1        # Delay between date submissions (seconds)
 # ============================================================================
