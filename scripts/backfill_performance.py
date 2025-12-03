@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses optimized v14.5 tracker script with parallel workers
+Uses v14.5.1 tracker script (1000 row fetch for deep history)
 Processes multiple dates simultaneously for maximum speed
 """
 
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5 tracker | Accurate data!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.1 (1000 rows) | Accurate!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -133,6 +133,7 @@ def main():
     
     progress = load_progress()
     
+    # BUILD DATE RANGE BASED ON DAYS_TO_BACKFILL
     all_dates = []
     for days_ago in range(DAYS_TO_BACKFILL, 0, -1):
         date = datetime.now() - timedelta(days=days_ago)
@@ -157,7 +158,7 @@ def main():
     
     estimated_minutes = (len(dates_to_process) * 5) / PARALLEL_WORKERS
     print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
-    print(f"   (Based on v14.5 with {PARALLEL_WORKERS} workers)", flush=True)
+    print(f"   (Based on v14.5.1 with {PARALLEL_WORKERS} workers + 1000 row fetch)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
     print(flush=True)
@@ -292,7 +293,8 @@ def main():
     print(f"   Days to backfill: {DAYS_TO_BACKFILL}", flush=True)
     print(f"   Parallel workers: {PARALLEL_WORKERS}", flush=True)
     print(f"   Delay between runs: {DELAY_BETWEEN_RUNS}s", flush=True)
-    print(f"   To change: Edit lines 18-21 or use workflow inputs", flush=True)
+    print(f"   Tracker uses: 1000 row fetch (in track_meeting_load.py)", flush=True)
+    print(f"   To change days: Edit line 18 in this file", flush=True)
     print("="*70, flush=True)
 
 if __name__ == "__main__":
