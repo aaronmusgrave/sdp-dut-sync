@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses v14.5.2 tracker script (smart pagination)
+Uses v14.5.3 tracker script (pagination bug fixed!)
 Processes dates in REVERSE (newest first - December before November)
 """
 
@@ -16,7 +16,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================================
 # CONFIGURATION - CHANGE THESE VALUES (or set via workflow)
 # ============================================================================
-DAYS_TO_BACKFILL = 25        # SET THIS: Number of days to backfill
+DAYS_TO_BACKFILL = 90        # SET THIS: Number of days to backfill
 PARALLEL_WORKERS = 5          # Process 5 dates simultaneously
 TIMEOUT_PER_DAY = 600         # Max 10 minutes per date
 DELAY_BETWEEN_RUNS = 2        # Delay between date submissions (seconds)
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.2 (smart pagination) | NEWEST FIRST!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.3 (pagination fixed!) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -157,9 +157,9 @@ def main():
     print(f"Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}", flush=True)
     print(flush=True)
     
-    estimated_minutes = (len(dates_to_process) * 3) / PARALLEL_WORKERS
+    estimated_minutes = (len(dates_to_process) * 3.5) / PARALLEL_WORKERS
     print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
-    print(f"   (Based on v14.5.2 with {PARALLEL_WORKERS} workers - smart pagination)", flush=True)
+    print(f"   (Based on v14.5.3 with {PARALLEL_WORKERS} workers - pagination fixed)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
     print(flush=True)
