@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses v14.5.3 tracker script (pagination bug fixed!)
+Uses v14.5.4 tracker script (pagination logic FIXED!)
 Processes dates in REVERSE (newest first - December before November)
 """
 
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.3 (pagination fixed!) | NEWEST FIRST!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.4 (RELIABLE!) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -135,10 +135,9 @@ def main():
     
     # BUILD DATE RANGE - NEWEST FIRST (Dec before Nov)
     all_dates = []
-    for days_ago in range(1, DAYS_TO_BACKFILL + 1):  # Changed: process recent first
+    for days_ago in range(1, DAYS_TO_BACKFILL + 1):
         date = datetime.now() - timedelta(days=days_ago)
         all_dates.append(date.strftime('%Y-%m-%d'))
-    # all_dates is now: [yesterday, 2 days ago, ..., N days ago]
     
     dates_to_process = [
         d for d in all_dates 
@@ -159,7 +158,7 @@ def main():
     
     estimated_minutes = (len(dates_to_process) * 3.5) / PARALLEL_WORKERS
     print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
-    print(f"   (Based on v14.5.3 with {PARALLEL_WORKERS} workers - pagination fixed)", flush=True)
+    print(f"   (Based on v14.5.4 with {PARALLEL_WORKERS} workers - reliable pagination)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
     print(flush=True)
