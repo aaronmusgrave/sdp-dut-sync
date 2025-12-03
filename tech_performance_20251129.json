@@ -1,9 +1,9 @@
 {
-  "Austin Rodriguez": {
+  "Dudu Raz": {
     "date": "2025-11-29T00:00:00",
     "meetings": {
-      "count": 0,
-      "hours": 0.0
+      "count": 1,
+      "hours": 0.5
     },
     "tickets": {
       "active_tickets": 100,
@@ -11,49 +11,13 @@
       "updated_today": 0
     },
     "performance": {
-      "available_hours": 8.0,
+      "available_hours": 7.5,
       "velocity_closed": 0.0,
       "adjusted_score": 0,
-      "meeting_percentage": 0.0
+      "meeting_percentage": 6.2
     }
   },
   "Nicholas Goodbinder": {
-    "date": "2025-11-29T00:00:00",
-    "meetings": {
-      "count": 0,
-      "hours": 0.0
-    },
-    "tickets": {
-      "active_tickets": 100,
-      "closed_today": 0,
-      "updated_today": 0
-    },
-    "performance": {
-      "available_hours": 8.0,
-      "velocity_closed": 0.0,
-      "adjusted_score": 0,
-      "meeting_percentage": 0.0
-    }
-  },
-  "Tamar Elisha": {
-    "date": "2025-11-29T00:00:00",
-    "meetings": {
-      "count": 0,
-      "hours": 0.0
-    },
-    "tickets": {
-      "active_tickets": 100,
-      "closed_today": 0,
-      "updated_today": 0
-    },
-    "performance": {
-      "available_hours": 8.0,
-      "velocity_closed": 0.0,
-      "adjusted_score": 0,
-      "meeting_percentage": 0.0
-    }
-  },
-  "Andy Braun": {
     "date": "2025-11-29T00:00:00",
     "meetings": {
       "count": 0,
@@ -89,11 +53,11 @@
       "meeting_percentage": 0.0
     }
   },
-  "Dudu Raz": {
+  "Austin Rodriguez": {
     "date": "2025-11-29T00:00:00",
     "meetings": {
-      "count": 1,
-      "hours": 0.5
+      "count": 0,
+      "hours": 0.0
     },
     "tickets": {
       "active_tickets": 100,
@@ -101,10 +65,10 @@
       "updated_today": 0
     },
     "performance": {
-      "available_hours": 7.5,
+      "available_hours": 8.0,
       "velocity_closed": 0.0,
       "adjusted_score": 0,
-      "meeting_percentage": 6.2
+      "meeting_percentage": 0.0
     }
   },
   "Clint Smith": {
@@ -125,7 +89,43 @@
       "meeting_percentage": 0.0
     }
   },
+  "Tamar Elisha": {
+    "date": "2025-11-29T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
   "Roi Karasenty": {
+    "date": "2025-11-29T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Andy Braun": {
     "date": "2025-11-29T00:00:00",
     "meetings": {
       "count": 0,
@@ -197,7 +197,7 @@
       "meeting_percentage": 0.0
     }
   },
-  "Zachary McGee": {
+  "Gery Gorenshtein": {
     "date": "2025-11-29T00:00:00",
     "meetings": {
       "count": 0,
@@ -215,7 +215,7 @@
       "meeting_percentage": 0.0
     }
   },
-  "Gery Gorenshtein": {
+  "Zachary McGee": {
     "date": "2025-11-29T00:00:00",
     "meetings": {
       "count": 0,
