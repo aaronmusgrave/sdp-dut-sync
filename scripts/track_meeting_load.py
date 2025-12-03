@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.5.1: HISTORICAL DATA - Uses resolved_time + 1000 row fetch
-- resolved_time = when technician actually resolved the ticket (CORRECT!)
-- completed_time = when status changed to completed (often days later)
-- Fetches 1000 tickets to ensure historical accuracy (covers ~100 days)
-- NO date filtering (works for any historical date)
-- ~5-6 min per date (reliable for backfill)
+v14.5.2: SMART PAGINATION - Handles ANY historical date
+- resolved_time = when technician actually resolved the ticket
+- Starts with 1000 rows (covers recent ~10-15 days)
+- Automatically paginates for older dates
+- Stops when target date found or exhausted
+- Fast for recent dates, reliable for old dates
 """
 
 import os
@@ -183,11 +183,11 @@ def get_tech_meetings(email, graph_token, date=None):
 
 def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     """
-    v14.5.1: Uses resolved_time + fetches 1000 tickets for deep history
-    - resolved_time = when technician actually closed the ticket
-    - Fetches 1000 tickets to cover ~100 days of history
-    - NO date filter (works for ALL historical dates)
-    - Uses fast client-side filtering when resolved_time is in list response
+    v14.5.2: SMART PAGINATION - Handles any historical date
+    - Starts with 1000 rows (covers ~10-15 days back)
+    - If target date not found, fetches next 1000 rows
+    - Continues until target date found or exhausted (max 5000 rows)
+    - Fast for recent dates (1 page), reliable for old dates (multiple pages)
     """
     if date is None:
         date = datetime.now()
@@ -200,94 +200,136 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     
-    # Fetch 1000 tickets sorted by resolved_time (covers ~100 days)
-    list_info = {
-        "list_info": {
-            "row_count": 1000,
-            "start_index": 1,
-            "search_criteria": [
-                {"field": "technician.name", "condition": "is", "value": tech_name},
-                {"field": "status.name", "condition": "is", "values": ["Closed"]}
-            ],
-            "sort_field": "resolved_time",
-            "sort_order": "desc"
-        }
-    }
+    # SMART PAGINATION: Fetch 1000 rows at a time until we find target date
+    all_tickets = []
+    start_index = 1
+    page_num = 1
+    target_date_found = False
+    max_rows = 5000  # Safety limit: don't fetch more than 5000 rows
     
-    try:
-        params = {'input_data': json.dumps(list_info)}
-        url = f"{SDP_API_BASE}/requests"
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+    while start_index <= max_rows:
+        # Fetch 1000 tickets sorted by resolved_time (newest first)
+        list_info = {
+            "list_info": {
+                "row_count": 1000,
+                "start_index": start_index,
+                "search_criteria": [
+                    {"field": "technician.name", "condition": "is", "value": tech_name},
+                    {"field": "status.name", "condition": "is", "values": ["Closed"]}
+                ],
+                "sort_field": "resolved_time",
+                "sort_order": "desc"
+            }
+        }
         
-        if response.status_code != 200:
-            logger.warning(f"Ticket search failed for {tech_name}: {response.status_code}")
-            return 0
-        
-        result = response.json()
-        tickets = result.get('requests', [])
-        
-        logger.debug(f"  Fetched {len(tickets)} tickets for {tech_name}")
-        
-        # CHECK: Is resolved_time in the list response?
-        if tickets and 'resolved_time' in tickets[0]:
-            logger.debug(f"  OK resolved_time IS in list - using fast filter!")
+        try:
+            params = {'input_data': json.dumps(list_info)}
+            url = f"{SDP_API_BASE}/requests"
+            response = requests.get(url, headers=headers, params=params, timeout=30)
             
-            # FAST PATH: Filter client-side
-            count = 0
-            for ticket in tickets:
-                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-                if resolved_time and resolved_time.date() == target_date:
-                    count += 1
-                    logger.debug(f"    OK Ticket {ticket.get('id')} on {target_date}")
+            if response.status_code != 200:
+                logger.warning(f"Ticket search failed for {tech_name}: {response.status_code}")
+                break
             
-            logger.debug(f"  OK {tech_name}: {count} tickets (fast path)")
-            return count
+            result = response.json()
+            tickets = result.get('requests', [])
+            
+            if not tickets:
+                logger.debug(f"  Page {page_num}: No more tickets")
+                break
+            
+            logger.debug(f"  Page {page_num}: Fetched {len(tickets)} tickets (index {start_index})")
+            
+            all_tickets.extend(tickets)
+            
+            # CHECK: Is resolved_time in the list response?
+            if tickets and 'resolved_time' in tickets[0]:
+                # FAST PATH: Check if we found tickets from target date in this page
+                for ticket in tickets:
+                    resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                    if resolved_time:
+                        if resolved_time.date() == target_date:
+                            target_date_found = True
+                        elif resolved_time.date() < target_date:
+                            # We've gone past the target date - stop paginating
+                            logger.debug(f"  Passed target date, stopping pagination")
+                            target_date_found = True  # Consider found even if 0 tickets (date exists in range)
+                            break
+                
+                # If we found the target date (or passed it), no need to fetch more
+                if target_date_found:
+                    break
+            
+            # Check if more pages exist
+            has_more = result.get('list_info', {}).get('has_more_rows', False)
+            
+            if not has_more or len(tickets) < 1000:
+                logger.debug(f"  No more pages available")
+                break
+            
+            # Continue to next page
+            start_index += 1000
+            page_num += 1
+            
+        except Exception as e:
+            logger.warning(f"Error fetching tickets for {tech_name}: {e}")
+            break
+    
+    # Now count tickets from target date
+    count = 0
+    
+    if all_tickets and 'resolved_time' in all_tickets[0]:
+        # FAST PATH: Filter client-side
+        for ticket in all_tickets:
+            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+            if resolved_time and resolved_time.date() == target_date:
+                count += 1
+                logger.debug(f"    OK Ticket {ticket.get('id')} on {target_date}")
         
+        if page_num > 1:
+            logger.info(f"  {tech_name}: {count} tickets (paginated {page_num} pages, {len(all_tickets)} total)")
         else:
-            # SLOW PATH: Fetch full details
-            logger.debug(f"  -- resolved_time NOT in list - using slow path")
-            
-            ticket_ids = [t['id'] for t in tickets]
-            count = 0
-            
-            def fetch_and_verify_ticket(ticket_id):
-                ticket = get_ticket_details(ticket_id, sdp_token)
-                if not ticket:
-                    return False
-                
-                tech = ticket.get('technician')
-                if not tech or not isinstance(tech, dict) or tech.get('name', '') != tech_name:
-                    return False
-                
-                status = ticket.get('status')
-                if not status or not isinstance(status, dict) or status.get('name', '') != 'Closed':
-                    return False
-                
-                # Check resolved_time
-                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-                
-                if not resolved_time:
-                    logger.debug(f"    -- Ticket {ticket_id} has no resolved_time")
-                    return False
-                
-                if resolved_time.date() == target_date:
-                    logger.debug(f"    OK Ticket {ticket_id} resolved on {target_date}")
-                    return True
-                
+            logger.debug(f"  OK {tech_name}: {count} tickets (1 page)")
+        return count
+    
+    else:
+        # SLOW PATH: Fetch full details (if resolved_time not in list)
+        logger.debug(f"  -- resolved_time NOT in list - using slow path")
+        
+        ticket_ids = [t['id'] for t in all_tickets]
+        
+        def fetch_and_verify_ticket(ticket_id):
+            ticket = get_ticket_details(ticket_id, sdp_token)
+            if not ticket:
                 return False
             
-            with ThreadPoolExecutor(max_workers=PARALLEL_TICKETS) as executor:
-                futures = [executor.submit(fetch_and_verify_ticket, tid) for tid in ticket_ids]
-                for future in as_completed(futures):
-                    if future.result():
-                        count += 1
+            tech = ticket.get('technician')
+            if not tech or not isinstance(tech, dict) or tech.get('name', '') != tech_name:
+                return False
             
-            logger.debug(f"  OK {tech_name}: {count} tickets (slow path)")
-            return count
+            status = ticket.get('status')
+            if not status or not isinstance(status, dict) or status.get('name', '') != 'Closed':
+                return False
+            
+            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+            
+            if not resolved_time:
+                return False
+            
+            if resolved_time.date() == target_date:
+                logger.debug(f"    OK Ticket {ticket_id} resolved on {target_date}")
+                return True
+            
+            return False
         
-    except Exception as e:
-        logger.warning(f"Error counting tickets for {tech_name}: {e}")
-        return 0
+        with ThreadPoolExecutor(max_workers=PARALLEL_TICKETS) as executor:
+            futures = [executor.submit(fetch_and_verify_ticket, tid) for tid in ticket_ids]
+            for future in as_completed(futures):
+                if future.result():
+                    count += 1
+        
+        logger.debug(f"  OK {tech_name}: {count} tickets (slow path, {page_num} pages)")
+        return count
 
 def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     if date is None:
@@ -429,9 +471,9 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.5.1 - RELIABLE!", flush=True)
-    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | 1000 row fetch", flush=True)
-    print("   NO date filter | Works for ALL historical dates", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.2 - SMART PAGINATION!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Auto-pagination", flush=True)
+    print("   Fast for recent dates | Reliable for ALL historical dates", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -491,3 +533,4 @@ if __name__ == "__main__":
         logger.error(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+        
