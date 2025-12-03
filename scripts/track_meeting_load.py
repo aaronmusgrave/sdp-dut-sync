@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.5.5: DYNAMIC PAGE LIMITS - Handles any date age
-- Fixed: More generous page limits for older dates
-- Dynamic calculation: recent=2 pages, medium=5, old=8, ancient=10
-- Same reliable pagination logic from v14.5.4
+v14.5.6: TOKEN RETRY & ERROR HANDLING
+- Fixed: Retry logic for Graph token with exponential backoff
+- Fixed: Better error messages showing actual failures
+- Handles rate limiting (429 errors)
+- Same reliable pagination from v14.5.5
 """
 
 import os
@@ -12,6 +13,7 @@ import requests
 import json
 import argparse
 import logging
+import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -42,23 +44,89 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def get_graph_token():
+    """Get Microsoft Graph token with retry logic and rate limit handling"""
     logger.info("Getting Microsoft Graph token...")
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-    data = {'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET, 'scope': 'https://graph.microsoft.com/.default', 'grant_type': 'client_credentials'}
-    response = requests.post(url, data=data)
-    if response.status_code == 200:
-        logger.info("OK Graph token obtained")
-        return response.json()['access_token']
-    raise Exception(f"Failed to get Graph token")
+    data = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'scope': 'https://graph.microsoft.com/.default',
+        'grant_type': 'client_credentials'
+    }
+    
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(url, data=data, timeout=30)
+            
+            logger.debug(f"Graph token response status: {response.status_code} (attempt {attempt})")
+            
+            if response.status_code == 200:
+                logger.info(f"OK Graph token obtained (attempt {attempt})")
+                return response.json()['access_token']
+            elif response.status_code == 429:  # Rate limited
+                wait_time = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
+                logger.warning(f"Rate limited (429), waiting {wait_time}s before retry {attempt}/{max_retries}")
+                time.sleep(wait_time)
+                continue
+            else:
+                error_text = response.text[:300] if response.text else "No error message"
+                logger.error(f"Graph token failed: {response.status_code} - {error_text}")
+                if attempt < max_retries:
+                    logger.info(f"Retrying in 2s ({attempt}/{max_retries})...")
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception(f"Failed to get Graph token after {max_retries} attempts: {response.status_code} - {error_text}")
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error getting Graph token (attempt {attempt}): {e}")
+            if attempt < max_retries:
+                logger.info(f"Retrying in 2s ({attempt}/{max_retries})...")
+                time.sleep(2)
+                continue
+            else:
+                raise Exception(f"Failed to get Graph token after {max_retries} attempts: Network error - {str(e)}")
+    
+    raise Exception("Failed to get Graph token: Max retries exceeded")
 
 def get_sdp_token():
+    """Get ServiceDesk token with retry logic"""
     logger.info("Getting ServiceDesk token...")
-    payload = {'client_id': SDP_CLIENT_ID, 'client_secret': SDP_CLIENT_SECRET, 'refresh_token': SDP_REFRESH_TOKEN, 'grant_type': 'refresh_token'}
-    response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
-    if response.status_code == 200:
-        logger.info("OK ServiceDesk token obtained")
-        return response.json()['access_token']
-    raise Exception(f"Failed to get SDP token")
+    payload = {
+        'client_id': SDP_CLIENT_ID,
+        'client_secret': SDP_CLIENT_SECRET,
+        'refresh_token': SDP_REFRESH_TOKEN,
+        'grant_type': 'refresh_token'
+    }
+    
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
+            
+            if response.status_code == 200:
+                logger.info(f"OK ServiceDesk token obtained (attempt {attempt})")
+                return response.json()['access_token']
+            else:
+                error_text = response.text[:300] if response.text else "No error message"
+                logger.error(f"SDP token failed: {response.status_code} - {error_text}")
+                if attempt < max_retries:
+                    logger.info(f"Retrying in 2s ({attempt}/{max_retries})...")
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception(f"Failed to get SDP token after {max_retries} attempts: {response.status_code}")
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error getting SDP token (attempt {attempt}): {e}")
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            else:
+                raise Exception(f"Failed to get SDP token: {str(e)}")
+    
+    raise Exception("Failed to get SDP token: Max retries exceeded")
 
 def safe_timestamp_to_date(value):
     if not value:
@@ -472,14 +540,24 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.5.5 - BULLETPROOF!", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.6 - TOKEN RETRY!", flush=True)
     print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Dynamic page limits", flush=True)
-    print("   Handles ANY date age | 100% reliable", flush=True)
+    print("   Handles ANY date age | Token retry with backoff", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
-    graph_token = get_graph_token()
-    sdp_token = get_sdp_token()
+    # Get tokens with retry logic
+    try:
+        graph_token = get_graph_token()
+    except Exception as e:
+        logger.error(f"Failed to obtain Graph token: {e}")
+        return
+    
+    try:
+        sdp_token = get_sdp_token()
+    except Exception as e:
+        logger.error(f"Failed to obtain SDP token: {e}")
+        return
     
     if args.date:
         target_date = datetime.strptime(args.date, '%Y-%m-%d')
