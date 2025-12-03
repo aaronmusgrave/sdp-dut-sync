@@ -1,4 +1,22 @@
 {
+  "Austin Rodriguez": {
+    "date": "2025-11-12T00:00:00",
+    "meetings": {
+      "count": 3,
+      "hours": 1.5
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 6.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 18.8
+    }
+  },
   "Nicholas Goodbinder": {
     "date": "2025-11-12T00:00:00",
     "meetings": {
@@ -15,6 +33,24 @@
       "velocity_closed": 0.0,
       "adjusted_score": 0,
       "meeting_percentage": 18.8
+    }
+  },
+  "Andy Braun": {
+    "date": "2025-11-12T00:00:00",
+    "meetings": {
+      "count": 2,
+      "hours": 1.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 7.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 12.5
     }
   },
   "Lori Hale": {
@@ -35,11 +71,11 @@
       "meeting_percentage": 12.5
     }
   },
-  "Austin Rodriguez": {
+  "Tamar Elisha": {
     "date": "2025-11-12T00:00:00",
     "meetings": {
-      "count": 3,
-      "hours": 1.5
+      "count": 1,
+      "hours": 0.5
     },
     "tickets": {
       "active_tickets": 100,
@@ -47,10 +83,28 @@
       "updated_today": 0
     },
     "performance": {
-      "available_hours": 6.5,
+      "available_hours": 7.5,
       "velocity_closed": 0.0,
       "adjusted_score": 0,
-      "meeting_percentage": 18.8
+      "meeting_percentage": 6.2
+    }
+  },
+  "Clint Smith": {
+    "date": "2025-11-12T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
     }
   },
   "Roi Karasenty": {
@@ -89,11 +143,11 @@
       "meeting_percentage": 18.8
     }
   },
-  "Clint Smith": {
+  "Jayde Fulkerson": {
     "date": "2025-11-12T00:00:00",
     "meetings": {
-      "count": 0,
-      "hours": 0
+      "count": 3,
+      "hours": 2.0
     },
     "tickets": {
       "active_tickets": 100,
@@ -101,46 +155,10 @@
       "updated_today": 0
     },
     "performance": {
-      "available_hours": 8,
+      "available_hours": 6.0,
       "velocity_closed": 0.0,
       "adjusted_score": 0,
-      "meeting_percentage": 0.0
-    }
-  },
-  "Andy Braun": {
-    "date": "2025-11-12T00:00:00",
-    "meetings": {
-      "count": 2,
-      "hours": 1.0
-    },
-    "tickets": {
-      "active_tickets": 100,
-      "closed_today": 0,
-      "updated_today": 0
-    },
-    "performance": {
-      "available_hours": 7.0,
-      "velocity_closed": 0.0,
-      "adjusted_score": 0,
-      "meeting_percentage": 12.5
-    }
-  },
-  "Tamar Elisha": {
-    "date": "2025-11-12T00:00:00",
-    "meetings": {
-      "count": 1,
-      "hours": 0.5
-    },
-    "tickets": {
-      "active_tickets": 100,
-      "closed_today": 0,
-      "updated_today": 0
-    },
-    "performance": {
-      "available_hours": 7.5,
-      "velocity_closed": 0.0,
-      "adjusted_score": 0,
-      "meeting_percentage": 6.2
+      "meeting_percentage": 25.0
     }
   },
   "Aaron Musgrave": {
@@ -159,24 +177,6 @@
       "velocity_closed": 0.0,
       "adjusted_score": 0,
       "meeting_percentage": 43.8
-    }
-  },
-  "Jayde Fulkerson": {
-    "date": "2025-11-12T00:00:00",
-    "meetings": {
-      "count": 3,
-      "hours": 2.0
-    },
-    "tickets": {
-      "active_tickets": 100,
-      "closed_today": 0,
-      "updated_today": 0
-    },
-    "performance": {
-      "available_hours": 6.0,
-      "velocity_closed": 0.0,
-      "adjusted_score": 0,
-      "meeting_percentage": 25.0
     }
   },
   "Niv Pariente": {
@@ -215,24 +215,6 @@
       "meeting_percentage": 6.2
     }
   },
-  "Carter Mondy": {
-    "date": "2025-11-12T00:00:00",
-    "meetings": {
-      "count": 2,
-      "hours": 1.0
-    },
-    "tickets": {
-      "active_tickets": 100,
-      "closed_today": 0,
-      "updated_today": 0
-    },
-    "performance": {
-      "available_hours": 7.0,
-      "velocity_closed": 0.0,
-      "adjusted_score": 0,
-      "meeting_percentage": 12.5
-    }
-  },
   "Zachary McGee": {
     "date": "2025-11-12T00:00:00",
     "meetings": {
@@ -251,11 +233,11 @@
       "meeting_percentage": 12.5
     }
   },
-  "Jimmy Ellis": {
+  "Carter Mondy": {
     "date": "2025-11-12T00:00:00",
     "meetings": {
-      "count": 0,
-      "hours": 0.0
+      "count": 2,
+      "hours": 1.0
     },
     "tickets": {
       "active_tickets": 100,
@@ -263,10 +245,10 @@
       "updated_today": 0
     },
     "performance": {
-      "available_hours": 8.0,
+      "available_hours": 7.0,
       "velocity_closed": 0.0,
       "adjusted_score": 0,
-      "meeting_percentage": 0.0
+      "meeting_percentage": 12.5
     }
   },
   "Jesus Puente": {
@@ -285,6 +267,24 @@
       "velocity_closed": 0.0,
       "adjusted_score": 0,
       "meeting_percentage": 6.2
+    }
+  },
+  "Jimmy Ellis": {
+    "date": "2025-11-12T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
     }
   }
 }
