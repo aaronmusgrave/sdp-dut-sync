@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses v14.5.1 tracker script (1000 row fetch for deep history)
-Processes multiple dates simultaneously for maximum speed
+Uses v14.5.1 tracker script (1000 row fetch, no date filter)
+Processes dates in REVERSE (newest first - December before November)
 """
 
 import subprocess
@@ -16,7 +16,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 # ============================================================================
 # CONFIGURATION - CHANGE THESE VALUES (or set via workflow)
 # ============================================================================
-DAYS_TO_BACKFILL = 60        # SET THIS: Number of days to backfill
+DAYS_TO_BACKFILL = 90        # SET THIS: Number of days to backfill
 PARALLEL_WORKERS = 4          # Process 4 dates simultaneously
 TIMEOUT_PER_DAY = 600         # Max 10 minutes per date
 DELAY_BETWEEN_RUNS = 1        # Delay between date submissions (seconds)
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.1 (1000 rows) | Accurate!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.1 (1000 rows) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -133,11 +133,12 @@ def main():
     
     progress = load_progress()
     
-    # BUILD DATE RANGE BASED ON DAYS_TO_BACKFILL
+    # BUILD DATE RANGE - NEWEST FIRST (Dec before Nov)
     all_dates = []
-    for days_ago in range(DAYS_TO_BACKFILL, 0, -1):
+    for days_ago in range(1, DAYS_TO_BACKFILL + 1):  # Changed: process recent first
         date = datetime.now() - timedelta(days=days_ago)
         all_dates.append(date.strftime('%Y-%m-%d'))
+    # all_dates is now: [yesterday, 2 days ago, ..., 90 days ago]
     
     dates_to_process = [
         d for d in all_dates 
@@ -152,13 +153,13 @@ def main():
             print(f"   Failed: {len(progress['failed_dates'])} days", flush=True)
         return
     
-    print(f"Date Range: {all_dates[0]} to {all_dates[-1]}", flush=True)
+    print(f"Date Range: {all_dates[0]} (newest) to {all_dates[-1]} (oldest)", flush=True)
     print(f"Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}", flush=True)
     print(flush=True)
     
     estimated_minutes = (len(dates_to_process) * 5) / PARALLEL_WORKERS
     print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
-    print(f"   (Based on v14.5.1 with {PARALLEL_WORKERS} workers + 1000 row fetch)", flush=True)
+    print(f"   (Based on v14.5.1 with {PARALLEL_WORKERS} workers - no date filter)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
     print(flush=True)
@@ -185,6 +186,7 @@ def main():
     
     print(f"{'='*70}", flush=True)
     print(f"PROCESSING {len(dates_to_process)} DAYS WITH {PARALLEL_WORKERS} WORKERS", flush=True)
+    print(f"ORDER: NEWEST FIRST (Dec -> Nov -> Oct -> Sept)", flush=True)
     print('='*70, flush=True)
     print(flush=True)
     
@@ -293,8 +295,8 @@ def main():
     print(f"   Days to backfill: {DAYS_TO_BACKFILL}", flush=True)
     print(f"   Parallel workers: {PARALLEL_WORKERS}", flush=True)
     print(f"   Delay between runs: {DELAY_BETWEEN_RUNS}s", flush=True)
-    print(f"   Tracker uses: 1000 row fetch (in track_meeting_load.py)", flush=True)
-    print(f"   To change days: Edit line 18 in this file", flush=True)
+    print(f"   Processing order: NEWEST FIRST (recent -> old)", flush=True)
+    print(f"   To change: Edit lines 18-21 or use workflow inputs", flush=True)
     print("="*70, flush=True)
 
 if __name__ == "__main__":
