@@ -1,0 +1,49 @@
+name: Diagnostic - Check Ticket Dates
+
+on:
+  workflow_dispatch:
+    inputs:
+      technician:
+        description: 'Technician name (e.g., Austin Rodriguez)'
+        required: true
+        type: string
+      date:
+        description: 'Date to check (YYYY-MM-DD)'
+        required: true
+        default: '2025-11-26'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Run diagnostic
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+          EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
+        run: |
+          echo "${{ inputs.technician }}" | python scripts/track_meeting_load.py --diagnose --date ${{ inputs.date }}
