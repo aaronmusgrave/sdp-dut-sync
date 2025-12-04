@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Backfill performance data - WITH REAL-TIME PROGRESS
-Uses v14.5.6 tracker script (dynamic page limits!)
+Uses v14.5.8 tracker script (API date filtering!)
 Processes dates in REVERSE (newest first - December before November)
 """
 
@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-   print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.8 (API DATE FILTER!) | NEWEST FIRST!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.8 (API DATE FILTER!) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
@@ -156,9 +156,9 @@ def main():
     print(f"Total: {len(all_dates)} | Completed: {len(progress['completed_dates'])} | Remaining: {len(dates_to_process)}", flush=True)
     print(flush=True)
     
-    estimated_minutes = (len(dates_to_process) * 3.5) / PARALLEL_WORKERS
+    estimated_minutes = (len(dates_to_process) * 2.5) / PARALLEL_WORKERS
     print(f"Estimated: ~{estimated_minutes:.0f} minutes ({estimated_minutes/60:.1f} hours)", flush=True)
-    print(f"   (Based on v14.5.5 with {PARALLEL_WORKERS} workers - dynamic page limits)", flush=True)
+    print(f"   (Based on v14.5.8 with {PARALLEL_WORKERS} workers - API date filtering)", flush=True)
     if DELAY_BETWEEN_RUNS > 0:
         print(f"   Delay between submissions: {DELAY_BETWEEN_RUNS} second(s)", flush=True)
     print(flush=True)
