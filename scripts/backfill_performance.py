@@ -30,6 +30,29 @@ def clean_credential(value):
     value = value.replace('\\', '')
     return value.strip()
 
+def clean_date_string(date_str):
+    """Clean and validate date string"""
+    if not date_str:
+        return date_str
+    
+    # Remove backslashes
+    date_str = date_str.replace('\\', '').strip()
+    
+    # Parse and reformat to ensure proper format
+    try:
+        # Try parsing with single digit month/day
+        parts = date_str.split('-')
+        if len(parts) == 3:
+            year = int(parts[0])
+            month = int(parts[1])
+            day = int(parts[2])
+            dt = datetime(year, month, day)
+            return dt.strftime('%Y-%m-%d')  # Return in proper format with leading zeros
+    except:
+        pass
+    
+    return date_str
+
 # Load credentials
 TENANT_ID = clean_credential(os.environ.get('AZURE_TENANT_ID'))
 CLIENT_ID = clean_credential(os.environ.get('AZURE_CLIENT_ID'))
@@ -570,6 +593,12 @@ def main():
     
     # Build date list
     if args.start_date:
+        # CLEAN DATE STRINGS
+        args.start_date = clean_date_string(args.start_date)
+        args.end_date = clean_date_string(args.end_date)
+        
+        logger.info(f"Date range: {args.start_date} to {args.end_date}")
+        
         start_date = datetime.strptime(args.start_date, '%Y-%m-%d')
         if args.end_date:
             end_date = datetime.strptime(args.end_date, '%Y-%m-%d')
