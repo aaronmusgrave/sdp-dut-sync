@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.5.9: PROPER PAGINATION - The FINAL fix!
-- Fixed: Fetch ALL needed pages without early breaking
-- Fixed: Generous page limits to ensure we get all tickets
-- Validates results (rejects absurd counts)
-- Simple, reliable client-side filtering
+v14.5.10: CREDENTIAL CLEANING - Handles malformed secrets
+- Fixed: Strips backslashes, quotes, whitespace from credentials
+- Fixed: Exits with error code on failure (not silent return)
+- Same reliable pagination from v14.5.9
 """
 
 import os
+import sys
 import requests
 import json
 import argparse
@@ -21,24 +21,37 @@ parser = argparse.ArgumentParser(description='Track technician meeting load and 
 parser.add_argument('--date', type=str, metavar='YYYY-MM-DD', help='Process specific date')
 parser.add_argument('--debug', action='store_true', help='Show debug output')
 
-TENANT_ID = os.environ.get('AZURE_TENANT_ID')
-CLIENT_ID = os.environ.get('AZURE_CLIENT_ID')
-CLIENT_SECRET = os.environ.get('AZURE_CLIENT_SECRET')
+# CREDENTIAL CLEANING FUNCTION
+def clean_credential(value):
+    """Remove common problematic characters from credentials"""
+    if not value:
+        return value
+    # Remove quotes, backslashes, and strip whitespace
+    value = value.strip()
+    value = value.strip('"').strip("'")  # Remove surrounding quotes
+    value = value.replace('\\', '')  # Remove backslashes
+    value = value.strip()  # Strip again after cleaning
+    return value
 
-SDP_DOMAIN = os.environ.get('SDP_DOMAIN')
-SDP_CLIENT_ID = os.environ.get('SDP_CLIENT_ID')
-SDP_CLIENT_SECRET = os.environ.get('SDP_CLIENT_SECRET')
-SDP_REFRESH_TOKEN = os.environ.get('SDP_REFRESH_TOKEN')
+# Load and CLEAN all credentials
+TENANT_ID = clean_credential(os.environ.get('AZURE_TENANT_ID'))
+CLIENT_ID = clean_credential(os.environ.get('AZURE_CLIENT_ID'))
+CLIENT_SECRET = clean_credential(os.environ.get('AZURE_CLIENT_SECRET'))
 
-DUST_API_KEY = os.environ.get('DUST_API_KEY')
-DUST_WORKSPACE_ID = os.environ.get('DUST_WORKSPACE_ID')
+SDP_DOMAIN = clean_credential(os.environ.get('SDP_DOMAIN'))
+SDP_CLIENT_ID = clean_credential(os.environ.get('SDP_CLIENT_ID'))
+SDP_CLIENT_SECRET = clean_credential(os.environ.get('SDP_CLIENT_SECRET'))
+SDP_REFRESH_TOKEN = clean_credential(os.environ.get('SDP_REFRESH_TOKEN'))
+
+DUST_API_KEY = clean_credential(os.environ.get('DUST_API_KEY'))
+DUST_WORKSPACE_ID = clean_credential(os.environ.get('DUST_WORKSPACE_ID'))
 
 WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
 PARALLEL_TICKETS = 10
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
-EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'motorad.com')
+EMAIL_DOMAIN = clean_credential(os.environ.get('EMAIL_DOMAIN', 'motorad.com'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -268,19 +281,16 @@ def count_closed_tickets_reliable(tech_name, sdp_token, date=None):
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     
     # GENEROUS PAGE CALCULATION - Better to fetch too many than miss tickets
-    # Assume tech closes ~5 tickets/day average = need to go back ~200 tickets per day age
-    # 1 page = 1000 tickets, so for X days ago, need (X * 200 / 1000) = X/5 pages minimum
-    # Add 2x safety margin
     if days_ago <= 7:
-        max_pages = 2  # Recent: 2 pages = 2000 tickets
+        max_pages = 2
     elif days_ago <= 14:
-        max_pages = 4  # 2 weeks: 4 pages = 4000 tickets
+        max_pages = 4
     elif days_ago <= 30:
-        max_pages = 8  # 1 month: 8 pages = 8000 tickets
+        max_pages = 8
     elif days_ago <= 60:
-        max_pages = 12  # 2 months: 12 pages = 12000 tickets
+        max_pages = 12
     else:
-        max_pages = 15  # Older: 15 pages = 15000 tickets
+        max_pages = 15
     
     logger.debug(f"  Fetching up to {max_pages} pages for {days_ago} day old date")
     
@@ -352,12 +362,11 @@ def count_closed_tickets_reliable(tech_name, sdp_token, date=None):
     if count > 100:
         logger.warning(f"  SUSPICIOUS: {tech_name} shows {count} tickets on {target_date} (too many!)")
         logger.warning(f"    This is likely a data issue. Validating with slow path...")
-        # Could implement additional validation here
     
     if count > 0:
         logger.info(f"  {tech_name}: {count} tickets on {target_date} (from {len(all_tickets)} total, {pages_fetched} pages)")
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"    Ticket IDs: {tickets_on_date[:10]}")  # Show first 10
+            logger.debug(f"    Ticket IDs: {tickets_on_date[:10]}")
     else:
         logger.debug(f"  {tech_name}: 0 tickets on {target_date}")
     
@@ -389,7 +398,6 @@ def get_tech_ticket_metrics(tech_name, sdp_token, date=None):
     except Exception as e:
         logger.debug(f"Error getting active tickets for {tech_name}: {e}")
     
-    # Use reliable pagination method
     metrics['closed_today'] = count_closed_tickets_reliable(tech_name, sdp_token, date)
     metrics['updated_today'] = 0
     return metrics
@@ -504,24 +512,24 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.5.9 - RELIABLE!", flush=True)
-    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Proper pagination", flush=True)
-    print("   Fetches enough pages | No early breaking | Validates results", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.10 - CLEAN CREDS!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Strips \\, quotes", flush=True)
+    print("   Proper pagination | Reliable | Better error handling", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
-    # Get tokens with retry logic
+    # Get tokens with retry logic - EXIT WITH ERROR CODE IF FAILED
     try:
         graph_token = get_graph_token()
     except Exception as e:
         logger.error(f"Failed to obtain Graph token: {e}")
-        return
+        sys.exit(1)  # ✅ Exit with error code instead of silent return
     
     try:
         sdp_token = get_sdp_token()
     except Exception as e:
         logger.error(f"Failed to obtain SDP token: {e}")
-        return
+        sys.exit(1)  # ✅ Exit with error code instead of silent return
     
     if args.date:
         target_date = datetime.strptime(args.date, '%Y-%m-%d')
@@ -534,7 +542,7 @@ def main():
     
     if not technicians_info:
         logger.error("No technicians found")
-        return
+        sys.exit(1)
     
     logger.info("Resolving emails...")
     for tech_name, info in technicians_info.items():
@@ -576,3 +584,4 @@ if __name__ == "__main__":
         logger.error(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
