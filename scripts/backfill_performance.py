@@ -838,8 +838,7 @@ def main():
         dates.reverse()
     
     progress = load_progress()
-    completed_dates = {d for d in progress['completed']}
-    dates]}
+    completed_dates = set(progress['completed'])
     dates_to_process = [d for d in dates if d.strftime('%Y-%m-%d') not in completed_dates]
     
     if not dates_to_process:
