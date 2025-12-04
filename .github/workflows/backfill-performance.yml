@@ -3,151 +3,50 @@ name: Backfill Performance Data
 on:
   workflow_dispatch:
     inputs:
-      days:
-        description: 'Number of days to backfill'
+      start_date:
+        description: 'Start date (YYYY-MM-DD)'
         required: true
-        default: '365'
         type: string
-      delay:
-        description: 'Delay between runs (seconds)'
-        required: false
-        default: '2'
+      end_date:
+        description: 'End date (YYYY-MM-DD)'
+        required: true
         type: string
-      dry_run:
-        description: 'Test mode (process only 7 days)'
-        required: false
-        default: false
-        type: boolean
-
-permissions:
-  contents: write
-  actions: read
 
 jobs:
-  backfill-data:
+  backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 1200  # 20 hours max
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
       
       - name: Install dependencies
-        run: |
-          pip install requests
-      
-      - name: Configure backfill parameters
-        id: config
-        run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            echo "days=7" >> $GITHUB_OUTPUT
-            echo "🧪 Running in TEST MODE (7 days)"
-          else
-            echo "days=${{ inputs.days }}" >> $GITHUB_OUTPUT
-            echo "🚀 Running FULL BACKFILL (${{ inputs.days }} days)"
-          fi
-          echo "delay=${{ inputs.delay }}" >> $GITHUB_OUTPUT
-      
-      - name: Update backfill script configuration
-        run: |
-          # Update the configuration in scripts/backfill_performance.py
-          sed -i "s/DAYS_TO_BACKFILL = .*/DAYS_TO_BACKFILL = ${{ steps.config.outputs.days }}/" scripts/backfill_performance.py
-          sed -i "s/DELAY_BETWEEN_RUNS = .*/DELAY_BETWEEN_RUNS = ${{ steps.config.outputs.delay }}/" scripts/backfill_performance.py
-          
-          echo "📝 Configuration updated:"
-          echo "   Days: ${{ steps.config.outputs.days }}"
-          echo "   Delay: ${{ steps.config.outputs.delay }} seconds"
-          echo ""
-          echo "📂 Using: scripts/backfill_performance.py"
+        run: pip install requests
       
       - name: Run backfill
         env:
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
-          EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
+          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
         run: |
-          python scripts/backfill_performance.py
+          python scripts/backfill_performance.py \
+            --start-date "\${{ inputs.start_date }}" \
+            --end-date "\${{ inputs.end_date }}"
       
-      - name: Upload all performance files
+      - name: Upload performance data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-data-backfill
+          name: backfill-data-\${{ inputs.start_date }}-to-\${{ inputs.end_date }}
           path: tech_performance_*.json
-          if-no-files-found: warn
-      
-      - name: Upload progress file
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backfill-progress
-          path: backfill_progress.json
-          if-no-files-found: ignore
-      
-      - name: Commit performance files
-        if: success()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tech_performance_*.json
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            DAYS="${{ steps.config.outputs.days }}"
-            git commit -m "Backfill: Performance data for $DAYS days"
-            git push
-          fi
-        continue-on-error: true
-      
-      - name: Create summary
-        if: always()
-        run: |
-          echo "## 📊 Backfill Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f backfill_progress.json ]; then
-            COMPLETED=$(cat backfill_progress.json | python3 -c "import sys, json; print(len(json.load(sys.stdin)['completed_dates']))" 2>/dev/null || echo "0")
-            FAILED=$(cat backfill_progress.json | python3 -c "import sys, json; print(len(json.load(sys.stdin)['failed_dates']))" 2>/dev/null || echo "0")
-            
-            echo "- ✅ Completed: **$COMPLETED** days" >> $GITHUB_STEP_SUMMARY
-            echo "- ❌ Failed: **$FAILED** days" >> $GITHUB_STEP_SUMMARY
-            
-            if [ "$FAILED" -gt "0" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "### Failed Dates" >> $GITHUB_STEP_SUMMARY
-              cat backfill_progress.json | python3 -c "import sys, json; print('\n'.join(['- ' + d for d in json.load(sys.stdin)['failed_dates'][:20]]))" 2>/dev/null >> $GITHUB_STEP_SUMMARY || echo "- Could not parse failed dates" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "- ✅ All dates processed successfully!" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📁 Files Created" >> $GITHUB_STEP_SUMMARY
-          FILE_COUNT=$(ls tech_performance_*.json 2>/dev/null | wc -l || echo "0")
-          echo "- JSON files: **$FILE_COUNT**" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "$FILE_COUNT" -gt "0" ]; then
-            TOTAL_SIZE=$(du -sh tech_performance_*.json 2>/dev/null | tail -1 | awk '{print $1}' || echo "Unknown")
-            echo "- Total size: **$TOTAL_SIZE**" >> $GITHUB_STEP_SUMMARY
-          fi
-      
-      - name: Notify completion
-        if: success()
-        run: |
-          echo "✅ Backfill completed successfully!"
-          echo "📁 Performance data files have been uploaded as artifacts"
-          echo "💾 Files have been committed to the repository"
+          retention-days: 30
