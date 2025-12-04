@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Daily Technician Performance Tracker v15.0.1
-Fixed: Ticket counting with fallback to individual ticket fetch
-Simple, reliable, daily execution only
+Daily Technician Performance Tracker v15.0.2
+Fixed: Validates tickets belong to correct technician
+Prevents counting same tickets for multiple technicians
 """
 
 import os
@@ -215,10 +215,19 @@ def get_ticket_details(ticket_id, sdp_token):
         pass
     return None
 
+def verify_ticket_belongs_to_tech(ticket, tech_name):
+    """Verify ticket actually belongs to this technician"""
+    tech = ticket.get('technician')
+    if not tech or not isinstance(tech, dict):
+        return False
+    
+    ticket_tech_name = tech.get('name', '')
+    return ticket_tech_name == tech_name
+
 def count_closed_tickets(tech_name, sdp_token, target_date):
     """
     Count tickets closed by technician on specific date
-    v15.0.1: Uses SLOW PATH (individual fetch) if resolved_time not in list
+    v15.0.2: VALIDATES tickets belong to correct technician
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -227,10 +236,10 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
     
     logger.debug(f"Counting closed tickets for {tech_name} on {target_date}")
     
-    # Fetch closed tickets for technician (recent, sorted by resolved_time desc)
+    # Fetch closed tickets for technician
     list_info = {
         "list_info": {
-            "row_count": 500,  # Reduced from 1000 for faster response
+            "row_count": 500,
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
@@ -256,12 +265,25 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
             logger.debug(f"  {tech_name}: No closed tickets found")
             return 0
         
-        # Check if resolved_time is in the first ticket
-        if tickets and 'resolved_time' in tickets[0]:
+        logger.debug(f"  {tech_name}: Fetched {len(tickets)} tickets from API")
+        
+        # VALIDATE: Check if tickets actually belong to this technician
+        validated_tickets = []
+        for ticket in tickets:
+            if verify_ticket_belongs_to_tech(ticket, tech_name):
+                validated_tickets.append(ticket)
+        
+        logger.debug(f"  {tech_name}: {len(validated_tickets)} tickets validated (out of {len(tickets)})")
+        
+        if len(validated_tickets) != len(tickets):
+            logger.warning(f"  {tech_name}: API filter not working! Filtered {len(tickets)} → {len(validated_tickets)}")
+        
+        # Check if resolved_time is in the response
+        if validated_tickets and 'resolved_time' in validated_tickets[0]:
             # FAST PATH: resolved_time is in list response
-            logger.debug(f"  {tech_name}: Using FAST path (resolved_time in list)")
+            logger.debug(f"  {tech_name}: Using FAST path")
             count = 0
-            for ticket in tickets:
+            for ticket in validated_tickets:
                 resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
                 if resolved_time and resolved_time.date() == target_date:
                     count += 1
@@ -270,20 +292,32 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
         
         else:
             # SLOW PATH: resolved_time NOT in list - fetch individual tickets
-            logger.debug(f"  {tech_name}: Using SLOW path (fetching {len(tickets)} individual tickets)")
+            logger.debug(f"  {tech_name}: Using SLOW path (fetching individual tickets)")
             
             def check_ticket(ticket_id):
                 details = get_ticket_details(ticket_id, sdp_token)
                 if not details:
                     return False
                 
+                # DOUBLE CHECK: Verify ticket belongs to this technician
+                if not verify_ticket_belongs_to_tech(details, tech_name):
+                    return False
+                
+                # Check if it's actually closed
+                status = details.get('status')
+                if not status or not isinstance(status, dict):
+                    return False
+                if status.get('name', '') != 'Closed':
+                    return False
+                
+                # Check date
                 resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
                 if resolved_time and resolved_time.date() == target_date:
                     return True
                 return False
             
             # Fetch tickets in parallel
-            ticket_ids = [t['id'] for t in tickets]
+            ticket_ids = [t['id'] for t in validated_tickets]
             count = 0
             
             with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
@@ -322,7 +356,10 @@ def get_active_tickets(tech_name, sdp_token):
         response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code == 200:
-            return len(response.json().get('requests', []))
+            tickets = response.json().get('requests', [])
+            # Validate tickets belong to this technician
+            validated = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
+            return len(validated)
     except Exception as e:
         logger.debug(f"Error getting active tickets for {tech_name}: {e}")
     
@@ -470,7 +507,7 @@ def upload_to_dust(tech_data, date):
 def main():
     """Main execution"""
     print("="*70)
-    print("DAILY PERFORMANCE TRACKER v15.0.1")
+    print("DAILY PERFORMANCE TRACKER v15.0.2")
     print("="*70)
     print()
     
