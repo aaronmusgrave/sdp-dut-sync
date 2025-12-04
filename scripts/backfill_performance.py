@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.1.3
+Performance Data Backfill Script v15.1.4
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Increased row_count to 2000 to fetch more historical tickets
+Fixed: Added pagination to fetch all historical tickets (API limits to 100 per page)
 """
 
 import os
@@ -336,7 +336,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.1.3: Increased row_count to 2000 for more history
+    v15.1.4: Added pagination to fetch all historical tickets
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -348,153 +348,185 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
         logger.info(f"{'='*60}")
     
-    # Fetch closed tickets - INCREASED to 2000 for more history
-    list_info = {
-        "list_info": {
-            "row_count": 2000,
-            "start_index": 1,
-            "search_criteria": [
-                {"field": "technician.name", "condition": "is", "value": tech_name},
-                {"field": "status.name", "condition": "is", "values": ["Closed"]}
-            ],
-            "sort_field": "resolved_time",
-            "sort_order": "desc"
-        }
-    }
+    # Fetch closed tickets with PAGINATION
+    all_tickets = []
+    start_index = 1
+    page_size = 100
+    max_pages = 50  # Safety limit (5000 tickets max)
     
-    try:
-        params = {'input_data': json.dumps(list_info)}
-        url = f"{SDP_API_BASE}/requests"
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+    if debug:
+        logger.info("Fetching tickets with pagination...")
+    
+    for page_num in range(1, max_pages + 1):
+        list_info = {
+            "list_info": {
+                "row_count": page_size,
+                "start_index": start_index,
+                "search_criteria": [
+                    {"field": "technician.name", "condition": "is", "value": tech_name},
+                    {"field": "status.name", "condition": "is", "values": ["Closed"]}
+                ],
+                "sort_field": "resolved_time",
+                "sort_order": "desc"
+            }
+        }
         
-        if response.status_code != 200:
-            if debug:
-                logger.warning(f"API returned status {response.status_code}: {response.text[:200]}")
-            return 0
-        
-        tickets = response.json().get('requests', [])
-        
-        if not tickets:
-            if debug:
-                logger.info("No closed tickets found")
-            return 0
-        
-        if debug:
-            logger.info(f"Fetched {len(tickets)} closed tickets")
-        
-        # Validate tickets belong to this technician
-        validated_tickets = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
-        
-        if debug:
-            logger.info(f"Validated {len(validated_tickets)} tickets belong to {tech_name}")
-        
-        # Check if resolved_time is in the response
-        if validated_tickets and 'resolved_time' in validated_tickets[0]:
-            # FAST PATH: resolved_time in list response - filter by date in Python
-            count = 0
-            matched_tickets = []
-            oldest_date = None
+        try:
+            params = {'input_data': json.dumps(list_info)}
+            url = f"{SDP_API_BASE}/requests"
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code != 200:
+                if debug:
+                    logger.warning(f"Page {page_num}: API returned status {response.status_code}")
+                break
+            
+            tickets = response.json().get('requests', [])
+            
+            if not tickets:
+                if debug:
+                    logger.info(f"Page {page_num}: No more tickets")
+                break
             
             if debug:
-                logger.info("resolved_time present in list - filtering by date in Python")
+                logger.info(f"Page {page_num}: Fetched {len(tickets)} tickets (start_index: {start_index})")
             
-            for ticket in validated_tickets:
-                ticket_id = ticket.get('id')
-                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
+            # Validate tickets belong to this technician
+            validated = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
+            all_tickets.extend(validated)
+            
+            # Check if we've gone back far enough
+            # Look at oldest ticket in this page
+            oldest_in_page = None
+            for ticket in validated:
+                if 'resolved_time' in ticket:
+                    resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                    if resolved_time:
+                        if oldest_in_page is None or resolved_time < oldest_in_page:
+                            oldest_in_page = resolved_time
+            
+            # If oldest ticket in this page is older than target, we have enough history
+            if oldest_in_page and oldest_in_page.date() <= target_date:
+                if debug:
+                    logger.info(f"Page {page_num}: Reached target date (oldest: {oldest_in_page.date()})")
+                break
+            
+            # If we got less than page_size, we're at the end
+            if len(tickets) < page_size:
+                if debug:
+                    logger.info(f"Page {page_num}: Last page (only {len(tickets)} tickets)")
+                break
+            
+            # Move to next page
+            start_index += page_size
+            
+        except Exception as e:
+            if debug:
+                logger.error(f"Page {page_num}: Error fetching tickets: {e}")
+            break
+    
+    if not all_tickets:
+        if debug:
+            logger.info("No closed tickets found")
+        return 0
+    
+    if debug:
+        logger.info(f"Total fetched: {len(all_tickets)} closed tickets across {page_num} pages")
+    
+    # Check if resolved_time is in the response
+    if all_tickets and 'resolved_time' in all_tickets[0]:
+        # FAST PATH: resolved_time in list response - filter by date in Python
+        count = 0
+        matched_tickets = []
+        oldest_date = None
+        
+        if debug:
+            logger.info("resolved_time present in list - filtering by date in Python")
+        
+        for ticket in all_tickets:
+            ticket_id = ticket.get('id')
+            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
+            
+            # Track oldest ticket date
+            if resolved_time:
+                if oldest_date is None or resolved_time.date() < oldest_date:
+                    oldest_date = resolved_time.date()
+            
+            if resolved_time and resolved_time.date() == target_date:
+                count += 1
+                matched_tickets.append(ticket_id)
+                if debug and len(matched_tickets) <= 5:
+                    logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
+            elif debug and count < 3:
+                if resolved_time:
+                    logger.info(f"  ✗ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - no match")
+        
+        if debug:
+            if matched_tickets:
+                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
+            else:
+                logger.info(f"✗ NO MATCHES for target date {target_date}")
+            if oldest_date:
+                logger.info(f"Oldest ticket date: {oldest_date}")
+                if oldest_date > target_date:
+                    logger.warning(f"⚠️  Target date {target_date} is older than oldest fetched ticket {oldest_date}")
+        
+        return count
+    else:
+        # SLOW PATH: resolved_time NOT in list - fetch each ticket individually
+        if debug:
+            logger.info("resolved_time not in list - using slow path (fetching individual tickets)")
+        
+        def check_ticket(ticket_id):
+            details = get_ticket_details(ticket_id, sdp_token)
+            if not details:
+                return (False, None, None)
+            if not verify_ticket_belongs_to_tech(details, tech_name):
+                return (False, None, None)
+            status = details.get('status')
+            if not status or not isinstance(status, dict):
+                return (False, None, None)
+            if status.get('name', '') != 'Closed':
+                return (False, None, None)
+            
+            resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
+            
+            if resolved_time and resolved_time.date() == target_date:
+                return (True, ticket_id, resolved_time)
+            return (False, ticket_id, resolved_time)
+        
+        ticket_ids = [t['id'] for t in all_tickets]
+        count = 0
+        matched_tickets = []
+        oldest_date = None
+        
+        with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
+            futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
+            for future in as_completed(futures):
+                result, ticket_id, resolved_time = future.result()
                 
-                # Track oldest ticket date
+                # Track oldest date
                 if resolved_time:
                     if oldest_date is None or resolved_time.date() < oldest_date:
                         oldest_date = resolved_time.date()
                 
-                if resolved_time and resolved_time.date() == target_date:
+                if result:
                     count += 1
                     matched_tickets.append(ticket_id)
                     if debug and len(matched_tickets) <= 5:
                         logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
-                elif debug and count < 3:
-                    if resolved_time:
-                        logger.info(f"  ✗ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - no match")
-            
-            # Warn if target date is beyond our history window
-            if debug and oldest_date and oldest_date > target_date:
-                logger.warning(f"⚠️  Target date {target_date} is older than oldest ticket {oldest_date}")
-                logger.warning(f"    May need to increase row_count or use pagination")
-            
-            if debug:
-                if matched_tickets:
-                    logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
-                else:
-                    logger.info(f"✗ NO MATCHES for target date {target_date}")
-                if oldest_date:
-                    logger.info(f"Oldest ticket date: {oldest_date}")
-            
-            return count
-        else:
-            # SLOW PATH: resolved_time NOT in list - fetch each ticket individually
-            if debug:
-                logger.info("resolved_time not in list - using slow path (fetching individual tickets)")
-            
-            def check_ticket(ticket_id):
-                details = get_ticket_details(ticket_id, sdp_token)
-                if not details:
-                    return (False, None, None)
-                if not verify_ticket_belongs_to_tech(details, tech_name):
-                    return (False, None, None)
-                status = details.get('status')
-                if not status or not isinstance(status, dict):
-                    return (False, None, None)
-                if status.get('name', '') != 'Closed':
-                    return (False, None, None)
-                
-                resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
-                
-                if resolved_time and resolved_time.date() == target_date:
-                    return (True, ticket_id, resolved_time)
-                return (False, ticket_id, resolved_time)
-            
-            ticket_ids = [t['id'] for t in validated_tickets]
-            count = 0
-            matched_tickets = []
-            oldest_date = None
-            
-            with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
-                futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
-                for future in as_completed(futures):
-                    result, ticket_id, resolved_time = future.result()
-                    
-                    # Track oldest date
-                    if resolved_time:
-                        if oldest_date is None or resolved_time.date() < oldest_date:
-                            oldest_date = resolved_time.date()
-                    
-                    if result:
-                        count += 1
-                        matched_tickets.append(ticket_id)
-                        if debug and len(matched_tickets) <= 5:
-                            logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
-            
-            # Warn if target date is beyond our history window
-            if debug and oldest_date and oldest_date > target_date:
-                logger.warning(f"⚠️  Target date {target_date} is older than oldest ticket {oldest_date}")
-                logger.warning(f"    May need to increase row_count or use pagination")
-            
-            if debug:
-                if matched_tickets:
-                    logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
-                else:
-                    logger.info(f"✗ NO MATCHES for target date {target_date}")
-                if oldest_date:
-                    logger.info(f"Oldest ticket date: {oldest_date}")
-            
-            return count
         
-    except Exception as e:
         if debug:
-            logger.error(f"Error counting tickets: {e}")
-            import traceback
-            traceback.print_exc()
-        return 0
+            if matched_tickets:
+                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
+            else:
+                logger.info(f"✗ NO MATCHES for target date {target_date}")
+            if oldest_date:
+                logger.info(f"Oldest ticket date: {oldest_date}")
+                if oldest_date > target_date:
+                    logger.warning(f"⚠️  Target date {target_date} is older than oldest fetched ticket {oldest_date}")
+        
+        return count
 
 def get_active_tickets(tech_name, sdp_token):
     """Get count of active tickets"""
@@ -730,7 +762,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.1.3")
+    print("PERFORMANCE DATA BACKFILL v15.1.4")
     print("="*70)
     print()
     
