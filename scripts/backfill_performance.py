@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.1.2
+Performance Data Backfill Script v15.1.3
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Remove API date filter (doesn't work), filter by date in Python
+Fixed: Increased row_count to 2000 to fetch more historical tickets
 """
 
 import os
@@ -336,7 +336,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.1.2: API date filter doesn't work - filter in Python after fetching
+    v15.1.3: Increased row_count to 2000 for more history
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -348,10 +348,10 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
         logger.info(f"{'='*60}")
     
-    # Fetch closed tickets - NO DATE FILTER (API ignores it)
+    # Fetch closed tickets - INCREASED to 2000 for more history
     list_info = {
         "list_info": {
-            "row_count": 500,
+            "row_count": 2000,
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
@@ -380,7 +380,7 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             return 0
         
         if debug:
-            logger.info(f"Fetched {len(tickets)} closed tickets (most recent)")
+            logger.info(f"Fetched {len(tickets)} closed tickets")
         
         # Validate tickets belong to this technician
         validated_tickets = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
@@ -393,6 +393,7 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             # FAST PATH: resolved_time in list response - filter by date in Python
             count = 0
             matched_tickets = []
+            oldest_date = None
             
             if debug:
                 logger.info("resolved_time present in list - filtering by date in Python")
@@ -400,6 +401,11 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             for ticket in validated_tickets:
                 ticket_id = ticket.get('id')
                 resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
+                
+                # Track oldest ticket date
+                if resolved_time:
+                    if oldest_date is None or resolved_time.date() < oldest_date:
+                        oldest_date = resolved_time.date()
                 
                 if resolved_time and resolved_time.date() == target_date:
                     count += 1
@@ -410,11 +416,18 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                     if resolved_time:
                         logger.info(f"  ✗ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - no match")
             
+            # Warn if target date is beyond our history window
+            if debug and oldest_date and oldest_date > target_date:
+                logger.warning(f"⚠️  Target date {target_date} is older than oldest ticket {oldest_date}")
+                logger.warning(f"    May need to increase row_count or use pagination")
+            
             if debug:
                 if matched_tickets:
                     logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
                 else:
                     logger.info(f"✗ NO MATCHES for target date {target_date}")
+                if oldest_date:
+                    logger.info(f"Oldest ticket date: {oldest_date}")
             
             return count
         else:
@@ -443,22 +456,36 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             ticket_ids = [t['id'] for t in validated_tickets]
             count = 0
             matched_tickets = []
+            oldest_date = None
             
             with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
                 futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
                 for future in as_completed(futures):
                     result, ticket_id, resolved_time = future.result()
+                    
+                    # Track oldest date
+                    if resolved_time:
+                        if oldest_date is None or resolved_time.date() < oldest_date:
+                            oldest_date = resolved_time.date()
+                    
                     if result:
                         count += 1
                         matched_tickets.append(ticket_id)
                         if debug and len(matched_tickets) <= 5:
                             logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
             
+            # Warn if target date is beyond our history window
+            if debug and oldest_date and oldest_date > target_date:
+                logger.warning(f"⚠️  Target date {target_date} is older than oldest ticket {oldest_date}")
+                logger.warning(f"    May need to increase row_count or use pagination")
+            
             if debug:
                 if matched_tickets:
                     logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
                 else:
                     logger.info(f"✗ NO MATCHES for target date {target_date}")
+                if oldest_date:
+                    logger.info(f"Oldest ticket date: {oldest_date}")
             
             return count
         
@@ -703,7 +730,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.1.2")
+    print("PERFORMANCE DATA BACKFILL v15.1.3")
     print("="*70)
     print()
     
