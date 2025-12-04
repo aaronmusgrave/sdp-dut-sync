@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.8
+Performance Data Backfill Script v15.0.9
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Added: Debug logging for timezone troubleshooting
+Fixed: Debug logging now works in slow path (individual ticket fetching)
 """
 
 import os
@@ -16,6 +16,7 @@ import argparse
 import re
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 # Configuration
 WORK_HOURS_PER_DAY = 8
@@ -31,6 +32,10 @@ TOKEN_CACHE = {
     'sdp_token': None,
     'sdp_expires': None
 }
+
+# Debug tracking (thread-safe)
+debug_lock = Lock()
+debug_counter = {'count': 0}
 
 # Credential cleaning
 def clean_credential(value):
@@ -268,7 +273,7 @@ def get_meetings(email, graph_token, date):
 def safe_timestamp_to_date(value, debug=False):
     """
     Convert ServiceDesk timestamp to datetime
-    v15.0.8: Enhanced with debug logging to identify correct timezone
+    v15.0.9: Enhanced debug logging for timezone identification
     """
     if not value:
         return None
@@ -331,7 +336,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.0.8: Added debug logging
+    v15.0.9: Enhanced debug logging in slow path
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -382,10 +387,11 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             logger.info(f"Validated {len(validated_tickets)} tickets belong to {tech_name}")
         
         if validated_tickets and 'resolved_time' in validated_tickets[0]:
+            # Fast path
             count = 0
             matched_tickets = []
             
-            for ticket in validated_tickets[:20]:  # Debug first 20
+            for ticket in validated_tickets[:20]:
                 ticket_id = ticket.get('id')
                 resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
                 
@@ -405,33 +411,60 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             
             return count
         else:
+            # Slow path - resolved_time not in list response
             if debug:
-                logger.info("resolved_time not in list response, using slow path...")
+                logger.info("resolved_time not in list response, using slow path (fetching individual tickets)...")
+            
+            # Reset debug counter for slow path
+            global debug_counter
+            debug_counter['count'] = 0
             
             def check_ticket(ticket_id):
                 details = get_ticket_details(ticket_id, sdp_token)
                 if not details:
-                    return False
+                    return (False, None)
                 if not verify_ticket_belongs_to_tech(details, tech_name):
-                    return False
+                    return (False, None)
                 status = details.get('status')
                 if not status or not isinstance(status, dict):
-                    return False
+                    return (False, None)
                 if status.get('name', '') != 'Closed':
-                    return False
-                resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
+                    return (False, None)
+                
+                # Thread-safe debug counter
+                show_debug = False
+                if debug:
+                    with debug_lock:
+                        if debug_counter['count'] < 3:
+                            show_debug = True
+                            debug_counter['count'] += 1
+                
+                resolved_time = safe_timestamp_to_date(details.get('resolved_time'), debug=show_debug)
+                
+                if show_debug and resolved_time:
+                    matches = resolved_time.date() == target_date
+                    logger.info(f"Ticket #{ticket_id}: resolved {resolved_time.strftime('%Y-%m-%d %H:%M')} - Match: {matches}")
+                
                 if resolved_time and resolved_time.date() == target_date:
-                    return True
-                return False
+                    return (True, ticket_id)
+                return (False, None)
             
             ticket_ids = [t['id'] for t in validated_tickets]
             count = 0
+            matched_tickets = []
             
             with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
-                futures = [executor.submit(check_ticket, tid) for tid in ticket_ids]
+                futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
                 for future in as_completed(futures):
-                    if future.result():
+                    result, ticket_id = future.result()
+                    if result:
                         count += 1
+                        matched_tickets.append(ticket_id)
+            
+            if debug and matched_tickets:
+                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets}")
+            elif debug:
+                logger.info(f"✗ NO MATCHES for target date {target_date}")
             
             return count
         
@@ -628,18 +661,18 @@ def process_single_date(target_date, technicians, debug=False):
     
     tech_data = {}
     
-    # Process technicians
-    for tech_name, tech_email in technicians.items():
+    # Process technicians - debug only first 2
+    tech_list = list(technicians.items())
+    for idx, (tech_name, tech_email) in enumerate(tech_list):
         try:
-            result = process_technician(tech_name, tech_email, graph_token, sdp_token, target_date, debug=debug)
+            # Only debug first 2 technicians
+            debug_this = debug and idx < 2
+            result = process_technician(tech_name, tech_email, graph_token, sdp_token, target_date, debug=debug_this)
             tech_data[result['name']] = {
                 'meetings': result['meetings'],
                 'tickets': result['tickets'],
                 'performance': result['performance']
             }
-            # Only debug first 2 technicians
-            if debug and len(tech_data) >= 2:
-                debug = False
         except Exception as e:
             logger.error(f"Failed to process {tech_name}: {e}")
     
@@ -674,7 +707,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.8")
+    print("PERFORMANCE DATA BACKFILL v15.0.9")
     print("="*70)
     print()
     
