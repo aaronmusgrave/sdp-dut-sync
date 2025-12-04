@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      force:
+        description: 'Force reprocess (ignore progress file)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   backfill:
@@ -31,6 +36,10 @@ jobs:
       
       - name: Install dependencies
         run: pip install requests
+      
+      - name: Delete progress file if force mode
+        if: \${{ inputs.force == true }}
+        run: rm -f backfill_progress.json
       
       - name: Run backfill (with debug)
         if: \${{ inputs.debug == true }}
@@ -67,4 +76,3 @@ jobs:
           name: backfill-data
           path: tech_performance_*.json
           retention-days: 30
-        
