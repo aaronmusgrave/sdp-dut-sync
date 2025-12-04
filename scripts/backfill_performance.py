@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.5
+Performance Data Backfill Script v15.0.6
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Microsoft Graph datetime format (7 decimal places)
+Fixed: Rate limit handling with token caching and exponential backoff
 """
 
 import os
@@ -23,6 +23,14 @@ PARALLEL_TECHNICIANS = 8
 PARALLEL_TICKET_FETCH = 10
 EMAIL_DOMAIN = 'motorad.com'
 PROGRESS_FILE = 'backfill_progress.json'
+
+# Token cache (to avoid rate limiting)
+TOKEN_CACHE = {
+    'graph_token': None,
+    'graph_expires': None,
+    'sdp_token': None,
+    'sdp_expires': None
+}
 
 # Credential cleaning
 def clean_credential(value):
@@ -75,7 +83,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', date
 logger = logging.getLogger(__name__)
 
 def get_graph_token():
-    """Get Microsoft Graph token"""
+    """
+    Get Microsoft Graph token with caching and rate limit handling
+    Tokens are cached for 45 minutes to avoid rate limiting
+    """
+    # Check if we have a valid cached token
+    if TOKEN_CACHE['graph_token'] and TOKEN_CACHE['graph_expires']:
+        if datetime.now() < TOKEN_CACHE['graph_expires']:
+            logger.debug("Using cached Graph token")
+            return TOKEN_CACHE['graph_token']
+    
+    logger.debug("Requesting new Graph token...")
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         'client_id': CLIENT_ID,
@@ -84,17 +102,46 @@ def get_graph_token():
         'grant_type': 'client_credentials'
     }
     
-    try:
-        response = requests.post(url, data=data, timeout=30)
-        if response.status_code == 200:
-            return response.json()['access_token']
-        else:
-            raise Exception(f"Graph token failed: {response.text[:200]}")
-    except Exception as e:
-        raise Exception(f"Failed to get Graph token: {e}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, data=data, timeout=30)
+            if response.status_code == 200:
+                token = response.json()['access_token']
+                # Cache token for 45 minutes
+                TOKEN_CACHE['graph_token'] = token
+                TOKEN_CACHE['graph_expires'] = datetime.now() + timedelta(minutes=45)
+                logger.debug("✓ Graph token obtained and cached")
+                return token
+            elif response.status_code == 429:
+                wait_time = 2 ** attempt * 30  # 30s, 60s, 120s
+                logger.warning(f"Rate limited by Graph API. Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                raise Exception(f"Graph token failed: {response.text[:200]}")
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt * 10
+                logger.warning(f"Graph token request error. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            raise Exception(f"Failed to get Graph token: {e}")
+    
+    raise Exception("Failed to get Graph token after max retries")
 
 def get_sdp_token():
-    """Get ServiceDesk token"""
+    """
+    Get ServiceDesk token with caching and rate limit handling
+    Tokens are cached for 45 minutes to avoid rate limiting
+    """
+    # Check if we have a valid cached token
+    if TOKEN_CACHE['sdp_token'] and TOKEN_CACHE['sdp_expires']:
+        if datetime.now() < TOKEN_CACHE['sdp_expires']:
+            logger.debug("Using cached SDP token")
+            return TOKEN_CACHE['sdp_token']
+    
+    logger.debug("Requesting new SDP token...")
     payload = {
         'client_id': SDP_CLIENT_ID,
         'client_secret': SDP_CLIENT_SECRET,
@@ -102,14 +149,39 @@ def get_sdp_token():
         'grant_type': 'refresh_token'
     }
     
-    try:
-        response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
-        if response.status_code == 200:
-            return response.json()['access_token']
-        else:
-            raise Exception(f"SDP token failed: {response.text[:200]}")
-    except Exception as e:
-        raise Exception(f"Failed to get SDP token: {e}")
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
+            if response.status_code == 200:
+                token = response.json()['access_token']
+                # Cache token for 45 minutes
+                TOKEN_CACHE['sdp_token'] = token
+                TOKEN_CACHE['sdp_expires'] = datetime.now() + timedelta(minutes=45)
+                logger.debug("✓ SDP token obtained and cached")
+                return token
+            elif response.status_code == 429 or 'too many requests' in response.text.lower():
+                wait_time = 2 ** attempt * 30  # 30s, 60s, 120s, 240s
+                logger.warning(f"Rate limited by ServiceDesk API. Waiting {wait_time}s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            else:
+                error_text = response.text[:300]
+                if 'too many requests' in error_text.lower():
+                    wait_time = 2 ** attempt * 30
+                    logger.warning(f"Rate limited. Waiting {wait_time}s... (attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                raise Exception(f"SDP token failed: {error_text}")
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt * 10
+                logger.warning(f"SDP token request error. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            raise Exception(f"Failed to get SDP token: {e}")
+    
+    raise Exception("Failed to get SDP token after max retries. Please wait 10 minutes and try again.")
 
 def discover_technicians(sdp_token):
     """Find active technicians"""
@@ -430,7 +502,6 @@ def upload_to_dust(tech_data, date):
         t = data['tickets']
         p = data['performance']
         
-        
         document = {
             "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
             "timestamp": int(date.timestamp() * 1000),
@@ -497,11 +568,11 @@ def save_progress(progress):
 def process_single_date(target_date, technicians):
     """
     Process all technicians for a single date
-    Gets fresh tokens for each date to prevent expiration
+    Uses cached tokens to avoid rate limiting
     """
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
-    # GET FRESH TOKENS FOR THIS DATE
+    # GET TOKENS (will use cache if available)
     try:
         graph_token = get_graph_token()
         sdp_token = get_sdp_token()
@@ -567,7 +638,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.5")
+    print("PERFORMANCE DATA BACKFILL v15.0.6")
     print("="*70)
     print()
     
@@ -600,6 +671,7 @@ def main():
         logger.info("✓ Tokens obtained")
     except Exception as e:
         logger.error(f"Failed to get tokens: {e}")
+        logger.error("If rate limited, please wait 10 minutes and try again.")
         sys.exit(1)
     
     # Discover technicians
@@ -668,12 +740,12 @@ def main():
     
     print()
     
-    # Process dates - tokens refreshed inside process_single_date
+    # Process dates - tokens cached and reused
     start_time = time.time()
     
     for i, date in enumerate(dates_to_process, 1):
         try:
-            # Call without tokens - function will get fresh ones for each date
+            # Process date (uses cached tokens)
             process_single_date(date, technicians)
             progress['completed'].append(date.strftime('%Y-%m-%d'))
             save_progress(progress)
@@ -686,8 +758,9 @@ def main():
             print(f"Progress: [{i}/{len(dates_to_process)}] ({i/len(dates_to_process)*100:.0f}%) | Elapsed: {elapsed/60:.1f} min | ETA: {eta/60:.1f} min")
             print()
             
+            # Small delay between dates
             if i < len(dates_to_process):
-                time.sleep(2)
+                time.sleep(3)
             
         except Exception as e:
             logger.error(f"Failed to process {date.strftime('%Y-%m-%d')}: {e}")
