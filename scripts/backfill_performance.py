@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.1.4
+Performance Data Backfill Script v15.1.5
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Added pagination to fetch all historical tickets (API limits to 100 per page)
+Optimized: Fields parameter, smart pagination, parallel processing
 """
 
 import os
@@ -336,7 +336,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.1.4: Added pagination to fetch all historical tickets
+    v15.1.5: Optimized with fields parameter and smart pagination
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -348,14 +348,17 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
         logger.info(f"{'='*60}")
     
-    # Fetch closed tickets with PAGINATION
+    # Fetch closed tickets with PAGINATION and FIELDS optimization
     all_tickets = []
     start_index = 1
     page_size = 100
-    max_pages = 50  # Safety limit (5000 tickets max)
+    max_pages = 50  # Safety limit
+    
+    # Buffer zone: fetch 2 days before target to be safe
+    date_buffer = target_date - timedelta(days=2)
     
     if debug:
-        logger.info("Fetching tickets with pagination...")
+        logger.info("Fetching tickets with pagination (optimized)...")
     
     for page_num in range(1, max_pages + 1):
         list_info = {
@@ -367,7 +370,9 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                     {"field": "status.name", "condition": "is", "values": ["Closed"]}
                 ],
                 "sort_field": "resolved_time",
-                "sort_order": "desc"
+                "sort_order": "desc",
+                # OPTIMIZATION: Request resolved_time field explicitly
+                "fields": ["id", "resolved_time", "technician", "status"]
             }
         }
         
@@ -389,14 +394,13 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                 break
             
             if debug:
-                logger.info(f"Page {page_num}: Fetched {len(tickets)} tickets (start_index: {start_index})")
+                logger.info(f"Page {page_num}: Fetched {len(tickets)} tickets")
             
             # Validate tickets belong to this technician
             validated = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
             all_tickets.extend(validated)
             
-            # Check if we've gone back far enough
-            # Look at oldest ticket in this page
+            # SMART STOP: Check if we've gone back far enough
             oldest_in_page = None
             for ticket in validated:
                 if 'resolved_time' in ticket:
@@ -405,16 +409,16 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                         if oldest_in_page is None or resolved_time < oldest_in_page:
                             oldest_in_page = resolved_time
             
-            # If oldest ticket in this page is older than target, we have enough history
-            if oldest_in_page and oldest_in_page.date() <= target_date:
+            # Stop if oldest ticket is before our buffer zone
+            if oldest_in_page and oldest_in_page.date() < date_buffer:
                 if debug:
-                    logger.info(f"Page {page_num}: Reached target date (oldest: {oldest_in_page.date()})")
+                    logger.info(f"Page {page_num}: Reached buffer zone (oldest: {oldest_in_page.date()}, target: {target_date})")
                 break
             
             # If we got less than page_size, we're at the end
             if len(tickets) < page_size:
                 if debug:
-                    logger.info(f"Page {page_num}: Last page (only {len(tickets)} tickets)")
+                    logger.info(f"Page {page_num}: Last page ({len(tickets)} tickets)")
                 break
             
             # Move to next page
@@ -422,7 +426,7 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             
         except Exception as e:
             if debug:
-                logger.error(f"Page {page_num}: Error fetching tickets: {e}")
+                logger.error(f"Page {page_num}: Error: {e}")
             break
     
     if not all_tickets:
@@ -431,17 +435,17 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         return 0
     
     if debug:
-        logger.info(f"Total fetched: {len(all_tickets)} closed tickets across {page_num} pages")
+        logger.info(f"Total fetched: {len(all_tickets)} tickets across {page_num} pages")
     
     # Check if resolved_time is in the response
     if all_tickets and 'resolved_time' in all_tickets[0]:
-        # FAST PATH: resolved_time in list response - filter by date in Python
+        # FAST PATH: resolved_time in list - filter by date in Python
         count = 0
         matched_tickets = []
         oldest_date = None
         
         if debug:
-            logger.info("resolved_time present in list - filtering by date in Python")
+            logger.info("✓ FAST PATH: resolved_time in list response")
         
         for ticket in all_tickets:
             ticket_id = ticket.get('id')
@@ -457,9 +461,6 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                 matched_tickets.append(ticket_id)
                 if debug and len(matched_tickets) <= 5:
                     logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
-            elif debug and count < 3:
-                if resolved_time:
-                    logger.info(f"  ✗ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - no match")
         
         if debug:
             if matched_tickets:
@@ -468,14 +469,12 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                 logger.info(f"✗ NO MATCHES for target date {target_date}")
             if oldest_date:
                 logger.info(f"Oldest ticket date: {oldest_date}")
-                if oldest_date > target_date:
-                    logger.warning(f"⚠️  Target date {target_date} is older than oldest fetched ticket {oldest_date}")
         
         return count
     else:
         # SLOW PATH: resolved_time NOT in list - fetch each ticket individually
         if debug:
-            logger.info("resolved_time not in list - using slow path (fetching individual tickets)")
+            logger.info("⚠️  SLOW PATH: resolved_time not in list, fetching individual tickets")
         
         def check_ticket(ticket_id):
             details = get_ticket_details(ticket_id, sdp_token)
@@ -498,17 +497,11 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         ticket_ids = [t['id'] for t in all_tickets]
         count = 0
         matched_tickets = []
-        oldest_date = None
         
         with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
             futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
             for future in as_completed(futures):
                 result, ticket_id, resolved_time = future.result()
-                
-                # Track oldest date
-                if resolved_time:
-                    if oldest_date is None or resolved_time.date() < oldest_date:
-                        oldest_date = resolved_time.date()
                 
                 if result:
                     count += 1
@@ -521,10 +514,6 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                 logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
             else:
                 logger.info(f"✗ NO MATCHES for target date {target_date}")
-            if oldest_date:
-                logger.info(f"Oldest ticket date: {oldest_date}")
-                if oldest_date > target_date:
-                    logger.warning(f"⚠️  Target date {target_date} is older than oldest fetched ticket {oldest_date}")
         
         return count
 
@@ -716,20 +705,38 @@ def process_single_date(target_date, technicians, debug=False):
     
     tech_data = {}
     
-    # Process technicians - debug only first 2
+    # PARALLEL PROCESSING: Process technicians simultaneously
     tech_list = list(technicians.items())
-    for idx, (tech_name, tech_email) in enumerate(tech_list):
-        try:
+    
+    with ThreadPoolExecutor(max_workers=PARALLEL_TECHNICIANS) as executor:
+        # Submit all technicians for parallel processing
+        futures = {}
+        for idx, (tech_name, tech_email) in enumerate(tech_list):
             # Only debug first 2 technicians
             debug_this = debug and idx < 2
-            result = process_technician(tech_name, tech_email, graph_token, sdp_token, target_date, debug=debug_this)
-            tech_data[result['name']] = {
-                'meetings': result['meetings'],
-                'tickets': result['tickets'],
-                'performance': result['performance']
-            }
-        except Exception as e:
-            logger.error(f"Failed to process {tech_name}: {e}")
+            future = executor.submit(
+                process_technician,
+                tech_name,
+                tech_email,
+                graph_token,
+                sdp_token,
+                target_date,
+                debug_this
+            )
+            futures[future] = tech_name
+        
+        # Collect results as they complete
+        for future in as_completed(futures):
+            tech_name = futures[future]
+            try:
+                result = future.result()
+                tech_data[result['name']] = {
+                    'meetings': result['meetings'],
+                    'tickets': result['tickets'],
+                    'performance': result['performance']
+                }
+            except Exception as e:
+                logger.error(f"Failed to process {tech_name}: {e}")
     
     # Display results
     print()
@@ -762,7 +769,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.1.4")
+    print("PERFORMANCE DATA BACKFILL v15.1.5 (OPTIMIZED)")
     print("="*70)
     print()
     
