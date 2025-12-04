@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.1.5
+Performance Data Backfill Script v15.1.6
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Optimized: Fields parameter, smart pagination, parallel processing
+Optimized: Smart pagination + parallel processing (removed unsupported fields param)
 """
 
 import os
@@ -336,7 +336,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.1.5: Optimized with fields parameter and smart pagination
+    v15.1.6: Optimized with smart pagination + parallel processing
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -348,7 +348,7 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
         logger.info(f"{'='*60}")
     
-    # Fetch closed tickets with PAGINATION and FIELDS optimization
+    # Fetch closed tickets with SMART PAGINATION
     all_tickets = []
     start_index = 1
     page_size = 100
@@ -370,9 +370,7 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                     {"field": "status.name", "condition": "is", "values": ["Closed"]}
                 ],
                 "sort_field": "resolved_time",
-                "sort_order": "desc",
-                # OPTIMIZATION: Request resolved_time field explicitly
-                "fields": ["id", "resolved_time", "technician", "status"]
+                "sort_order": "desc"
             }
         }
         
@@ -769,7 +767,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.1.5 (OPTIMIZED)")
+    print("PERFORMANCE DATA BACKFILL v15.1.6 (OPTIMIZED)")
     print("="*70)
     print()
     
@@ -841,6 +839,7 @@ def main():
     
     progress = load_progress()
     completed_dates = {d for d in progress['completed']}
+    dates]}
     dates_to_process = [d for d in dates if d.strftime('%Y-%m-%d') not in completed_dates]
     
     if not dates_to_process:
