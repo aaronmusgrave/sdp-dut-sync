@@ -11,6 +11,11 @@ on:
         description: 'End date (YYYY-MM-DD)'
         required: true
         type: string
+      debug:
+        description: 'Enable debug logging (shows timezone info for first date)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   backfill:
@@ -39,14 +44,16 @@ jobs:
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
         run: |
-          python scripts/backfill_performance.py \
-            --start-date "\${{ inputs.start_date }}" \
-            --end-date "\${{ inputs.end_date }}"
+          if [ "\${{ inputs.debug }}" == "true" ]; then
+            python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}" --debug
+          else
+            python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}"
+          fi
       
       - name: Upload performance data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backfill-data-\${{ inputs.start_date }}-to-\${{ inputs.end_date }}
+          name: backfill-data
           path: tech_performance_*.json
           retention-days: 30
