@@ -32,7 +32,8 @@ jobs:
       - name: Install dependencies
         run: pip install requests
       
-      - name: Run backfill
+      - name: Run backfill (with debug)
+        if: \${{ inputs.debug == true }}
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -43,12 +44,21 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          if [ "\${{ inputs.debug }}" == "true" ]; then
-            python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}" --debug
-          else
-            python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}"
-          fi
+        run: python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}" --debug
+      
+      - name: Run backfill (without debug)
+        if: \${{ inputs.debug == false }}
+        env:
+          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        run: python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}"
       
       - name: Upload performance data
         if: always()
@@ -57,3 +67,4 @@ jobs:
           name: backfill-data
           path: tech_performance_*.json
           retention-days: 30
+        
