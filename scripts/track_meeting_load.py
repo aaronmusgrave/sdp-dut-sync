@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Track technician meeting load and correlate with ticket performance
-v14.5.6: TOKEN RETRY & ERROR HANDLING
-- Fixed: Retry logic for Graph token with exponential backoff
-- Fixed: Better error messages showing actual failures
-- Handles rate limiting (429 errors)
-- Same reliable pagination from v14.5.5
+v14.5.7: INCREASED PAGE LIMITS - Fix for older dates
+- Fixed: Increased pages for 11-20 day range (3→5 pages)
+- Fixed: Better coverage for dates like Nov 15
+- Token retry with exponential backoff
+- Dynamic page limits for any date age
 """
 
 import os
@@ -249,9 +249,9 @@ def get_tech_meetings(email, graph_token, date=None):
 
 def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     """
-    v14.5.5: DYNAMIC PAGE LIMITS - Handles any date age
+    v14.5.7: INCREASED PAGE LIMITS - Better coverage for older dates
     - Dynamic page calculation based on date age
-    - More generous limits for older dates
+    - Increased limits for 11-20 day range (3→5 pages)
     - Same reliable logic: stops when newest ticket < target
     """
     if date is None:
@@ -267,13 +267,13 @@ def count_closed_tickets_optimized(tech_name, sdp_token, date=None):
     headers = {'Authorization': f'Zoho-oauthtoken {sdp_token}', 'Accept': 'application/vnd.manageengine.sdp.v3+json'}
     
     # DYNAMIC PAGE CALCULATION based on date age
-    # Assuming ~100 tickets per tech per 10 days
+    # v14.5.7: Increased page limits for better coverage
     if days_ago <= 10:
         max_pages = 2  # 2000 tickets = ~20 days coverage
     elif days_ago <= 20:
-        max_pages = 3  # 3000 tickets = ~30 days coverage
+        max_pages = 5  # INCREASED FROM 3 → 5000 tickets = ~50 days coverage
     elif days_ago <= 30:
-        max_pages = 5  # 5000 tickets = ~50 days coverage
+        max_pages = 6  # INCREASED FROM 5 → 6000 tickets = ~60 days coverage
     elif days_ago <= 60:
         max_pages = 8  # 8000 tickets = ~80 days coverage
     else:
@@ -540,8 +540,8 @@ def main():
         logger.setLevel(logging.DEBUG)
     
     print("="*70, flush=True)
-    print("TECHNICIAN PERFORMANCE TRACKER v14.5.6 - TOKEN RETRY!", flush=True)
-    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Dynamic page limits", flush=True)
+    print("TECHNICIAN PERFORMANCE TRACKER v14.5.7 - MORE PAGES!", flush=True)
+    print(f"   {PARALLEL_TECHNICIANS} parallel technicians | Increased page limits", flush=True)
     print("   Handles ANY date age | Token retry with backoff", flush=True)
     print("="*70, flush=True)
     print(flush=True)
