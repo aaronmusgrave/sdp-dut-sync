@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Daily Technician Performance Tracker v15.0.0
+Daily Technician Performance Tracker v15.0.1
+Fixed: Ticket counting with fallback to individual ticket fetch
 Simple, reliable, daily execution only
-- Processes yesterday's data ONLY
-- Gets meetings from Microsoft Graph
-- Gets closed tickets from ServiceDesk
-- Saves JSON and uploads to Dust
 """
 
 import os
@@ -20,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Configuration
 WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
+PARALLEL_TICKET_FETCH = 10
 EMAIL_DOMAIN = 'motorad.com'
 
 # Credential cleaning
@@ -201,20 +199,38 @@ def safe_timestamp_to_date(value):
     except:
         return None
 
+def get_ticket_details(ticket_id, sdp_token):
+    """Fetch individual ticket details"""
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {sdp_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json().get('request', {})
+    except:
+        pass
+    return None
+
 def count_closed_tickets(tech_name, sdp_token, target_date):
     """
     Count tickets closed by technician on specific date
-    Simple approach: Fetch recent closed tickets, filter to target date
+    v15.0.1: Uses SLOW PATH (individual fetch) if resolved_time not in list
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
+    logger.debug(f"Counting closed tickets for {tech_name} on {target_date}")
+    
     # Fetch closed tickets for technician (recent, sorted by resolved_time desc)
     list_info = {
         "list_info": {
-            "row_count": 1000,
+            "row_count": 500,  # Reduced from 1000 for faster response
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
@@ -236,14 +252,47 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
         
         tickets = response.json().get('requests', [])
         
-        # Filter to target date
-        count = 0
-        for ticket in tickets:
-            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-            if resolved_time and resolved_time.date() == target_date:
-                count += 1
+        if not tickets:
+            logger.debug(f"  {tech_name}: No closed tickets found")
+            return 0
         
-        return count
+        # Check if resolved_time is in the first ticket
+        if tickets and 'resolved_time' in tickets[0]:
+            # FAST PATH: resolved_time is in list response
+            logger.debug(f"  {tech_name}: Using FAST path (resolved_time in list)")
+            count = 0
+            for ticket in tickets:
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
+                if resolved_time and resolved_time.date() == target_date:
+                    count += 1
+            
+            return count
+        
+        else:
+            # SLOW PATH: resolved_time NOT in list - fetch individual tickets
+            logger.debug(f"  {tech_name}: Using SLOW path (fetching {len(tickets)} individual tickets)")
+            
+            def check_ticket(ticket_id):
+                details = get_ticket_details(ticket_id, sdp_token)
+                if not details:
+                    return False
+                
+                resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
+                if resolved_time and resolved_time.date() == target_date:
+                    return True
+                return False
+            
+            # Fetch tickets in parallel
+            ticket_ids = [t['id'] for t in tickets]
+            count = 0
+            
+            with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
+                futures = [executor.submit(check_ticket, tid) for tid in ticket_ids]
+                for future in as_completed(futures):
+                    if future.result():
+                        count += 1
+            
+            return count
         
     except Exception as e:
         logger.warning(f"Error counting tickets for {tech_name}: {e}")
@@ -421,7 +470,7 @@ def upload_to_dust(tech_data, date):
 def main():
     """Main execution"""
     print("="*70)
-    print("DAILY PERFORMANCE TRACKER v15.0.0")
+    print("DAILY PERFORMANCE TRACKER v15.0.1")
     print("="*70)
     print()
     
