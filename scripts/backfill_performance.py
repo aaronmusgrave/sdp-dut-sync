@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.2
+Performance Data Backfill Script v15.0.3
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
+Fixed: Automated mode detection for CI/CD environments
 """
 
 import os
@@ -544,7 +545,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.2")
+    print("PERFORMANCE DATA BACKFILL v15.0.3")
     print("="*70)
     print()
     
@@ -629,11 +630,17 @@ def main():
     if completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
     
+    # Only prompt for confirmation if running interactively (not in CI/CD)
     if len(dates_to_process) > 5:
-        confirm = input(f"\nProcess {len(dates_to_process)} dates? (yes/no): ").strip().lower()
-        if confirm not in ['yes', 'y']:
-            print("Cancelled.")
-            return
+        if sys.stdin.isatty():
+            # Interactive mode - ask for confirmation
+            confirm = input(f"\nProcess {len(dates_to_process)} dates? (yes/no): ").strip().lower()
+            if confirm not in ['yes', 'y']:
+                print("Cancelled.")
+                return
+        else:
+            # Automated mode (GitHub Actions, etc.) - proceed without prompt
+            logger.info(f"Automated mode: Proceeding with {len(dates_to_process)} dates")
     
     print()
     
