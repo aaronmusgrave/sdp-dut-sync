@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.9
+Performance Data Backfill Script v15.1.0
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Debug logging now works in slow path (individual ticket fetching)
+Fixed: Added date range filter to ServiceDesk API query
 """
 
 import os
@@ -270,10 +270,31 @@ def get_meetings(email, graph_token, date):
         logger.warning(f"Error fetching meetings for {email}: {e}")
         return {'count': 0, 'hours': 0}
 
+def date_to_timestamp_range(target_date):
+    """
+    Convert date to timestamp range for ServiceDesk API
+    Returns start and end timestamps (milliseconds) for the target date in CST
+    """
+    # Start of day in CST (00:00:00)
+    start_dt = datetime.combine(target_date, datetime.min.time())
+    # End of day in CST (23:59:59)
+    end_dt = datetime.combine(target_date, datetime.max.time())
+    
+    # Convert to UTC for API (CST is UTC-6)
+    cst_offset = timedelta(hours=6)
+    start_utc = start_dt + cst_offset
+    end_utc = end_dt + cst_offset
+    
+    # Convert to milliseconds timestamp
+    start_ms = int(start_utc.timestamp() * 1000)
+    end_ms = int(end_utc.timestamp() * 1000)
+    
+    return start_ms, end_ms
+
 def safe_timestamp_to_date(value, debug=False):
     """
     Convert ServiceDesk timestamp to datetime
-    v15.0.9: Enhanced debug logging for timezone identification
+    ServiceDesk stores times in UTC milliseconds
     """
     if not value:
         return None
@@ -300,7 +321,7 @@ def safe_timestamp_to_date(value, debug=False):
                 dt_local = dt_utc + offset
                 logger.info(f"    {tz_name:8s}: {dt_local.strftime('%Y-%m-%d %H:%M:%S')} (date: {dt_local.date()})")
         
-        # Use CST for now (we'll adjust based on debug output)
+        # Use CST
         central_offset = timedelta(hours=-6)
         dt_local = dt_utc + central_offset
         
@@ -336,7 +357,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.0.9: Enhanced debug logging in slow path
+    v15.1.0: Added date range filter to API query
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -348,13 +369,26 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
         logger.info(f"{'='*60}")
     
+    # Get timestamp range for target date
+    start_ms, end_ms = date_to_timestamp_range(target_date)
+    
+    if debug:
+        logger.info(f"Date filter: {target_date} -> {start_ms} to {end_ms}")
+    
+    # Build search criteria with date filter
     list_info = {
         "list_info": {
             "row_count": 500,
             "start_index": 1,
             "search_criteria": [
                 {"field": "technician.name", "condition": "is", "value": tech_name},
-                {"field": "status.name", "condition": "is", "values": ["Closed"]}
+                {"field": "status.name", "condition": "is", "values": ["Closed"]},
+                {
+                    "field": "resolved_time",
+                    "condition": "between",
+                    "value": str(start_ms),
+                    "value2": str(end_ms)
+                }
             ],
             "sort_field": "resolved_time",
             "sort_order": "desc"
@@ -368,109 +402,45 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
         
         if response.status_code != 200:
             if debug:
-                logger.warning(f"API returned status {response.status_code}")
+                logger.warning(f"API returned status {response.status_code}: {response.text[:200]}")
             return 0
         
         tickets = response.json().get('requests', [])
         
         if not tickets:
             if debug:
-                logger.info("No closed tickets found")
+                logger.info("No closed tickets found in date range")
             return 0
         
         if debug:
-            logger.info(f"Found {len(tickets)} closed tickets for {tech_name}")
+            logger.info(f"Found {len(tickets)} closed tickets for {tech_name} in date range")
         
+        # Validate tickets belong to this technician
         validated_tickets = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
         
         if debug:
             logger.info(f"Validated {len(validated_tickets)} tickets belong to {tech_name}")
         
-        if validated_tickets and 'resolved_time' in validated_tickets[0]:
-            # Fast path
-            count = 0
-            matched_tickets = []
-            
-            for ticket in validated_tickets[:20]:
+        # With date filter, all returned tickets should match
+        # But let's verify the first few in debug mode
+        if debug and validated_tickets:
+            for ticket in validated_tickets[:3]:
                 ticket_id = ticket.get('id')
-                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
-                
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=True)
                 if resolved_time:
                     matches = resolved_time.date() == target_date
-                    if debug and len(matched_tickets) < 5:
-                        logger.info(f"Ticket #{ticket_id}: resolved {resolved_time.strftime('%Y-%m-%d %H:%M')} - Match: {matches}")
-                    
-                    if matches:
-                        count += 1
-                        matched_tickets.append(ticket_id)
-            
-            if debug and matched_tickets:
-                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets}")
-            elif debug:
-                logger.info(f"✗ NO MATCHES for target date {target_date}")
-            
-            return count
-        else:
-            # Slow path - resolved_time not in list response
-            if debug:
-                logger.info("resolved_time not in list response, using slow path (fetching individual tickets)...")
-            
-            # Reset debug counter for slow path
-            global debug_counter
-            debug_counter['count'] = 0
-            
-            def check_ticket(ticket_id):
-                details = get_ticket_details(ticket_id, sdp_token)
-                if not details:
-                    return (False, None)
-                if not verify_ticket_belongs_to_tech(details, tech_name):
-                    return (False, None)
-                status = details.get('status')
-                if not status or not isinstance(status, dict):
-                    return (False, None)
-                if status.get('name', '') != 'Closed':
-                    return (False, None)
-                
-                # Thread-safe debug counter
-                show_debug = False
-                if debug:
-                    with debug_lock:
-                        if debug_counter['count'] < 3:
-                            show_debug = True
-                            debug_counter['count'] += 1
-                
-                resolved_time = safe_timestamp_to_date(details.get('resolved_time'), debug=show_debug)
-                
-                if show_debug and resolved_time:
-                    matches = resolved_time.date() == target_date
                     logger.info(f"Ticket #{ticket_id}: resolved {resolved_time.strftime('%Y-%m-%d %H:%M')} - Match: {matches}")
-                
-                if resolved_time and resolved_time.date() == target_date:
-                    return (True, ticket_id)
-                return (False, None)
-            
-            ticket_ids = [t['id'] for t in validated_tickets]
-            count = 0
-            matched_tickets = []
-            
-            with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
-                futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
-                for future in as_completed(futures):
-                    result, ticket_id = future.result()
-                    if result:
-                        count += 1
-                        matched_tickets.append(ticket_id)
-            
-            if debug and matched_tickets:
-                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets}")
-            elif debug:
-                logger.info(f"✗ NO MATCHES for target date {target_date}")
-            
-            return count
+        
+        if debug:
+            logger.info(f"✓ MATCHED {len(validated_tickets)} tickets")
+        
+        return len(validated_tickets)
         
     except Exception as e:
         if debug:
             logger.error(f"Error counting tickets: {e}")
+            import traceback
+            traceback.print_exc()
         return 0
 
 def get_active_tickets(tech_name, sdp_token):
@@ -707,7 +677,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.9")
+    print("PERFORMANCE DATA BACKFILL v15.1.0")
     print("="*70)
     print()
     
