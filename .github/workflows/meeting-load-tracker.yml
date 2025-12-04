@@ -2,7 +2,7 @@ name: Daily Performance Tracker
 
 on:
   schedule:
-    - cron: '0 14 * * *'
+    - cron: '0 14 * * *'  # 8 AM CST (2 PM UTC)
   workflow_dispatch:
 
 jobs:
@@ -33,11 +33,11 @@ jobs:
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
         run: python scripts/track_meeting_load.py
       
-      # Just upload as artifact (no commit/push)
-      - name: Upload artifact
+      - name: Upload performance data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-data-\${{ github.run_number }}
+          name: performance-data
           path: tech_performance_*.json
           retention-days: 30
+          
