@@ -109,7 +109,7 @@ def main():
     
     print("="*70, flush=True)
     print(f"PERFORMANCE DATA BACKFILL - LAST {DAYS_TO_BACKFILL} DAYS", flush=True)
-    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.9 (RELIABLE!) | NEWEST FIRST!", flush=True)
+    print(f"   {PARALLEL_WORKERS} WORKERS | v14.5.10 (CLEAN CREDS!) | NEWEST FIRST!", flush=True)
     print("="*70, flush=True)
     print(flush=True)
     
