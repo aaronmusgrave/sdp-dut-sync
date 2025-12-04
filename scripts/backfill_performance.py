@@ -1,3 +1,54 @@
+#!/usr/bin/env python3
+"""
+Performance Data Backfill Script v15.0.2
+Uses the same working logic as track_meeting_load.py
+Processes historical dates sequentially
+"""
+
+import os
+import sys
+import requests
+import json
+import logging
+import time
+import argparse  # ← ADDED THIS
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Same configuration as main script
+WORK_HOURS_PER_DAY = 8
+PARALLEL_TECHNICIANS = 8
+PARALLEL_TICKET_FETCH = 10
+EMAIL_DOMAIN = 'motorad.com'
+PROGRESS_FILE = 'backfill_progress.json'
+
+# Credential cleaning (same as v15.0.2)
+def clean_credential(value):
+    if not value:
+        return value
+    value = value.strip().strip('"').strip("'")
+    value = value.replace('\\', '')
+    return value.strip()
+
+# Load credentials
+TENANT_ID = clean_credential(os.environ.get('AZURE_TENANT_ID'))
+CLIENT_ID = clean_credential(os.environ.get('AZURE_CLIENT_ID'))
+CLIENT_SECRET = clean_credential(os.environ.get('AZURE_CLIENT_SECRET'))
+
+SDP_DOMAIN = clean_credential(os.environ.get('SDP_DOMAIN'))
+SDP_CLIENT_ID = clean_credential(os.environ.get('SDP_CLIENT_ID'))
+SDP_CLIENT_SECRET = clean_credential(os.environ.get('SDP_CLIENT_SECRET'))
+SDP_REFRESH_TOKEN = clean_credential(os.environ.get('SDP_REFRESH_TOKEN'))
+
+DUST_API_KEY = clean_credential(os.environ.get('DUST_API_KEY'))
+DUST_WORKSPACE_ID = clean_credential(os.environ.get('DUST_WORKSPACE_ID'))
+
+SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
+ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
+
+# Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
+logger = logging.getLogger(__name__)
 # ... (keep all the previous functions unchanged until process_single_date)
 
 def process_single_date(target_date, technicians, graph_token, sdp_token):
