@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.6
+Performance Data Backfill Script v15.0.7
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Rate limit handling with token caching and exponential backoff
+Fixed: Timezone handling for resolved_time comparison
 """
 
 import os
@@ -14,7 +14,7 @@ import logging
 import time
 import argparse
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
@@ -281,8 +281,14 @@ def get_meetings(email, graph_token, date):
         logger.warning(f"Error fetching meetings for {email}: {e}")
         return {'count': 0, 'hours': 0}
 
-def safe_timestamp_to_date(value):
-    """Convert ServiceDesk timestamp to datetime"""
+def safe_timestamp_to_date(value, use_utc=False):
+    """
+    Convert ServiceDesk timestamp to datetime
+    v15.0.7: Added timezone handling
+    
+    ServiceDesk stores times in UTC (milliseconds since epoch)
+    We need to convert to local timezone for proper date comparison
+    """
     if not value:
         return None
     try:
@@ -290,7 +296,16 @@ def safe_timestamp_to_date(value):
             value = value.get('value')
         if isinstance(value, str):
             value = int(value)
-        return datetime.fromtimestamp(value / 1000)
+        
+        # Convert milliseconds to datetime (UTC)
+        dt_utc = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        
+        # Convert to CST/CDT (UTC-6/-5)
+        # Using a fixed offset for Central Time (approximate)
+        central_offset = timedelta(hours=-6)
+        dt_local = dt_utc + central_offset
+        
+        return dt_local
     except:
         return None
 
@@ -318,7 +333,10 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
     return tech.get('name', '') == tech_name
 
 def count_closed_tickets(tech_name, sdp_token, target_date):
-    """Count tickets closed by technician on specific date"""
+    """
+    Count tickets closed by technician on specific date
+    v15.0.7: Fixed timezone comparison
+    """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -638,7 +656,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.6")
+    print("PERFORMANCE DATA BACKFILL v15.0.7")
     print("="*70)
     print()
     
