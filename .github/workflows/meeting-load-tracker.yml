@@ -1,60 +1,43 @@
-name: Daily Performance Tracking
+name: Daily Performance Tracker
 
 on:
   schedule:
-    - cron: '0 1 * * *'  # Run at 1 AM UTC (7 PM CST previous day)
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 14 * * *'
+  workflow_dispatch:
 
 jobs:
-  track-performance:
+  track:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
       
       - name: Install dependencies
-        run: |
-          pip install requests
+        run: pip install requests
       
-      - name: Run performance tracker
+      - name: Run daily tracker
         env:
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
-          EMAIL_DOMAIN: ${{ secrets.EMAIL_DOMAIN }}
-        run: |
-          echo "📊 Running daily performance tracker for $(date +%Y-%m-%d)"
-          python scripts/track_meeting_load.py
+          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        run: python scripts/track_meeting_load.py
       
+      # Just upload as artifact (no commit/push)
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-data
+          name: performance-data-\${{ github.run_number }}
           path: tech_performance_*.json
-          if-no-files-found: error
-      
-      - name: Commit and push if changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tech_performance_*.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Daily performance tracking: $(date +%Y-%m-%d)" && git push)
-        continue-on-error: true
-      
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "❌ Daily performance tracking failed!"
-          echo "Check the logs for details"
+          retention-days: 30
