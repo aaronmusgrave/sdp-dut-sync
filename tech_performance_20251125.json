@@ -1,0 +1,290 @@
+{
+  "Lori Hale": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 3,
+      "hours": 1.5
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 6.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 18.8
+    }
+  },
+  "Austin Rodriguez": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 1,
+      "hours": 0.5
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 7.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 6.2
+    }
+  },
+  "Andy Braun": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 3,
+      "hours": 1.5
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 6.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 18.8
+    }
+  },
+  "Roi Karasenty": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Dudu Raz": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 2,
+      "hours": 8.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 0.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 100.0
+    }
+  },
+  "Tamar Elisha": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Nicholas Goodbinder": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 1,
+      "hours": 0.33
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 7.67,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 4.1
+    }
+  },
+  "Clint Smith": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Gery Gorenshtein": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Jayde Fulkerson": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 1,
+      "hours": 0.33
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 7.67,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 4.1
+    }
+  },
+  "Aaron Musgrave": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 5,
+      "hours": 8.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 0.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 100.0
+    }
+  },
+  "Niv Pariente": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 1,
+      "hours": 8.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 0.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 100.0
+    }
+  },
+  "Zachary McGee": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Carter Mondy": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  },
+  "Jesus Puente": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 1,
+      "hours": 0.5
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 7.5,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 6.2
+    }
+  },
+  "Jimmy Ellis": {
+    "date": "2025-11-25T00:00:00",
+    "meetings": {
+      "count": 0,
+      "hours": 0.0
+    },
+    "tickets": {
+      "active_tickets": 100,
+      "closed_today": 0,
+      "updated_today": 0
+    },
+    "performance": {
+      "available_hours": 8.0,
+      "velocity_closed": 0.0,
+      "adjusted_score": 0,
+      "meeting_percentage": 0.0
+    }
+  }
+}
