@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.1.0
+Performance Data Backfill Script v15.1.1
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Added date range filter to ServiceDesk API query
+Fixed: Use two separate conditions for date filtering (API doesn't support "between")
 """
 
 import os
@@ -357,7 +357,7 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
 def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.1.0: Added date range filter to API query
+    v15.1.1: Use two separate date conditions (API doesn't support "between")
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -375,7 +375,7 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     if debug:
         logger.info(f"Date filter: {target_date} -> {start_ms} to {end_ms}")
     
-    # Build search criteria with date filter
+    # Build search criteria with TWO separate date conditions
     list_info = {
         "list_info": {
             "row_count": 500,
@@ -385,9 +385,13 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
                 {"field": "status.name", "condition": "is", "values": ["Closed"]},
                 {
                     "field": "resolved_time",
-                    "condition": "between",
-                    "value": str(start_ms),
-                    "value2": str(end_ms)
+                    "condition": "greater than or equal to",
+                    "value": str(start_ms)
+                },
+                {
+                    "field": "resolved_time",
+                    "condition": "less than or equal to",
+                    "value": str(end_ms)
                 }
             ],
             "sort_field": "resolved_time",
@@ -677,7 +681,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.1.0")
+    print("PERFORMANCE DATA BACKFILL v15.1.1")
     print("="*70)
     print()
     
