@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.4
+Performance Data Backfill Script v15.0.5
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Token refresh for each date to prevent expiration
+Fixed: Microsoft Graph datetime format (7 decimal places)
 """
 
 import os
@@ -13,6 +13,7 @@ import json
 import logging
 import time
 import argparse
+import re
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -48,7 +49,7 @@ def clean_date_string(date_str):
             month = int(parts[1])
             day = int(parts[2])
             dt = datetime(year, month, day)
-            return dt.strftime('%Y-%m-%d')  # Return in proper format with leading zeros
+            return dt.strftime('%Y-%m-%d')
     except:
         pass
     
@@ -144,6 +145,16 @@ def discover_technicians(sdp_token):
     
     return technicians
 
+def fix_datetime_str(dt_str):
+    """
+    Fix Microsoft Graph datetime strings
+    Graph API returns fractional seconds with 7 digits (e.g., .0000000)
+    Python only supports up to 6 digits (.000000)
+    """
+    dt_str = dt_str.replace('Z', '+00:00')
+    # Truncate fractional seconds to 6 digits using regex
+    return re.sub(r'\.(\d{6})\d+', r'.\1', dt_str)
+
 def get_meetings(email, graph_token, date):
     """Get meetings for technician on specific date"""
     if not email:
@@ -177,8 +188,10 @@ def get_meetings(email, graph_token, date):
                 if event.get('isAllDay'):
                     duration_minutes = WORK_HOURS_PER_DAY * 60
                 else:
-                    start = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00'))
-                    end = datetime.fromisoformat(event['end']['dateTime'].replace('Z', '+00:00'))
+                    # Parse datetime with fixed format (handles 7 decimal places)
+                    start = datetime.fromisoformat(fix_datetime_str(event['start']['dateTime']))
+                    end = datetime.fromisoformat(fix_datetime_str(event['end']['dateTime']))
+                    
                     meeting_start = max(start, start_time)
                     meeting_end = min(end, end_time)
                     if meeting_end > meeting_start:
@@ -417,6 +430,7 @@ def upload_to_dust(tech_data, date):
         t = data['tickets']
         p = data['performance']
         
+        
         document = {
             "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
             "timestamp": int(date.timestamp() * 1000),
@@ -483,13 +497,12 @@ def save_progress(progress):
 def process_single_date(target_date, technicians):
     """
     Process all technicians for a single date
-    v15.0.4: Gets fresh tokens for each date to prevent expiration
+    Gets fresh tokens for each date to prevent expiration
     """
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     # GET FRESH TOKENS FOR THIS DATE
     try:
-        logger.debug("Getting fresh tokens...")
         graph_token = get_graph_token()
         sdp_token = get_sdp_token()
     except Exception as e:
@@ -554,7 +567,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.4")
+    print("PERFORMANCE DATA BACKFILL v15.0.5")
     print("="*70)
     print()
     
