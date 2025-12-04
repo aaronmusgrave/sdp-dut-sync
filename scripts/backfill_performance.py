@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.7
+Performance Data Backfill Script v15.0.8
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Timezone handling for resolved_time comparison
+Added: Debug logging for timezone troubleshooting
 """
 
 import os
@@ -83,11 +83,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', date
 logger = logging.getLogger(__name__)
 
 def get_graph_token():
-    """
-    Get Microsoft Graph token with caching and rate limit handling
-    Tokens are cached for 45 minutes to avoid rate limiting
-    """
-    # Check if we have a valid cached token
+    """Get Microsoft Graph token with caching and rate limit handling"""
     if TOKEN_CACHE['graph_token'] and TOKEN_CACHE['graph_expires']:
         if datetime.now() < TOKEN_CACHE['graph_expires']:
             logger.debug("Using cached Graph token")
@@ -108,13 +104,12 @@ def get_graph_token():
             response = requests.post(url, data=data, timeout=30)
             if response.status_code == 200:
                 token = response.json()['access_token']
-                # Cache token for 45 minutes
                 TOKEN_CACHE['graph_token'] = token
                 TOKEN_CACHE['graph_expires'] = datetime.now() + timedelta(minutes=45)
                 logger.debug("✓ Graph token obtained and cached")
                 return token
             elif response.status_code == 429:
-                wait_time = 2 ** attempt * 30  # 30s, 60s, 120s
+                wait_time = 2 ** attempt * 30
                 logger.warning(f"Rate limited by Graph API. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
@@ -131,11 +126,7 @@ def get_graph_token():
     raise Exception("Failed to get Graph token after max retries")
 
 def get_sdp_token():
-    """
-    Get ServiceDesk token with caching and rate limit handling
-    Tokens are cached for 45 minutes to avoid rate limiting
-    """
-    # Check if we have a valid cached token
+    """Get ServiceDesk token with caching and rate limit handling"""
     if TOKEN_CACHE['sdp_token'] and TOKEN_CACHE['sdp_expires']:
         if datetime.now() < TOKEN_CACHE['sdp_expires']:
             logger.debug("Using cached SDP token")
@@ -155,13 +146,12 @@ def get_sdp_token():
             response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
             if response.status_code == 200:
                 token = response.json()['access_token']
-                # Cache token for 45 minutes
                 TOKEN_CACHE['sdp_token'] = token
                 TOKEN_CACHE['sdp_expires'] = datetime.now() + timedelta(minutes=45)
                 logger.debug("✓ SDP token obtained and cached")
                 return token
             elif response.status_code == 429 or 'too many requests' in response.text.lower():
-                wait_time = 2 ** attempt * 30  # 30s, 60s, 120s, 240s
+                wait_time = 2 ** attempt * 30
                 logger.warning(f"Rate limited by ServiceDesk API. Waiting {wait_time}s... (attempt {attempt+1}/{max_retries})")
                 time.sleep(wait_time)
                 continue
@@ -218,13 +208,8 @@ def discover_technicians(sdp_token):
     return technicians
 
 def fix_datetime_str(dt_str):
-    """
-    Fix Microsoft Graph datetime strings
-    Graph API returns fractional seconds with 7 digits (e.g., .0000000)
-    Python only supports up to 6 digits (.000000)
-    """
+    """Fix Microsoft Graph datetime strings"""
     dt_str = dt_str.replace('Z', '+00:00')
-    # Truncate fractional seconds to 6 digits using regex
     return re.sub(r'\.(\d{6})\d+', r'.\1', dt_str)
 
 def get_meetings(email, graph_token, date):
@@ -260,7 +245,6 @@ def get_meetings(email, graph_token, date):
                 if event.get('isAllDay'):
                     duration_minutes = WORK_HOURS_PER_DAY * 60
                 else:
-                    # Parse datetime with fixed format (handles 7 decimal places)
                     start = datetime.fromisoformat(fix_datetime_str(event['start']['dateTime']))
                     end = datetime.fromisoformat(fix_datetime_str(event['end']['dateTime']))
                     
@@ -281,13 +265,10 @@ def get_meetings(email, graph_token, date):
         logger.warning(f"Error fetching meetings for {email}: {e}")
         return {'count': 0, 'hours': 0}
 
-def safe_timestamp_to_date(value, use_utc=False):
+def safe_timestamp_to_date(value, debug=False):
     """
     Convert ServiceDesk timestamp to datetime
-    v15.0.7: Added timezone handling
-    
-    ServiceDesk stores times in UTC (milliseconds since epoch)
-    We need to convert to local timezone for proper date comparison
+    v15.0.8: Enhanced with debug logging to identify correct timezone
     """
     if not value:
         return None
@@ -300,13 +281,28 @@ def safe_timestamp_to_date(value, use_utc=False):
         # Convert milliseconds to datetime (UTC)
         dt_utc = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
         
-        # Convert to CST/CDT (UTC-6/-5)
-        # Using a fixed offset for Central Time (approximate)
+        # Try multiple timezone conversions for debugging
+        offsets = {
+            'UTC': timedelta(hours=0),
+            'CST': timedelta(hours=-6),
+            'Israel': timedelta(hours=+2),
+            'India': timedelta(hours=+5, minutes=30)
+        }
+        
+        if debug:
+            logger.info(f"  Timestamp: {value}")
+            for tz_name, offset in offsets.items():
+                dt_local = dt_utc + offset
+                logger.info(f"    {tz_name:8s}: {dt_local.strftime('%Y-%m-%d %H:%M:%S')} (date: {dt_local.date()})")
+        
+        # Use CST for now (we'll adjust based on debug output)
         central_offset = timedelta(hours=-6)
         dt_local = dt_utc + central_offset
         
         return dt_local
-    except:
+    except Exception as e:
+        if debug:
+            logger.error(f"  Error converting timestamp: {e}")
         return None
 
 def get_ticket_details(ticket_id, sdp_token):
@@ -332,15 +328,20 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
         return False
     return tech.get('name', '') == tech_name
 
-def count_closed_tickets(tech_name, sdp_token, target_date):
+def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     """
     Count tickets closed by technician on specific date
-    v15.0.7: Fixed timezone comparison
+    v15.0.8: Added debug logging
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
+    
+    if debug:
+        logger.info(f"\n{'='*60}")
+        logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
+        logger.info(f"{'='*60}")
     
     list_info = {
         "list_info": {
@@ -361,23 +362,52 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
         response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code != 200:
+            if debug:
+                logger.warning(f"API returned status {response.status_code}")
             return 0
         
         tickets = response.json().get('requests', [])
         
         if not tickets:
+            if debug:
+                logger.info("No closed tickets found")
             return 0
+        
+        if debug:
+            logger.info(f"Found {len(tickets)} closed tickets for {tech_name}")
         
         validated_tickets = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
         
+        if debug:
+            logger.info(f"Validated {len(validated_tickets)} tickets belong to {tech_name}")
+        
         if validated_tickets and 'resolved_time' in validated_tickets[0]:
             count = 0
-            for ticket in validated_tickets:
-                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-                if resolved_time and resolved_time.date() == target_date:
-                    count += 1
+            matched_tickets = []
+            
+            for ticket in validated_tickets[:20]:  # Debug first 20
+                ticket_id = ticket.get('id')
+                resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
+                
+                if resolved_time:
+                    matches = resolved_time.date() == target_date
+                    if debug and len(matched_tickets) < 5:
+                        logger.info(f"Ticket #{ticket_id}: resolved {resolved_time.strftime('%Y-%m-%d %H:%M')} - Match: {matches}")
+                    
+                    if matches:
+                        count += 1
+                        matched_tickets.append(ticket_id)
+            
+            if debug and matched_tickets:
+                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets}")
+            elif debug:
+                logger.info(f"✗ NO MATCHES for target date {target_date}")
+            
             return count
         else:
+            if debug:
+                logger.info("resolved_time not in list response, using slow path...")
+            
             def check_ticket(ticket_id):
                 details = get_ticket_details(ticket_id, sdp_token)
                 if not details:
@@ -405,7 +435,9 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
             
             return count
         
-    except:
+    except Exception as e:
+        if debug:
+            logger.error(f"Error counting tickets: {e}")
         return 0
 
 def get_active_tickets(tech_name, sdp_token):
@@ -463,10 +495,10 @@ def calculate_performance(meetings, tickets_closed, active_tickets):
         'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1)
     }
 
-def process_technician(tech_name, tech_email, graph_token, sdp_token, target_date):
+def process_technician(tech_name, tech_email, graph_token, sdp_token, target_date, debug=False):
     """Process single technician's data"""
     meetings = get_meetings(tech_email, graph_token, target_date)
-    closed = count_closed_tickets(tech_name, sdp_token, target_date.date())
+    closed = count_closed_tickets(tech_name, sdp_token, target_date.date(), debug=debug)
     active = get_active_tickets(tech_name, sdp_token)
     performance = calculate_performance(meetings, closed, active)
     
@@ -583,14 +615,10 @@ def save_progress(progress):
     with open(PROGRESS_FILE, 'w') as f:
         json.dump(progress, f, indent=2)
 
-def process_single_date(target_date, technicians):
-    """
-    Process all technicians for a single date
-    Uses cached tokens to avoid rate limiting
-    """
+def process_single_date(target_date, technicians, debug=False):
+    """Process all technicians for a single date"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
-    # GET TOKENS (will use cache if available)
     try:
         graph_token = get_graph_token()
         sdp_token = get_sdp_token()
@@ -600,30 +628,20 @@ def process_single_date(target_date, technicians):
     
     tech_data = {}
     
-    with ThreadPoolExecutor(max_workers=PARALLEL_TECHNICIANS) as executor:
-        futures = {
-            executor.submit(
-                process_technician,
-                tech_name,
-                tech_email,
-                graph_token,
-                sdp_token,
-                target_date
-            ): tech_name
-            for tech_name, tech_email in technicians.items()
-        }
-        
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                tech_data[result['name']] = {
-                    'meetings': result['meetings'],
-                    'tickets': result['tickets'],
-                    'performance': result['performance']
-                }
-            except Exception as e:
-                tech_name = futures[future]
-                logger.error(f"Failed to process {tech_name}: {e}")
+    # Process technicians
+    for tech_name, tech_email in technicians.items():
+        try:
+            result = process_technician(tech_name, tech_email, graph_token, sdp_token, target_date, debug=debug)
+            tech_data[result['name']] = {
+                'meetings': result['meetings'],
+                'tickets': result['tickets'],
+                'performance': result['performance']
+            }
+            # Only debug first 2 technicians
+            if debug and len(tech_data) >= 2:
+                debug = False
+        except Exception as e:
+            logger.error(f"Failed to process {tech_name}: {e}")
     
     # Display results
     print()
@@ -639,7 +657,6 @@ def process_single_date(target_date, technicians):
     
     print()
     
-    # Save and upload
     filename = save_to_file(tech_data, target_date)
     uploaded = upload_to_dust(tech_data, target_date)
     
@@ -653,14 +670,14 @@ def main():
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging for first date')
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.7")
+    print("PERFORMANCE DATA BACKFILL v15.0.8")
     print("="*70)
     print()
     
-    # Interactive mode if no arguments provided
     if not args.days and not args.start_date:
         print("Choose backfill mode:")
         print("  1. Backfill last N days")
@@ -681,7 +698,6 @@ def main():
         
         print()
     
-    # Get initial tokens to discover technicians
     try:
         logger.info("Getting initial tokens...")
         graph_token = get_graph_token()
@@ -692,7 +708,6 @@ def main():
         logger.error("If rate limited, please wait 10 minutes and try again.")
         sys.exit(1)
     
-    # Discover technicians
     try:
         logger.info("Discovering technicians...")
         technicians = discover_technicians(sdp_token)
@@ -706,9 +721,7 @@ def main():
         logger.error("No technicians found")
         sys.exit(1)
     
-    # Build date list
     if args.start_date:
-        # CLEAN DATE STRINGS
         args.start_date = clean_date_string(args.start_date)
         args.end_date = clean_date_string(args.end_date)
         
@@ -731,7 +744,6 @@ def main():
         dates = [(datetime.now() - timedelta(days=i)) for i in range(1, days + 1)]
         dates.reverse()
     
-    # Load progress
     progress = load_progress()
     completed_dates = {d for d in progress['completed']}
     dates_to_process = [d for d in dates if d.strftime('%Y-%m-%d') not in completed_dates]
@@ -744,27 +756,24 @@ def main():
     if completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
     
-    # Only prompt for confirmation if running interactively (not in CI/CD)
     if len(dates_to_process) > 5:
         if sys.stdin.isatty():
-            # Interactive mode - ask for confirmation
             confirm = input(f"\nProcess {len(dates_to_process)} dates? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
                 print("Cancelled.")
                 return
         else:
-            # Automated mode (GitHub Actions, etc.) - proceed without prompt
             logger.info(f"Automated mode: Proceeding with {len(dates_to_process)} dates")
     
     print()
     
-    # Process dates - tokens cached and reused
     start_time = time.time()
     
     for i, date in enumerate(dates_to_process, 1):
         try:
-            # Process date (uses cached tokens)
-            process_single_date(date, technicians)
+            # Enable debug for first date only
+            debug_mode = args.debug and i == 1
+            process_single_date(date, technicians, debug=debug_mode)
             progress['completed'].append(date.strftime('%Y-%m-%d'))
             save_progress(progress)
             
@@ -776,7 +785,6 @@ def main():
             print(f"Progress: [{i}/{len(dates_to_process)}] ({i/len(dates_to_process)*100:.0f}%) | Elapsed: {elapsed/60:.1f} min | ETA: {eta/60:.1f} min")
             print()
             
-            # Small delay between dates
             if i < len(dates_to_process):
                 time.sleep(3)
             
@@ -785,7 +793,6 @@ def main():
             progress['failed'].append(date.strftime('%Y-%m-%d'))
             save_progress(progress)
     
-    # Summary
     total_time = time.time() - start_time
     print()
     print("="*70)
