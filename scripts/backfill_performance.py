@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.0.3
+Performance Data Backfill Script v15.0.4
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Fixed: Automated mode detection for CI/CD environments
+Fixed: Token refresh for each date to prevent expiration
 """
 
 import os
@@ -75,7 +75,6 @@ logger = logging.getLogger(__name__)
 
 def get_graph_token():
     """Get Microsoft Graph token"""
-    logger.info("Getting Graph token...")
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         'client_id': CLIENT_ID,
@@ -87,7 +86,6 @@ def get_graph_token():
     try:
         response = requests.post(url, data=data, timeout=30)
         if response.status_code == 200:
-            logger.info("✓ Graph token obtained")
             return response.json()['access_token']
         else:
             raise Exception(f"Graph token failed: {response.text[:200]}")
@@ -96,7 +94,6 @@ def get_graph_token():
 
 def get_sdp_token():
     """Get ServiceDesk token"""
-    logger.info("Getting ServiceDesk token...")
     payload = {
         'client_id': SDP_CLIENT_ID,
         'client_secret': SDP_CLIENT_SECRET,
@@ -107,7 +104,6 @@ def get_sdp_token():
     try:
         response = requests.post(ZOHO_TOKEN_URL, data=payload, timeout=30)
         if response.status_code == 200:
-            logger.info("✓ ServiceDesk token obtained")
             return response.json()['access_token']
         else:
             raise Exception(f"SDP token failed: {response.text[:200]}")
@@ -196,7 +192,8 @@ def get_meetings(email, graph_token, date):
             
             total_minutes = min(total_minutes, WORK_HOURS_PER_DAY * 60)
             return {'count': count, 'hours': round(total_minutes / 60, 2)}
-    except:
+    except Exception as e:
+        logger.warning(f"Error fetching meetings for {email}: {e}")
         return {'count': 0, 'hours': 0}
 
 def safe_timestamp_to_date(value):
@@ -483,9 +480,21 @@ def save_progress(progress):
     with open(PROGRESS_FILE, 'w') as f:
         json.dump(progress, f, indent=2)
 
-def process_single_date(target_date, technicians, graph_token, sdp_token):
-    """Process all technicians for a single date"""
+def process_single_date(target_date, technicians):
+    """
+    Process all technicians for a single date
+    v15.0.4: Gets fresh tokens for each date to prevent expiration
+    """
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
+    
+    # GET FRESH TOKENS FOR THIS DATE
+    try:
+        logger.debug("Getting fresh tokens...")
+        graph_token = get_graph_token()
+        sdp_token = get_sdp_token()
+    except Exception as e:
+        logger.error(f"Failed to get tokens for {target_date.strftime('%Y-%m-%d')}: {e}")
+        raise
     
     tech_data = {}
     
@@ -545,7 +554,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.0.3")
+    print("PERFORMANCE DATA BACKFILL v15.0.4")
     print("="*70)
     print()
     
@@ -570,10 +579,12 @@ def main():
         
         print()
     
-    # Get tokens
+    # Get initial tokens to discover technicians
     try:
+        logger.info("Getting initial tokens...")
         graph_token = get_graph_token()
         sdp_token = get_sdp_token()
+        logger.info("✓ Tokens obtained")
     except Exception as e:
         logger.error(f"Failed to get tokens: {e}")
         sys.exit(1)
@@ -644,12 +655,13 @@ def main():
     
     print()
     
-    # Process dates
+    # Process dates - tokens refreshed inside process_single_date
     start_time = time.time()
     
     for i, date in enumerate(dates_to_process, 1):
         try:
-            process_single_date(date, technicians, graph_token, sdp_token)
+            # Call without tokens - function will get fresh ones for each date
+            process_single_date(date, technicians)
             progress['completed'].append(date.strftime('%Y-%m-%d'))
             save_progress(progress)
             
