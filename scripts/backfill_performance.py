@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v16.0.0 - TICKET BREAKDOWN ENHANCEMENT
+Performance Data Backfill Script v16.0.1 - TICKET BREAKDOWN ENHANCEMENT
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
 Azure AD profile integration (job title, department, location)
 Role-based performance scoring with job title multipliers
-NEW v16.0.0: Detailed ticket breakdown (Open, Waiting, On Hold)
+v16.0.0: Detailed ticket breakdown (Open, Waiting, On Hold)
+v16.0.1: Fixed - properly handles closed/resolved status tickets
 Optimized: Smart pagination + parallel processing
 """
 
@@ -457,7 +458,8 @@ def count_closed_tickets(tech_name, sdp_token, target_date):
 def get_active_tickets_breakdown(tech_name, sdp_token):
     """
     Get detailed breakdown of active tickets by status category
-    NEW v16.0.0: Returns dict with open, waiting, on_hold, total_active, cancelled counts
+    v16.0.0: Returns dict with open, waiting, on_hold, total_active, cancelled counts
+    v16.0.1: FIXED - properly handles closed/resolved status tickets
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
@@ -468,19 +470,21 @@ def get_active_tickets_breakdown(tech_name, sdp_token):
     open_statuses = ['open', 'in progress', 'in-progress', 'assigned', 'reopened', 'new']
     waiting_statuses = ['waiting', 'waiting on customer', 'pending', 'awaiting', 'pending customer', 'awaiting customer', 'awaiting response']
     on_hold_statuses = ['on hold', 'on-hold', 'paused', 'suspended', 'hold']
+    closed_statuses = ['closed', 'resolved', 'completed', 'done']
     cancelled_statuses = ['cancelled', 'canceled', 'rejected', 'declined']
     
     # Initialize counters
     open_count = 0
     waiting_count = 0
     on_hold_count = 0
+    closed_count = 0
     cancelled_count = 0
     other_count = 0
     
     # Track unknown statuses for debugging
     unknown_statuses = set()
     
-    # Fetch all non-closed tickets
+    # Fetch all non-closed tickets (API filter may miss some resolved tickets)
     list_info = {
         "list_info": {
             "row_count": 250,
@@ -529,20 +533,25 @@ def get_active_tickets_breakdown(tech_name, sdp_token):
                 elif any(s in status for s in cancelled_statuses):
                     cancelled_count += 1
                     categorized = True
+                elif any(s in status for s in closed_statuses):
+                    # FIXED v16.0.1: Handle closed/resolved tickets that slip through API filter
+                    # Don't count in active totals
+                    closed_count += 1
+                    categorized = True
                 
                 if not categorized:
                     # Unknown status - count as "other" and log
                     other_count += 1
                     unknown_statuses.add(status)
             
-            # Log unknown statuses if any
+            # Log unknown statuses if any (but not closed/resolved anymore)
             if unknown_statuses:
                 logger.warning(f"{tech_name}: Unknown statuses found: {unknown_statuses}")
                 
     except Exception as e:
         logger.warning(f"Error getting ticket breakdown for {tech_name}: {e}")
     
-    # Calculate total active (everything except cancelled)
+    # Calculate total active (everything except closed and cancelled)
     total_active = open_count + waiting_count + on_hold_count + other_count
     
     return {
@@ -551,6 +560,7 @@ def get_active_tickets_breakdown(tech_name, sdp_token):
         'on_hold': on_hold_count,
         'total_active': total_active,
         'cancelled': cancelled_count,
+        'closed': closed_count,  # Track but don't include in total_active
         'other': other_count
     }
 
@@ -674,7 +684,7 @@ def calculate_performance(meetings, tickets_closed, ticket_breakdown, job_title=
         'role_multiplier': multiplier
     }
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
-    """Process single technician's data - v16.0.0 with ticket breakdown"""
+    """Process single technician's data - v16.0.1"""
     # Handle both dict and string formats
     if isinstance(tech_info, dict):
         tech_email = tech_info['email']
@@ -708,6 +718,7 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
             'on_hold': ticket_breakdown['on_hold'],
             'total_active': ticket_breakdown['total_active'],
             'cancelled': ticket_breakdown['cancelled'],
+            'closed': ticket_breakdown.get('closed', 0),
             'other': ticket_breakdown.get('other', 0)
         },
         'performance': performance
@@ -715,7 +726,7 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
 
 
 def save_to_file(tech_data, date):
-    """Save metrics to JSON file - v16.0.0 with ticket breakdown"""
+    """Save metrics to JSON file - v16.0.1 with ticket breakdown"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -743,7 +754,7 @@ def save_to_file(tech_data, date):
 
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust - v16.0.0 with ticket breakdown"""
+    """Upload metrics to Dust - v16.0.1 with ticket breakdown"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         return 0
     
@@ -863,7 +874,7 @@ def save_progress(progress):
 
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for a single date - v16.0.0"""
+    """Process all technicians for a single date - v16.0.1"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     try:
@@ -909,7 +920,7 @@ def process_single_date(target_date, technicians):
             except Exception as e:
                 logger.error(f"Failed to process {tech_name}: {e}")
     
-    # Display results - v16.0.0 with breakdown
+    # Display results - v16.0.1 with breakdown
     print()
     print("="*90)
     print(f"{target_date.strftime('%B %d, %Y')}")
@@ -934,7 +945,7 @@ def process_single_date(target_date, technicians):
     
     return filename
 def main():
-    """Main backfill execution - v16.0.0"""
+    """Main backfill execution - v16.0.1"""
     parser = argparse.ArgumentParser(description='Backfill performance data for date range')
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -942,7 +953,7 @@ def main():
     args = parser.parse_args()
     
     print("="*90)
-    print("PERFORMANCE DATA BACKFILL v16.0.0 (Ticket Breakdown Enhancement)")
+    print("PERFORMANCE DATA BACKFILL v16.0.1 (Ticket Breakdown + Closed Status Fix)")
     print("="*90)
     print()
     
@@ -1062,7 +1073,7 @@ def main():
     total_time = time.time() - start_time
     print()
     print("="*90)
-    print("BACKFILL COMPLETE - v16.0.0")
+    print("BACKFILL COMPLETE - v16.0.1")
     print("="*90)
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Processed: {len(dates_to_process)} dates")
@@ -1071,11 +1082,12 @@ def main():
     else:
         print("Failed: 0 dates")
     print()
-    print("NEW v16.0.0 Features:")
+    print("v16.0.1 Features:")
     print("  ✓ Ticket breakdown (Open, Waiting, On Hold)")
     print("  ✓ 'Open' count matches ServiceDesk Plus default view")
     print("  ✓ 'Total Active' tracks overall responsibility")
     print("  ✓ Performance scoring uses 'Open' count for accuracy")
+    print("  ✓ FIXED: Properly handles 'resolved' and 'closed' status tickets")
     print()
     
     if not progress['failed']:
@@ -1097,5 +1109,4 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
 
