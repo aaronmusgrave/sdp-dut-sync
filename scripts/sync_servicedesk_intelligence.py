@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus Intelligence Suite v2.7 - OPTIMIZED
-Major Performance Improvements:
-- Phase 1: Connection pooling, parallel conversations, increased batches, cached processing
-- Phase 2: API-level filtering, reduced document size, pre-calculated analytics, bounded caches
-- Expected speedup: 3-8x faster than v2.5
-- Memory: 70% reduction
-- Bandwidth: 80% reduction
+ServiceDesk Plus Intelligence Suite v2.8 - COMPLETE FIELD COVERAGE
+Major additions:
+- ALL 20 missing fields integrated
+- Asset/CI tracking
+- Source/Mode (channel analysis)
+- Impact & Urgency (priority matrix)
+- Level/Tier tracking
+- Service catalog
+- Time tracking (time_spent)
+- Resolution category
+- Closure code
+- Reopened count & status
+- Approvals
+- Tags/Labels
+- Department (requester)
+- Linked tickets
+- Attachments
+- Change/Problem links
+- First Call Resolution
+- Created by
+- Template used
+- Cost fields
+Performance: Phase 1 & 2 optimizations (3-8x faster)
 """
 
 import os
@@ -50,17 +66,17 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 DUST_API_BASE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_FOLDER_NAME}/documents"
 
-# Settings - OPTIMIZED for Phase 1 & 2
+# Settings - OPTIMIZED
 TICKETS_PER_PAGE = 100
 MAX_TICKETS = 10000
 MAX_RETRIES = 3
 MIN_PAGES_TO_CHECK = 5
-BATCH_SIZE = 50  # Increased from 25
-DUST_UPLOAD_BATCH_SIZE = 50  # Increased from 10
-MAX_PARALLEL_WORKERS = 8  # Increased from 5
-MAX_CONVERSATION_WORKERS = 5  # New: for parallel conversation fetching
+BATCH_SIZE = 50
+DUST_UPLOAD_BATCH_SIZE = 50
+MAX_PARALLEL_WORKERS = 8
+MAX_CONVERSATION_WORKERS = 5
 CHECKPOINT_FILE = 'sync_checkpoint.json'
-TOKEN_REFRESH_BUFFER_MINUTES = 10  # Proactive refresh
+TOKEN_REFRESH_BUFFER_MINUTES = 10
 
 # Status categorization
 STATUS_CATEGORIES = {
@@ -74,7 +90,7 @@ STATUS_CATEGORIES = {
 _access_token = None
 _token_expiry = None
 
-# Session with connection pooling (PHASE 1 OPTIMIZATION)
+# Session with connection pooling
 _session = None
 
 def get_session():
@@ -89,14 +105,25 @@ def get_session():
         )
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
-            pool_connections=20,  # Connection pool
-            pool_maxsize=40  # Max connections
+            pool_connections=20,
+            pool_maxsize=40
         )
         _session.mount('https://', adapter)
         _session.mount('http://', adapter)
     return _session
 
-# Bounded Cache for Memory Management (PHASE 2 OPTIMIZATION)
+# Compiled regex patterns for fast keyword extraction
+KEYWORD_PATTERNS = {
+    'access': re.compile(r'\b(cannot access|access denied|login|password|locked out|permission)\b', re.I),
+    'performance': re.compile(r'\b(slow|hanging|freeze|timeout|not responding|lag)\b', re.I),
+    'error': re.compile(r'\b(error|exception|failed|crash|bug|issue)\b', re.I),
+    'hardware': re.compile(r'\b(laptop|computer|printer|monitor|keyboard|mouse|device)\b', re.I),
+    'software': re.compile(r'\b(application|program|software|app|system)\b', re.I),
+    'network': re.compile(r'\b(network|internet|wifi|connection|vpn|offline)\b', re.I),
+    'email': re.compile(r'\b(email|outlook|mail|inbox|send|receive)\b', re.I),
+    'account': re.compile(r'\b(account|user|profile|credentials)\b', re.I)
+}
+# Bounded Cache for Memory Management
 class BoundedCache:
     """LRU cache with size limit to prevent memory bloat"""
     def __init__(self, max_size=1000):
@@ -119,18 +146,25 @@ class BoundedCache:
     def __len__(self):
         return len(self.cache)
 
-# Pre-calculated Analytics Cache (PHASE 2 OPTIMIZATION)
+# Pre-calculated Analytics Cache
 class AnalyticsCache:
     """Smart analytics cache with lazy calculation"""
     def __init__(self):
         self.raw_data = {
             'category_stats': defaultdict(lambda: {'count': 0, 'avg_resolution_days': [], 'overdue_count': 0, 'sla_breach_count': 0}),
             'technician_stats': defaultdict(lambda: {'active': 0, 'total': 0, 'avg_response_hours': []}),
-            'requester_stats': BoundedCache(max_size=5000),  # Bounded to prevent bloat
+            'requester_stats': BoundedCache(max_size=5000),
             'hourly_distribution': defaultdict(int),
             'daily_distribution': defaultdict(int),
             'issue_keywords': Counter(),
-            'sla_breach_patterns': defaultdict(lambda: {'total': 0, 'breached': 0})
+            'sla_breach_patterns': defaultdict(lambda: {'total': 0, 'breached': 0}),
+            # NEW v2.8: Additional analytics
+            'source_distribution': Counter(),
+            'department_stats': Counter(),
+            'asset_failure_rates': defaultdict(int),
+            'service_stats': Counter(),
+            'reopened_patterns': defaultdict(int),
+            'fcr_stats': {'total': 0, 'fcr': 0}
         }
         self._calculated = {}
         self._dirty = True
@@ -169,18 +203,6 @@ class AnalyticsCache:
 
 analytics_cache = AnalyticsCache()
 
-# Compiled regex patterns for fast keyword extraction (PHASE 1 OPTIMIZATION)
-KEYWORD_PATTERNS = {
-    'access': re.compile(r'\b(cannot access|access denied|login|password|locked out|permission)\b', re.I),
-    'performance': re.compile(r'\b(slow|hanging|freeze|timeout|not responding|lag)\b', re.I),
-    'error': re.compile(r'\b(error|exception|failed|crash|bug|issue)\b', re.I),
-    'hardware': re.compile(r'\b(laptop|computer|printer|monitor|keyboard|mouse|device)\b', re.I),
-    'software': re.compile(r'\b(application|program|software|app|system)\b', re.I),
-    'network': re.compile(r'\b(network|internet|wifi|connection|vpn|offline)\b', re.I),
-    'email': re.compile(r'\b(email|outlook|mail|inbox|send|receive)\b', re.I),
-    'account': re.compile(r'\b(account|user|profile|credentials)\b', re.I)
-}
-
 # Performance Monitor
 class PerformanceMonitor:
     def __init__(self):
@@ -205,7 +227,7 @@ class PerformanceMonitor:
     
     def print_report(self):
         logger.info("\n" + "="*60)
-        logger.info("📊 PERFORMANCE REPORT (v2.7 OPTIMIZED)")
+        logger.info("📊 PERFORMANCE REPORT (v2.8 COMPLETE)")
         logger.info("="*60)
         for op, times in sorted(self.timings.items()):
             if times:
@@ -256,7 +278,6 @@ class CheckpointManager:
             logger.error(f"Could not clear checkpoint: {e}")
 
 checkpoint_mgr = CheckpointManager()
-
 def validate_environment():
     """Validate all required environment variables"""
     config = {
@@ -280,7 +301,7 @@ def validate_environment():
     return config
 
 def get_access_token(force_refresh=False):
-    """Get a valid access token with proactive refresh (PHASE 1 OPTIMIZATION)"""
+    """Get a valid access token with proactive refresh"""
     global _access_token, _token_expiry
     
     # Proactive refresh if within buffer period
@@ -317,6 +338,7 @@ def get_access_token(force_refresh=False):
         raise Exception(f"Failed to get access token: {response.status_code}")
 
 def safe_get_value(obj, default=None):
+    """Extract value from ServiceDesk object"""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -333,6 +355,7 @@ def safe_get_value(obj, default=None):
         return default
 
 def safe_string(value, default=''):
+    """Safely convert to string"""
     if value is None:
         return default
     try:
@@ -341,6 +364,7 @@ def safe_string(value, default=''):
         return default
 
 def safe_get_name(obj, default='Unknown'):
+    """Extract name from ServiceDesk object"""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -348,6 +372,7 @@ def safe_get_name(obj, default='Unknown'):
     return safe_string(obj, default)
 
 def safe_get_display_value(obj, default=''):
+    """Extract display_value from ServiceDesk object"""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -355,6 +380,7 @@ def safe_get_display_value(obj, default=''):
     return safe_string(obj, default)
 
 def safe_int_conversion(value, default=None):
+    """Safely convert any value to int"""
     if value is None:
         return default
     try:
@@ -362,8 +388,70 @@ def safe_int_conversion(value, default=None):
     except (ValueError, TypeError):
         return default
 
+def safe_float_conversion(value, default=None):
+    """Safely convert any value to float"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def safe_list(obj, default=None):
+    """Safely get list from object"""
+    if default is None:
+        default = []
+    if obj is None:
+        return default
+    if isinstance(obj, list):
+        return obj
+    return default
+
+@lru_cache(maxsize=10000)
+def strip_html(html_text):
+    """Remove HTML tags and decode HTML entities - CACHED"""
+    if not html_text:
+        return ""
+    
+    try:
+        text = unescape(html_text)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    except:
+        return str(html_text)
+
+def get_display_id(details):
+    """Extract the display ID"""
+    if 'display_id' in details:
+        display_id = details['display_id']
+        if isinstance(display_id, dict):
+            return safe_string(display_id.get('display_value', display_id.get('value', details.get('id'))))
+        return safe_string(display_id)
+    
+    return safe_string(details.get('id', 'Unknown'))
+
+def get_status_category(status_lower):
+    """Determine status category from status string"""
+    for category, keywords in STATUS_CATEGORIES.items():
+        if any(kw in status_lower for kw in keywords):
+            return category
+    return 'unknown'
+
+def extract_keywords_fast(text):
+    """Extract key issue keywords - OPTIMIZED with compiled regex"""
+    if not text:
+        return []
+    
+    keywords = []
+    for category, pattern in KEYWORD_PATTERNS.items():
+        if pattern.search(text):
+            keywords.append(category)
+            analytics_cache.raw_data['issue_keywords'][category] += 1
+    
+    return keywords
 def fetch_all_tickets():
-    """Fetch tickets with API-level filtering (PHASE 2 OPTIMIZATION)"""
+    """Fetch tickets with API-level filtering"""
     with perf.time_operation('fetch_all_tickets'):
         access_token = get_access_token()
         all_tickets = []
@@ -379,7 +467,7 @@ def fetch_all_tickets():
                 logger.info(f"📊 Incremental sync: Fetching tickets updated since {last_sync_dt}")
                 incremental = True
             except:
-                logger.warning("⚠️  Invalid last sync time, performing full sync")
+                logger.warning(⚠️  Invalid last sync time, performing full sync")
                 incremental = False
         else:
             logger.info("🔄 No last sync time found - performing initial full sync")
@@ -404,7 +492,7 @@ def fetch_all_tickets():
             
             sort_field = "last_updated_time" if incremental else "created_time"
             
-            # API-LEVEL FILTERING (PHASE 2 OPTIMIZATION)
+            # API-LEVEL FILTERING
             list_info = {
                 "list_info": {
                     "row_count": TICKETS_PER_PAGE,
@@ -459,7 +547,7 @@ def fetch_all_tickets():
                         break
                     
                     start_index += TICKETS_PER_PAGE
-                    time.sleep(0.3)  # Reduced delay
+                    time.sleep(0.3)
                     
                 else:
                     logger.warning(f"  ⚠️  API returned status {response.status_code}")
@@ -490,7 +578,6 @@ def fetch_ticket_details(ticket_id, access_token):
         logger.error(f"  ⚠️  Error fetching details for {ticket_id}: {str(e)[:100]}")
         return None
 
-# PARALLEL CONVERSATION FETCHING (PHASE 1 OPTIMIZATION)
 def fetch_single_notification_detail(ticket_id, notif_id, access_token):
     """Fetch single notification detail"""
     try:
@@ -523,7 +610,7 @@ def fetch_single_notification_detail(ticket_id, notif_id, access_token):
         return None
 
 def fetch_ticket_conversations_parallel(ticket_id, access_token):
-    """Fetch ticket conversations in parallel (PHASE 1 OPTIMIZATION)"""
+    """Fetch ticket conversations in parallel"""
     try:
         with perf.time_operation('fetch_conversations'):
             session = get_session()
@@ -567,52 +654,6 @@ def fetch_ticket_conversations_parallel(ticket_id, access_token):
     except Exception as e:
         logger.error(f"  ⚠️  Error fetching conversations for {ticket_id}: {str(e)[:50]}")
         return []
-
-# CACHED TEXT PROCESSING (PHASE 1 OPTIMIZATION)
-@lru_cache(maxsize=10000)
-def strip_html(html_text):
-    """Remove HTML tags and decode HTML entities - CACHED"""
-    if not html_text:
-        return ""
-    
-    try:
-        text = unescape(html_text)
-        text = re.sub(r'<[^>]+>', '', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
-    except:
-        return str(html_text)
-
-def get_display_id(details):
-    """Extract the display ID"""
-    if 'display_id' in details:
-        display_id = details['display_id']
-        if isinstance(display_id, dict):
-            return safe_string(display_id.get('display_value', display_id.get('value', details.get('id'))))
-        return safe_string(display_id)
-    
-    return safe_string(details.get('id', 'Unknown'))
-
-def get_status_category(status_lower):
-    """Determine status category from status string"""
-    for category, keywords in STATUS_CATEGORIES.items():
-        if any(kw in status_lower for kw in keywords):
-            return category
-    return 'unknown'
-
-def extract_keywords_fast(text):
-    """Extract key issue keywords - OPTIMIZED with compiled regex (PHASE 1)"""
-    if not text:
-        return []
-    
-    keywords = []
-    for category, pattern in KEYWORD_PATTERNS.items():
-        if pattern.search(text):
-            keywords.append(category)
-            analytics_cache.raw_data['issue_keywords'][category] += 1
-    
-    return keywords
-
 def calculate_complexity_score(ticket_data, conversations, age_days):
     """Calculate ticket complexity score (0-10)"""
     score = 0
@@ -640,10 +681,14 @@ def calculate_complexity_score(ticket_data, conversations, age_days):
     if priority == 'urgent':
         score += 1
     
+    # NEW v2.8: Reopened adds complexity
+    if ticket_data.get('reopened_count', 0) > 0:
+        score += 1
+    
     return min(score, 10)
 
 def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score, requester_history, category_key):
-    """Predict likelihood of SLA breach - uses pre-calculated stats (PHASE 2)"""
+    """Predict likelihood of SLA breach - uses pre-calculated stats"""
     if hours_until_due is None or hours_until_due < 0:
         return (100, 'breached', ['Already overdue'])
     
@@ -673,7 +718,7 @@ def predict_sla_breach_likelihood(ticket_data, hours_until_due, complexity_score
         breach_score += 10
         factors.append('Moderate complexity')
     
-    # Use pre-calculated breach rate (PHASE 2 OPTIMIZATION)
+    # Use pre-calculated breach rate
     breach_rate = analytics_cache.get_category_breach_rate(category_key)
     if breach_rate > 0.3:
         breach_score += 15
@@ -816,7 +861,7 @@ def get_requester_statistics(requester_name, requester_email):
     return existing
 
 def predict_resolution_time(category, priority, complexity_score):
-    """Predict resolution time using pre-calculated averages (PHASE 2)"""
+    """Predict resolution time using pre-calculated averages"""
     # Use pre-calculated average
     avg_days = analytics_cache.get_category_avg_resolution(category)
     
@@ -834,6 +879,37 @@ def predict_resolution_time(category, priority, complexity_score):
     
     return round(predicted_days, 1)
 
+def analyze_sentiment_risk(conversations):
+    """Analyze conversation sentiment for satisfaction risk"""
+    if not conversations:
+        return 'unknown', 0
+    
+    negative_keywords = ['frustrated', 'angry', 'disappointed', 'unacceptable', 'terrible', 
+                         'urgent', 'asap', 'immediately', 'escalate', 'complaint']
+    positive_keywords = ['thank', 'appreciate', 'great', 'excellent', 'resolved', 'perfect', 'helpful']
+    
+    negative_count = 0
+    positive_count = 0
+    
+    for conv in conversations:
+        text = strip_html(conv.get('description', '')).lower()
+        negative_count += sum(1 for kw in negative_keywords if kw in text)
+        positive_count += sum(1 for kw in positive_keywords if kw in text)
+    
+    total_signals = negative_count + positive_count
+    if total_signals == 0:
+        return 'neutral', 0
+    
+    risk_score = (negative_count / total_signals) * 100
+    
+    if risk_score > 60:
+        return 'high_risk', risk_score
+    elif risk_score > 30:
+        return 'moderate_risk', risk_score
+    elif positive_count > negative_count:
+        return 'positive', risk_score
+    else:
+        return 'neutral', risk_score
 def generate_resolution_suggestions(category, keywords, similar_count=0):
     """Generate AI-powered resolution suggestions"""
     suggestions = []
@@ -884,47 +960,16 @@ def generate_resolution_suggestions(category, keywords, similar_count=0):
     if similar_count > 3:
         suggestions.append(f"📊 {similar_count} similar tickets found - review for solutions")
     
-    return suggestions[:5]  # Reduced from 7 to keep document smaller
-
-def analyze_sentiment_risk(conversations):
-    """Analyze conversation sentiment for satisfaction risk"""
-    if not conversations:
-        return 'unknown', 0
-    
-    negative_keywords = ['frustrated', 'angry', 'disappointed', 'unacceptable', 'terrible', 
-                         'urgent', 'asap', 'immediately', 'escalate', 'complaint']
-    positive_keywords = ['thank', 'appreciate', 'great', 'excellent', 'resolved', 'perfect', 'helpful']
-    
-    negative_count = 0
-    positive_count = 0
-    
-    for conv in conversations:
-        text = strip_html(conv.get('description', '')).lower()
-        negative_count += sum(1 for kw in negative_keywords if kw in text)
-        positive_count += sum(1 for kw in positive_keywords if kw in text)
-    
-    total_signals = negative_count + positive_count
-    if total_signals == 0:
-        return 'neutral', 0
-    
-    risk_score = (negative_count / total_signals) * 100
-    
-    if risk_score > 60:
-        return 'high_risk', risk_score
-    elif risk_score > 30:
-        return 'moderate_risk', risk_score
-    elif positive_count > negative_count:
-        return 'positive', risk_score
-    else:
-        return 'neutral', risk_score
+    return suggestions[:5]
 
 def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
-    """Update global analytics cache"""
+    """Update global analytics cache - v2.8 with NEW fields"""
     category = ticket_data.get('category', 'Unknown')
     technician = ticket_data.get('technician_name', 'Unassigned')
     requester_name = ticket_data.get('requester_name', 'Unknown')
     requester_email = ticket_data.get('requester_email', '')
     
+    # Existing analytics
     analytics_cache.raw_data['category_stats'][category]['count'] += 1
     if ticket_data.get('is_overdue'):
         analytics_cache.raw_data['category_stats'][category]['overdue_count'] += 1
@@ -963,41 +1008,79 @@ def update_analytics_cache(ticket_data, conversations, age_days, is_closed):
         analytics_cache.raw_data['hourly_distribution'][created_dt.hour] += 1
         analytics_cache.raw_data['daily_distribution'][created_dt.strftime('%A')] += 1
     
+    # NEW v2.8: Additional analytics
+    
+    # Source/Mode tracking
+    source = ticket_data.get('source', 'Unknown')
+    if source and source != 'Unknown':
+        analytics_cache.raw_data['source_distribution'][source] += 1
+    
+    # Department tracking
+    department = ticket_data.get('department', 'Unknown')
+    if department and department != 'Unknown':
+        analytics_cache.raw_data['department_stats'][department] += 1
+    
+    # Asset tracking (if failed/closed)
+    asset = ticket_data.get('asset', '')
+    if asset and asset != 'Unknown' and asset != '':
+        analytics_cache.raw_data['asset_failure_rates'][asset] += 1
+    
+    # Service tracking
+    service = ticket_data.get('service', '')
+    if service and service != 'Unknown' and service != '':
+        analytics_cache.raw_data['service_stats'][service] += 1
+    
+    # Reopened patterns
+    reopened_count = ticket_data.get('reopened_count', 0)
+    if reopened_count > 0:
+        analytics_cache.raw_data['reopened_patterns'][category] += 1
+    
+    # FCR tracking
+    is_fcr = ticket_data.get('is_fcr', False)
+    if is_closed:
+        analytics_cache.raw_data['fcr_stats']['total'] += 1
+        if is_fcr:
+            analytics_cache.raw_data['fcr_stats']['fcr'] += 1
+    
     # Mark analytics as dirty for recalculation
     analytics_cache.mark_dirty()
-
 def format_ticket_with_intelligence(ticket, details, conversations):
-    """Format ticket with MAXIMUM intelligence - v2.7 OPTIMIZED (PHASE 2: Reduced document size)"""
+    """Format ticket with MAXIMUM intelligence - v2.8 COMPLETE FIELD COVERAGE"""
     
     with perf.time_operation('format_ticket'):
         try:
+            # ========== BASIC FIELDS ==========
             internal_id = safe_string(ticket.get('id'))
             display_id = get_display_id(details)
             subject = safe_string(details.get('subject', 'No Subject'))
             
+            # Status
             status_obj = details.get('status', {})
             status = safe_get_name(status_obj)
             status_lower = status.lower()
             status_category = get_status_category(status_lower)
             
+            # Priority
             priority = safe_get_name(details.get('priority'))
             
+            # Requester
             requester_obj = details.get('requester', {})
             requester_name = safe_get_name(requester_obj)
             requester_email = safe_string(requester_obj.get('email_id', '') if isinstance(requester_obj, dict) else '')
             
+            # Technician
             technician_obj = details.get('technician', {})
             technician_name = safe_get_name(technician_obj, 'Unassigned')
             technician_email = safe_string(technician_obj.get('email_id', '') if isinstance(technician_obj, dict) else '')
             
+            # Classification
             category = safe_get_name(details.get('category'), 'Uncategorized')
             subcategory = safe_get_name(details.get('subcategory'), 'None')
-            
             group = safe_get_name(details.get('group'), 'Unassigned')
             site = safe_get_name(details.get('site'), 'No site')
-            
             request_type = safe_get_name(details.get('request_type'), 'Incident')
             
+            # Timestamps
             created_time_ms = safe_get_value(details.get('created_time'))
             due_by_time_ms = safe_get_value(details.get('due_by_time'))
             resolved_time_ms = safe_get_value(details.get('resolved_time'))
@@ -1007,9 +1090,11 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             due_by_time_display = safe_get_display_value(details.get('due_by_time'), 'Not set')
             resolved_time_display = safe_get_display_value(details.get('resolved_time'), 'Not resolved')
             
+            # Flags
             is_overdue = bool(details.get('is_overdue', False))
             is_escalated = bool(details.get('is_escalated', False))
             
+            # Description & Resolution
             raw_description = details.get('description', '')
             clean_description = strip_html(raw_description)
             
@@ -1020,6 +1105,160 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 if resolution_content:
                     resolution_text = strip_html(resolution_content)
             
+            # ========== NEW v2.8 FIELDS ==========
+            
+            # 1. ASSETS/CI
+            assets = safe_list(details.get('assets'))
+            asset_name = 'Unknown'
+            asset_id = None
+            if assets and len(assets) > 0:
+                asset_obj = assets[0]
+                if isinstance(asset_obj, dict):
+                    asset_name = safe_get_name(asset_obj, 'Unknown')
+                    asset_id = asset_obj.get('id')
+                else:
+                    asset_name = safe_string(asset_obj)
+            
+            # 2. SOURCE/MODE (Channel)
+            source_obj = details.get('source', {})
+            source = safe_get_name(source_obj, 'Unknown')
+            
+            mode_obj = details.get('mode', {})
+            mode = safe_get_name(mode_obj, 'Unknown')
+            
+            # 3. IMPACT & URGENCY
+            impact_obj = details.get('impact', {})
+            impact = safe_get_name(impact_obj, 'Unknown')
+            
+            urgency_obj = details.get('urgency', {})
+            urgency = safe_get_name(urgency_obj, 'Unknown')
+            
+            # 4. LEVEL/TIER
+            level_obj = details.get('level', {})
+            level = safe_get_name(level_obj, 'Unknown')
+            
+            # 5. SERVICE
+            service_obj = details.get('service', {})
+            service = safe_get_name(service_obj, 'Unknown')
+            
+            service_category_obj = details.get('service_category', {})
+            service_category = safe_get_name(service_category_obj, 'Unknown')
+            
+            # 6. TIME TRACKING
+            time_spent_obj = details.get('time_spent', {})
+            time_spent_minutes = safe_get_value(time_spent_obj, 0)
+            time_spent_hours = round(time_spent_minutes / 60, 2) if time_spent_minutes else 0
+            
+            # 7. RESOLUTION CATEGORY
+            resolution_category = 'Unknown'
+            resolution_subcategory = 'Unknown'
+            if resolution_obj and isinstance(resolution_obj, dict):
+                res_cat_obj = resolution_obj.get('resolution_category', {})
+                resolution_category = safe_get_name(res_cat_obj, 'Unknown')
+                
+                res_subcat_obj = resolution_obj.get('resolution_subcategory', {})
+                resolution_subcategory = safe_get_name(res_subcat_obj, 'Unknown')
+            
+            # 8. CLOSURE CODE
+            closure_code_obj = details.get('closure_code', {})
+            closure_code = safe_get_name(closure_code_obj, 'Unknown')
+            
+            closure_info_obj = details.get('closure_info', {})
+            closure_comments = ''
+            if closure_info_obj and isinstance(closure_info_obj, dict):
+                closure_comments = safe_string(closure_info_obj.get('closure_comments', ''))
+            
+            # 9. REOPENED COUNT
+            reopened_count = safe_int_conversion(details.get('reopened_count'), 0)
+            is_reopened = bool(details.get('is_reopened', False))
+            
+            # 10. APPROVAL STATUS
+            approval_status_obj = details.get('approval_status', {})
+            approval_status = safe_get_name(approval_status_obj, 'Not Required')
+            
+            approvals = safe_list(details.get('approvals'))
+            approval_count = len(approvals)
+            has_pending_approvals = any(
+                safe_get_name(a.get('approval_status', {})) == 'Pending' 
+                for a in approvals if isinstance(a, dict)
+            )
+            
+            # 11. TAGS
+            tags = safe_list(details.get('tags'))
+            tag_names = [safe_get_name(tag) for tag in tags if tag]
+            
+            # 12. DEPARTMENT (Requester)
+            department = 'Unknown'
+            if isinstance(requester_obj, dict):
+                dept_obj = requester_obj.get('department', {})
+                department = safe_get_name(dept_obj, 'Unknown')
+            
+            # 13. LINKED TICKETS
+            linked_requests = safe_list(details.get('linked_requests'))
+            linked_ticket_count = len(linked_requests)
+            linked_ticket_ids = [safe_string(lr.get('id')) for lr in linked_requests if isinstance(lr, dict)]
+            
+            parent_request_obj = details.get('parent_request', {})
+            parent_request_id = None
+            has_parent = False
+            if parent_request_obj and isinstance(parent_request_obj, dict):
+                parent_request_id = safe_string(parent_request_obj.get('id'))
+                has_parent = bool(parent_request_id)
+            
+            # 14. ATTACHMENTS
+            attachments = safe_list(details.get('attachments'))
+            attachment_count = len(attachments)
+            has_attachments = attachment_count > 0
+            
+            # 15. CHANGE/PROBLEM LINKS
+            associated_change_obj = details.get('change', {})
+            associated_change_id = None
+            has_change = False
+            if associated_change_obj and isinstance(associated_change_obj, dict):
+                associated_change_id = safe_string(associated_change_obj.get('id'))
+                has_change = bool(associated_change_id)
+            
+            associated_problem_obj = details.get('problem', {})
+            associated_problem_id = None
+            has_problem = False
+            if associated_problem_obj and isinstance(associated_problem_obj, dict):
+                associated_problem_id = safe_string(associated_problem_obj.get('id'))
+                has_problem = bool(associated_problem_id)
+            
+            # 16. FIRST CALL RESOLUTION
+            is_fcr = bool(details.get('is_fcr', False))
+            fcr_status_obj = details.get('fcr_status', {})
+            fcr_status = safe_get_name(fcr_status_obj, 'Unknown')
+            
+            # 17. CREATED BY (vs Requester)
+            created_by_obj = details.get('created_by', {})
+            created_by_name = safe_get_name(created_by_obj, 'Unknown')
+            created_by_email = ''
+            if isinstance(created_by_obj, dict):
+                created_by_email = safe_string(created_by_obj.get('email_id', ''))
+            
+            is_proxy_request = (created_by_name != requester_name) and (created_by_name != 'Unknown')
+            
+            # 18. TEMPLATE
+            template_obj = details.get('template', {})
+            template_name = safe_get_name(template_obj, 'None')
+            
+            # 19. SLA DETAILS (Granular)
+            sla_obj = details.get('sla', {})
+            sla_name = safe_get_name(sla_obj, 'Unknown')
+            
+            response_sla_obj = details.get('response_sla', {})
+            response_sla_name = safe_get_name(response_sla_obj, 'Unknown')
+            
+            resolution_sla_obj = details.get('resolution_sla', {})
+            resolution_sla_name = safe_get_name(resolution_sla_obj, 'Unknown')
+            
+            # 20. COST FIELDS
+            estimated_cost = safe_float_conversion(details.get('estimated_cost'), 0)
+            actual_cost = safe_float_conversion(details.get('actual_cost'), 0)
+# ========== CALCULATED FIELDS ==========
+            
+            # Status categories
             is_open = status_category == 'open'
             is_closed = status_category == 'closed'
             is_waiting = status_category == 'waiting'
@@ -1027,11 +1266,13 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             is_active = status_category in ['open', 'waiting']
             is_resolved = status_category == 'closed'
             
+            # Age calculation
             now_ms = datetime.now().timestamp() * 1000
             age_days = None
             if created_time_ms:
                 age_days = (now_ms - created_time_ms) / (1000 * 60 * 60 * 24)
             
+            # SLA status
             sla_status = 'unknown'
             hours_until_due = None
             if due_by_time_ms and is_active:
@@ -1045,9 +1286,12 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 else:
                     sla_status = 'on-track'
             
+            # Resolution time
             resolution_time_days = None
             if is_closed and created_time_ms and resolved_time_ms:
                 resolution_time_days = (resolved_time_ms - created_time_ms) / (1000 * 60 * 60 * 24)
+            
+            # ========== CONVERSATION PROCESSING ==========
             
             conversations_structured = []
             first_response_time_hours = None
@@ -1096,7 +1340,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                             'time_ms': time_ms,
                             'type': conv_type,
                             'is_public': is_public,
-                            'text': clean_text[:300]  # Reduced from 500
+                            'text': clean_text[:300]
                         })
                         
                     except Exception as e:
@@ -1104,26 +1348,42 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             
             conversation_count = len(conversations_structured)
             
+            # ========== AI INTELLIGENCE ==========
+            
+            # Keywords
             keywords = extract_keywords_fast(f"{subject} {clean_description}")
             
+            # Complexity
             complexity_score = calculate_complexity_score(
-                {'is_escalated': is_escalated, 'is_overdue': is_overdue, 'priority': priority},
+                {
+                    'is_escalated': is_escalated, 
+                    'is_overdue': is_overdue, 
+                    'priority': priority,
+                    'reopened_count': reopened_count
+                },
                 conversations_structured,
                 age_days or 0
             )
             
+            # Sentiment
             sentiment, sentiment_score = analyze_sentiment_risk(conversations)
             
+            # Predicted resolution
             predicted_resolution_days = predict_resolution_time(category, priority, complexity_score)
             
+            # Similar tickets
             similar_ticket_count = analytics_cache.raw_data['category_stats'][category]['count']
             
+            # Suggestions
             resolution_suggestions = generate_resolution_suggestions(category, keywords, similar_ticket_count)
             
+            # Requester stats
             requester_stats = get_requester_statistics(requester_name, requester_email)
             
+            # Conversation intelligence
             conv_intelligence = analyze_conversation_intelligence(conversations, created_time_ms, technician_name)
             
+            # SLA breach prediction
             category_sla_key = f"{category}_{priority.lower()}"
             
             sla_breach_likelihood = 0
@@ -1139,6 +1399,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                     category_sla_key
                 )
             
+            # Update analytics
             update_analytics_cache(
                 {
                     'category': category,
@@ -1147,19 +1408,27 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                     'created_time_ms': created_time_ms,
                     'priority': priority,
                     'requester_name': requester_name,
-                    'requester_email': requester_email
+                    'requester_email': requester_email,
+                    'source': source,
+                    'department': department,
+                    'asset': asset_name,
+                    'service': service,
+                    'reopened_count': reopened_count,
+                    'is_fcr': is_fcr
                 },
                 conversations_structured,
                 age_days,
                 is_closed
             )
             
+            # Created datetime
             created_dt = None
             if created_time_ms:
                 created_dt = datetime.fromtimestamp(created_time_ms / 1000)
+# ========== COMPLETE STRUCTURED DATA (v2.8) ==========
             
-            # COMPLETE STRUCTURED DATA
             structured_data = {
+                # Basic ticket info
                 "ticket_id": display_id,
                 "internal_id": internal_id,
                 "subject": subject,
@@ -1174,30 +1443,46 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 "is_resolved": is_resolved,
                 "priority": priority,
                 "request_type": request_type,
+                
+                # People
                 "requester_name": requester_name,
                 "requester_email": requester_email,
                 "technician_name": technician_name,
                 "technician_email": technician_email,
+                
+                # Classification
                 "group": group,
                 "site": site,
                 "category": category,
                 "subcategory": subcategory,
                 "category_path": f"{category}/{subcategory}",
+                
+                # Timestamps
                 "created_time": created_time_display,
                 "due_by_time": due_by_time_display,
                 "resolved_time": resolved_time_display,
+                
+                # Flags
                 "is_overdue": is_overdue,
                 "is_escalated": is_escalated,
+                
+                # Content
                 "description": clean_description[:1000],
                 "resolution": resolution_text[:1000] if resolution_text else "",
+                
+                # Conversations
                 "conversations": conversations_structured,
                 "conversation_count": conversation_count,
+                
+                # Time calculations
                 "age_days": round(age_days, 2) if age_days else None,
                 "sla_status": sla_status,
                 "hours_until_due": round(hours_until_due, 2) if hours_until_due else None,
                 "resolution_time_days": round(resolution_time_days, 2) if resolution_time_days else None,
                 "first_response_time_hours": round(first_response_time_hours, 2) if first_response_time_hours else None,
                 "days_since_last_activity": round(days_since_last_activity, 2) if days_since_last_activity else None,
+                
+                # AI Intelligence
                 "keywords": keywords,
                 "complexity_score": complexity_score,
                 "complexity_level": "high" if complexity_score >= 7 else "medium" if complexity_score >= 4 else "low",
@@ -1206,21 +1491,31 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 "satisfaction_risk": sentiment == 'high_risk',
                 "predicted_resolution_days": predicted_resolution_days,
                 "similar_ticket_count": similar_ticket_count,
+                
+                # Time patterns
                 "created_hour": created_dt.hour if created_dt else None,
                 "created_day_of_week": created_dt.strftime('%A') if created_dt else None,
                 "created_month": created_dt.strftime('%B') if created_dt else None,
                 "is_business_hours": (created_dt.hour >= 9 and created_dt.hour <= 17) if created_dt else None,
                 "is_weekend": (created_dt.strftime('%A') in ['Saturday', 'Sunday']) if created_dt else None,
+                
+                # Action flags
                 "needs_immediate_attention": (is_overdue and is_active and priority.lower() in ['urgent', 'high']),
                 "needs_followup": (is_active and days_since_last_activity and days_since_last_activity > 3),
+                
+                # SLA prediction
                 "sla_breach_likelihood_percent": sla_breach_likelihood,
                 "sla_breach_risk_level": sla_risk_level,
                 "sla_breach_factors": sla_risk_factors,
+                
+                # Requester analytics
                 "requester_open_tickets": requester_stats.get('open_count', 0),
                 "requester_total_tickets": requester_stats.get('total_count', 0),
                 "requester_avg_resolution_days": round(statistics.mean(requester_stats['avg_resolution_days']), 1) if requester_stats.get('avg_resolution_days') else None,
                 "is_frequent_requester": requester_stats.get('total_count', 0) > 10,
                 "is_repeat_requester": requester_stats.get('open_count', 0) > 3,
+                
+                # Conversation intelligence
                 "conversation_intelligence": conv_intelligence,
                 "awaiting_response_from": conv_intelligence['awaiting'],
                 "conversation_pattern": conv_intelligence['response_pattern'],
@@ -1228,8 +1523,109 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 "unanswered_questions": conv_intelligence['unanswered_questions'],
                 "avg_response_time_hours": conv_intelligence['avg_response_time_hours'],
                 "longest_conversation_gap_hours": conv_intelligence['longest_gap_hours'],
+                
+                # ========== NEW v2.8 FIELDS ==========
+                
+                # 1. Asset/CI
+                "asset": asset_name,
+                "asset_id": asset_id,
+                "has_asset": (asset_name != 'Unknown' and asset_name != ''),
+                
+                # 2. Source/Mode
+                "source": source,
+                "mode": mode,
+                "channel": f"{source} - {mode}" if source != 'Unknown' and mode != 'Unknown' else source,
+                
+                # 3. Impact & Urgency
+                "impact": impact,
+                "urgency": urgency,
+                "priority_matrix": f"{impact}/{urgency}",
+                
+                # 4. Level/Tier
+                "level": level,
+                "tier": level,
+                
+                # 5. Service
+                "service": service,
+                "service_category": service_category,
+                "service_path": f"{service_category}/{service}" if service != 'Unknown' else service_category,
+                
+                # 6. Time Tracking
+                "time_spent_minutes": time_spent_minutes,
+                "time_spent_hours": time_spent_hours,
+                
+                # 7. Resolution Category
+                "resolution_category": resolution_category,
+                "resolution_subcategory": resolution_subcategory,
+                "resolution_classification": f"{resolution_category}/{resolution_subcategory}",
+                
+                # 8. Closure Code
+                "closure_code": closure_code,
+                "closure_comments": closure_comments,
+                
+                # 9. Reopened
+                "reopened_count": reopened_count,
+                "is_reopened": is_reopened,
+                "has_been_reopened": reopened_count > 0,
+                
+                # 10. Approvals
+                "approval_status": approval_status,
+                "approval_count": approval_count,
+                "has_approvals": approval_count > 0,
+                "has_pending_approvals": has_pending_approvals,
+                
+                # 11. Tags
+                "tags": tag_names,
+                "tag_count": len(tag_names),
+                "has_tags": len(tag_names) > 0,
+                
+                # 12. Department
+                "department": department,
+                "requester_department": department,
+                
+                # 13. Linked Tickets
+                "linked_ticket_count": linked_ticket_count,
+                "linked_ticket_ids": linked_ticket_ids,
+                "has_linked_tickets": linked_ticket_count > 0,
+                "parent_request_id": parent_request_id,
+                "has_parent": has_parent,
+                
+                # 14. Attachments
+                "attachment_count": attachment_count,
+                "has_attachments": has_attachments,
+                
+                # 15. Change/Problem Links
+                "associated_change_id": associated_change_id,
+                "has_change": has_change,
+                "associated_problem_id": associated_problem_id,
+                "has_problem": has_problem,
+                "has_itil_links": (has_change or has_problem),
+                
+                # 16. First Call Resolution
+                "is_fcr": is_fcr,
+                "fcr_status": fcr_status,
+                
+                # 17. Created By
+                "created_by_name": created_by_name,
+                "created_by_email": created_by_email,
+                "is_proxy_request": is_proxy_request,
+                
+                # 18. Template
+                "template_name": template_name,
+                "used_template": (template_name != 'None' and template_name != 'Unknown'),
+                
+                # 19. SLA Details
+                "sla_name": sla_name,
+                "response_sla": response_sla_name,
+                "resolution_sla": resolution_sla_name,
+                
+                # 20. Cost
+                "estimated_cost": estimated_cost,
+                "actual_cost": actual_cost,
+                "has_cost_tracking": (estimated_cost > 0 or actual_cost > 0),
             }
             
+            # Add millisecond timestamps if available
             if created_time_ms:
                 structured_data["created_time_ms"] = created_time_ms
             if due_by_time_ms:
@@ -1240,8 +1636,8 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 structured_data["last_updated_time_ms"] = last_updated_time_ms
             if latest_conversation_time_ms:
                 structured_data["latest_conversation_time_ms"] = latest_conversation_time_ms
+# ========== COMPREHENSIVE DUST TAGS (v2.8) ==========
             
-            # COMPREHENSIVE DUST TAGS
             dust_tags = [
                 f"status:{status_lower.replace(' ', '-')}",
                 f"status-category:{status_category}",
@@ -1252,6 +1648,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 f"complexity:{structured_data['complexity_level']}",
             ]
             
+            # Status variations
             if status_lower in ['open', 'new', 'reopened']:
                 dust_tags.extend(['status:open', 'status:new', 'state:open', 'not-resolved'])
             elif status_lower in ['in progress', 'assigned']:
@@ -1261,11 +1658,13 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             elif 'waiting' in status_lower or 'pending' in status_lower:
                 dust_tags.extend(['status:waiting', 'status:pending', 'state:waiting'])
             
+            # People tags
             if group and group != 'Unassigned':
                 dust_tags.append(f"group:{group.lower().replace(' ', '-')}")
             if technician_name and technician_name != 'Unassigned':
                 dust_tags.append(f"technician:{technician_name.lower().replace(' ', '-')}")
             
+            # Active status tags
             if is_active:
                 dust_tags.extend(['not-closed', 'active', 'open-status', 'needs-attention'])
                 
@@ -1279,6 +1678,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             else:
                 dust_tags.append('closed-status')
             
+            # Age tags
             if age_days:
                 if age_days < 1:
                     dust_tags.append('age:new')
@@ -1291,6 +1691,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 else:
                     dust_tags.append('age:stale')
             
+            # SLA tags
             if sla_status != 'unknown':
                 dust_tags.append(f"sla:{sla_status}")
             
@@ -1299,6 +1700,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 if sla_breach_likelihood > 75:
                     dust_tags.append('high-breach-risk')
             
+            # Response tags
             if first_response_time_hours:
                 if first_response_time_hours < 1:
                     dust_tags.append('response:immediate')
@@ -1307,20 +1709,24 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 else:
                     dust_tags.append('response:delayed')
             
+            # Activity tags
             if days_since_last_activity:
                 if days_since_last_activity > 14 and is_active:
                     dust_tags.append('inactive:2-weeks')
                 elif days_since_last_activity > 7 and is_active:
                     dust_tags.append('inactive:1-week')
             
+            # Issue type tags
             for keyword in keywords:
                 dust_tags.append(f"issue-type:{keyword}")
             
+            # Sentiment tags
             if sentiment == 'high_risk':
                 dust_tags.append('satisfaction:at-risk')
             elif sentiment == 'positive':
                 dust_tags.append('satisfaction:positive')
             
+            # Conversation tags
             if conv_intelligence['awaiting'] == 'customer':
                 dust_tags.append('awaiting-customer-response')
             elif conv_intelligence['awaiting'] == 'technician':
@@ -1329,11 +1735,13 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             if conv_intelligence['unanswered_questions'] > 0:
                 dust_tags.append('has-unanswered-questions')
             
+            # Requester tags
             if requester_stats.get('open_count', 0) > 3:
                 dust_tags.append('repeat-requester')
             if requester_stats.get('total_count', 0) > 10:
                 dust_tags.append('frequent-requester')
             
+            # Time pattern tags
             if created_dt:
                 if created_dt.hour >= 9 and created_dt.hour <= 17:
                     dust_tags.append('created:business-hours')
@@ -1343,6 +1751,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 if created_dt.strftime('%A') in ['Saturday', 'Sunday']:
                     dust_tags.append('created:weekend')
             
+            # Flag tags
             if is_overdue:
                 dust_tags.append('overdue')
             if is_escalated:
@@ -1358,7 +1767,100 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             if structured_data['needs_immediate_attention']:
                 dust_tags.append('critical-action-required')
             
-            # OPTIMIZED TEXT CONTENT (PHASE 2: Reduced by 70%)
+            # ========== NEW v2.8 TAGS ==========
+            
+            # Source/Channel tags
+            if source and source != 'Unknown':
+                dust_tags.append(f"source:{source.lower().replace(' ', '-')}")
+            if mode and mode != 'Unknown':
+                dust_tags.append(f"mode:{mode.lower().replace(' ', '-')}")
+            
+            # Impact/Urgency tags
+            if impact and impact != 'Unknown':
+                dust_tags.append(f"impact:{impact.lower().replace(' ', '-')}")
+            if urgency and urgency != 'Unknown':
+                dust_tags.append(f"urgency:{urgency.lower().replace(' ', '-')}")
+            
+            # Level/Tier tags
+            if level and level != 'Unknown':
+                dust_tags.append(f"level:{level.lower().replace(' ', '-')}")
+                dust_tags.append(f"tier:{level.lower().replace(' ', '-')}")
+            
+            # Service tags
+            if service and service != 'Unknown':
+                dust_tags.append(f"service:{service.lower().replace(' ', '-')}")
+            
+            # Department tags
+            if department and department != 'Unknown':
+                dust_tags.append(f"department:{department.lower().replace(' ', '-')}")
+            
+            # Asset tags
+            if asset_name and asset_name != 'Unknown' and asset_name != '':
+                dust_tags.append(f"asset:{asset_name.lower().replace(' ', '-')[:50]}")
+                dust_tags.append('has-asset')
+            
+            # Reopened tags
+            if reopened_count > 0:
+                dust_tags.append('reopened')
+                dust_tags.append(f"reopened-count:{reopened_count}")
+            
+            # FCR tags
+            if is_fcr:
+                dust_tags.append('fcr')
+                dust_tags.append('first-call-resolution')
+            
+            # Approval tags
+            if has_approvals:
+                dust_tags.append('has-approvals')
+            if has_pending_approvals:
+                dust_tags.append('pending-approvals')
+            
+            # Attachment tags
+            if has_attachments:
+                dust_tags.append('has-attachments')
+                dust_tags.append(f"attachments:{attachment_count}")
+            
+            # Linked ticket tags
+            if has_linked_tickets:
+                dust_tags.append('has-linked-tickets')
+            if has_parent:
+                dust_tags.append('has-parent-ticket')
+            
+            # ITIL tags
+            if has_change:
+                dust_tags.append('linked-to-change')
+            if has_problem:
+                dust_tags.append('linked-to-problem')
+            if has_change or has_problem:
+                dust_tags.append('itil-linked')
+            
+            # Proxy request tags
+            if is_proxy_request:
+                dust_tags.append('proxy-request')
+                dust_tags.append('created-by-tech')
+            
+            # Template tags
+            if template_name and template_name not in ['None', 'Unknown']:
+                dust_tags.append('used-template')
+            
+            # Resolution category tags
+            if resolution_category and resolution_category != 'Unknown' and is_closed:
+                dust_tags.append(f"resolution-category:{resolution_category.lower().replace(' ', '-')}")
+            
+            # Closure code tags
+            if closure_code and closure_code != 'Unknown' and is_closed:
+                dust_tags.append(f"closure-code:{closure_code.lower().replace(' ', '-')}")
+            
+            # Cost tracking tags
+            if estimated_cost > 0 or actual_cost > 0:
+                dust_tags.append('has-cost-tracking')
+            
+            # Custom tags from ticket
+            for tag in tag_names:
+                if tag and tag not in ['', 'Unknown']:
+                    dust_tags.append(f"custom-tag:{tag.lower().replace(' ', '-')}")
+# ========== OPTIMIZED TEXT CONTENT (v2.8) ==========
+            
             status_indicator = "🔴 ACTIVE" if is_active else "✅ CLOSED"
             
             text_content = f"""# {status_indicator} - Ticket #{display_id}
@@ -1366,19 +1868,51 @@ def format_ticket_with_intelligence(ticket, details, conversations):
 {subject}
 
 **Status:** {status} ({status_category}) | **Priority:** {priority} | **Complexity:** {structured_data['complexity_level']} ({complexity_score}/10)
-**Requester:** {requester_name} | **Technician:** {technician_name}
+**Requester:** {requester_name} ({department}) | **Technician:** {technician_name}
 **Category:** {category} / {subcategory}
 **Created:** {created_time_display} | **Age:** {age_days:.1f} days if age_days else 'N/A'
 
 ## Description
 {clean_description[:500]}
 
-## AI Insights
-- **Complexity:** {structured_data['complexity_level'].upper()} ({complexity_score}/10)
-- **Predicted Resolution:** {predicted_resolution_days} days
-- **Similar Tickets:** {similar_ticket_count}
+## v2.8 New Fields
+**Source/Channel:** {source} via {mode}
+**Impact/Urgency:** {impact} / {urgency}
+**Asset:** {asset_name}
+**Service:** {service}
+**Department:** {department}
+**Level:** {level}
 """
 
+            # Add reopened info
+            if reopened_count > 0:
+                text_content += f"**Reopened:** {reopened_count} time(s)\n"
+            
+            # Add time tracking
+            if time_spent_hours > 0:
+                text_content += f"**Time Spent:** {time_spent_hours} hours\n"
+            
+            # Add linked tickets
+            if has_linked_tickets:
+                text_content += f"**Linked Tickets:** {linked_ticket_count}\n"
+            
+            # Add approvals
+            if has_approvals:
+                text_content += f"**Approvals:** {approval_count} ({approval_status})\n"
+            
+            # Add attachments
+            if has_attachments:
+                text_content += f"**Attachments:** {attachment_count}\n"
+            
+            # Add FCR
+            if is_fcr:
+                text_content += f"**First Call Resolution:** Yes\n"
+            
+            text_content += "\n## AI Insights\n"
+            text_content += f"- **Complexity:** {structured_data['complexity_level'].upper()} ({complexity_score}/10)\n"
+            text_content += f"- **Predicted Resolution:** {predicted_resolution_days} days\n"
+            text_content += f"- **Similar Tickets:** {similar_ticket_count}\n"
+            
             if is_active and sla_breach_likelihood > 0:
                 text_content += f"- **SLA Breach Risk:** {sla_breach_likelihood}% ({sla_risk_level})\n"
             
@@ -1395,15 +1929,28 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                     text_content += f"{idx}. {suggestion}\n"
             
             if resolution_text:
-                text_content += f"\n## Resolution\n{resolution_text[:500]}\n"
+                text_content += f"\n## Resolution\n"
+                text_content += f"**Category:** {resolution_category} / {resolution_subcategory}\n"
+                text_content += f"**Closure Code:** {closure_code}\n"
+                text_content += f"{resolution_text[:500]}\n"
             
             # Add conversation summaries (not full text)
             if conversations_structured:
                 text_content += f"\n## Conversations ({len(conversations_structured)})\n"
-                for idx, conv in enumerate(conversations_structured[:5], 1):  # Only first 5
+                for idx, conv in enumerate(conversations_structured[:5], 1):
                     text_content += f"{idx}. {conv['sender']} ({conv['time']}): {conv['text'][:100]}...\n"
             
+            # Add ITIL links
+            if has_change or has_problem:
+                text_content += f"\n## ITIL Links\n"
+                if has_change:
+                    text_content += f"- **Change:** {associated_change_id}\n"
+                if has_problem:
+                    text_content += f"- **Problem:** {associated_problem_id}\n"
+            
             timestamp = last_updated_time_ms if last_updated_time_ms else int(time.time() * 1000)
+            
+            # ========== RETURN DOCUMENT ==========
             
             return {
                 "document_id": f"ticket-{internal_id}",
@@ -1417,6 +1964,8 @@ def format_ticket_with_intelligence(ticket, details, conversations):
         except Exception as e:
             logger.error(f"Format error for ticket: {str(e)[:100]}")
             return None
+
+# ========== UPLOAD FUNCTIONS ==========
 
 def upload_to_dust(document):
     """Upload single document to Dust"""
@@ -1438,7 +1987,7 @@ def upload_to_dust(document):
             
             return False
     except Exception as e:
-        logger.error(f"  ⚠️  Upload error: {str(e)[:50]}")
+        logger.error(f" ⚠️  Upload error: {str(e)[:50]}")
         return False
 
 def upload_batch_to_dust(documents, max_workers=MAX_PARALLEL_WORKERS):
@@ -1461,19 +2010,40 @@ def upload_batch_to_dust(documents, max_workers=MAX_PARALLEL_WORKERS):
                 logger.error("  ⏱️  Batch upload timed out")
         
         return success
+# ========== ANALYTICS REPORTING ==========
 
 def save_analytics_report():
-    """Save analytics cache to JSON"""
+    """Save analytics cache to JSON - v2.8 with NEW fields"""
     try:
+        # Calculate FCR rate
+        fcr_rate = 0
+        if analytics_cache.raw_data['fcr_stats']['total'] > 0:
+            fcr_rate = (analytics_cache.raw_data['fcr_stats']['fcr'] / analytics_cache.raw_data['fcr_stats']['total']) * 100
+        
         report = {
             'generated_at': datetime.now().isoformat(),
+            'version': 'v2.8 - Complete Field Coverage',
+            
+            # Existing analytics
             'category_statistics': dict(analytics_cache.raw_data['category_stats']),
             'technician_statistics': dict(analytics_cache.raw_data['technician_stats']),
             'requester_statistics_count': len(analytics_cache.raw_data['requester_stats']),
             'sla_breach_patterns': dict(analytics_cache.raw_data['sla_breach_patterns']),
             'hourly_distribution': dict(analytics_cache.raw_data['hourly_distribution']),
             'daily_distribution': dict(analytics_cache.raw_data['daily_distribution']),
-            'top_issue_keywords': dict(analytics_cache.raw_data['issue_keywords'].most_common(20))
+            'top_issue_keywords': dict(analytics_cache.raw_data['issue_keywords'].most_common(20)),
+            
+            # NEW v2.8 analytics
+            'source_distribution': dict(analytics_cache.raw_data['source_distribution']),
+            'department_statistics': dict(analytics_cache.raw_data['department_stats'].most_common(10)),
+            'asset_failure_rates': dict(analytics_cache.raw_data['asset_failure_rates'].most_common(20)),
+            'service_statistics': dict(analytics_cache.raw_data['service_stats'].most_common(10)),
+            'reopened_patterns': dict(analytics_cache.raw_data['reopened_patterns']),
+            'fcr_statistics': {
+                'total_closed': analytics_cache.raw_data['fcr_stats']['total'],
+                'fcr_count': analytics_cache.raw_data['fcr_stats']['fcr'],
+                'fcr_rate_percent': round(fcr_rate, 1)
+            }
         }
         
         filename = f"analytics_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -1486,9 +2056,9 @@ def save_analytics_report():
         logger.error(f"Could not save analytics report: {e}")
 
 def print_analytics_summary():
-    """Print analytics summary"""
+    """Print analytics summary - v2.8 with NEW insights"""
     logger.info("\n" + "="*60)
-    logger.info("📊 ANALYTICS SUMMARY (v2.7 OPTIMIZED)")
+    logger.info("📊 ANALYTICS SUMMARY (v2.8 COMPLETE)")
     logger.info("="*60)
     
     logger.info("\n🏆 Top Categories:")
@@ -1518,25 +2088,69 @@ def print_analytics_summary():
     for keyword, count in analytics_cache.raw_data['issue_keywords'].most_common(5):
         logger.info(f"  {keyword}: {count} tickets")
     
+    # NEW v2.8 analytics
+    logger.info("\n📱 Top Channels:")
+    for source, count in analytics_cache.raw_data['source_distribution'].most_common(5):
+        logger.info(f"  {source}: {count} tickets")
+    
+    logger.info("\n🏢 Top Departments:")
+    for dept, count in analytics_cache.raw_data['department_stats'].most_common(5):
+        logger.info(f"  {dept}: {count} tickets")
+    
+    logger.info("\n💻 Top Asset Failures:")
+    for asset, count in analytics_cache.raw_data['asset_failure_rates'].most_common(5):
+        if asset and asset != 'Unknown':
+            logger.info(f"  {asset}: {count} issues")
+    
+    logger.info("\n🔁 Reopened Tickets by Category:")
+    for cat, count in sorted(analytics_cache.raw_data['reopened_patterns'].items(), 
+                            key=lambda x: x[1], reverse=True)[:5]:
+        logger.info(f"  {cat}: {count} reopened")
+    
+    # FCR Rate
+    fcr_stats = analytics_cache.raw_data['fcr_stats']
+    if fcr_stats['total'] > 0:
+        fcr_rate = (fcr_stats['fcr'] / fcr_stats['total']) * 100
+        logger.info(f"\n✅ First Call Resolution Rate: {fcr_rate:.1f}% ({fcr_stats['fcr']}/{fcr_stats['total']})")
+    
     logger.info("="*60 + "\n")
+# ========== MAIN EXECUTION ==========
 
 def main():
     logger.info("=" * 60)
-    logger.info(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.7 - OPTIMIZED")
+    logger.info(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.8 - COMPLETE")
     logger.info(f"Starting at {datetime.now()}")
     logger.info("=" * 60)
-    logger.info("✨ v2.7 PERFORMANCE OPTIMIZATIONS:")
-    logger.info("   PHASE 1:")
+    logger.info("✨ v2.8 COMPLETE FIELD COVERAGE:")
+    logger.info("   ALL 20 MISSING FIELDS INTEGRATED:")
+    logger.info("   • Assets/CI tracking")
+    logger.info("   • Source/Mode (channel analysis)")
+    logger.info("   • Impact & Urgency (priority matrix)")
+    logger.info("   • Level/Tier tracking")
+    logger.info("   • Service catalog")
+    logger.info("   • Time tracking")
+    logger.info("   • Resolution category")
+    logger.info("   • Closure code")
+    logger.info("   • Reopened count")
+    logger.info("   • Approvals")
+    logger.info("   • Tags/Labels")
+    logger.info("   • Department")
+    logger.info("   • Linked tickets")
+    logger.info("   • Attachments")
+    logger.info("   • Change/Problem links")
+    logger.info("   • First Call Resolution")
+    logger.info("   • Created by")
+    logger.info("   • Template")
+    logger.info("   • SLA details")
+    logger.info("   • Cost tracking")
+    logger.info("")
+    logger.info("   PERFORMANCE OPTIMIZATIONS:")
     logger.info("   • Connection pooling (20 connections)")
-    logger.info("   • Parallel conversation fetching (5x faster)")
-    logger.info("   • Increased batch sizes (50 tickets)")
-    logger.info("   • Cached text processing (LRU cache)")
-    logger.info("   PHASE 2:")
-    logger.info("   • API-level incremental filtering")
-    logger.info("   • Reduced document size (70% smaller)")
+    logger.info("   • Parallel conversation fetching")
+    logger.info("   • API-level filtering")
+    logger.info("   • Cached processing")
     logger.info("   • Pre-calculated analytics")
-    logger.info("   • Bounded memory caches (5K requesters max)")
-    logger.info("   Expected: 3-8x faster execution")
+    logger.info("   • Bounded memory caches")
     logger.info("")
     
     try:
@@ -1553,7 +2167,7 @@ def main():
         if processed_ids:
             original_count = len(tickets)
             tickets = [t for t in tickets if t.get('id') not in processed_ids]
-            logger.info(f"ℹ️  Resuming: {len(processed_ids)} already processed, {len(tickets)} remaining")
+            logger.info(fℹ️  Resuming: {len(processed_ids)} already processed, {len(tickets)} remaining")
         
         logger.info(f"\nTotal tickets to process: {len(tickets)}\n")
         
@@ -1575,6 +2189,13 @@ def main():
         high_breach_risk_count = 0
         awaiting_customer_count = 0
         awaiting_tech_count = 0
+        
+        # NEW v2.8 counters
+        with_asset_count = 0
+        reopened_count_total = 0
+        fcr_count = 0
+        with_approvals_count = 0
+        linked_tickets_count = 0
         
         batch_size = BATCH_SIZE
         document_batch = []
@@ -1619,6 +2240,8 @@ def main():
                     
                     if document:
                         structured = document.get('structured_data', {})
+                        
+                        # Existing counters
                         if structured.get('complexity_score', 0) >= 7:
                             high_complexity_count += 1
                         if structured.get('satisfaction_risk'):
@@ -1629,6 +2252,18 @@ def main():
                             awaiting_customer_count += 1
                         elif structured.get('awaiting_response_from') == 'technician':
                             awaiting_tech_count += 1
+                        
+                        # NEW v2.8 counters
+                        if structured.get('has_asset'):
+                            with_asset_count += 1
+                        if structured.get('reopened_count', 0) > 0:
+                            reopened_count_total += 1
+                        if structured.get('is_fcr'):
+                            fcr_count += 1
+                        if structured.get('has_approvals'):
+                            with_approvals_count += 1
+                        if structured.get('has_linked_tickets'):
+                            linked_tickets_count += 1
                         
                         document_batch.append(document)
                         processed_ids.add(ticket_id)
@@ -1659,7 +2294,7 @@ def main():
                     checkpoint_mgr.save(processed_ids, success_count, error_count)
                     
                     if idx % 250 == 0:
-                        access_token = get_access_token(force_refresh=False)  # Proactive refresh if needed
+                        access_token = get_access_token(force_refresh=False)
         
         if document_batch:
             batch_success = upload_batch_to_dust(document_batch)
@@ -1667,7 +2302,8 @@ def main():
             logger.info(f"  ✓ Final batch uploaded: {batch_success} documents")
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"✅ INTELLIGENCE SYNC COMPLETED (v2.7 OPTIMIZED)")
+        logger.info(f"✅ INTELLIGENCE SYNC COMPLETED (v2.8 COMPLETE)")
+        logger.info(f"{'='*60}")
         logger.info(f"  Total Processed: {success_count}/{len(tickets)}")
         logger.info(f"  Active Tickets: {active_count}")
         logger.info(f"  Closed Tickets: {closed_count}")
@@ -1677,6 +2313,14 @@ def main():
         logger.info(f"  High SLA Breach Risk: {high_breach_risk_count}")
         logger.info(f"  Awaiting Customer: {awaiting_customer_count}")
         logger.info(f"  Awaiting Technician: {awaiting_tech_count}")
+        logger.info(f"")
+        logger.info(f"  NEW v2.8 METRICS:")
+        logger.info(f"  With Assets: {with_asset_count}")
+        logger.info(f"  Reopened Tickets: {reopened_count_total}")
+        logger.info(f"  First Call Resolution: {fcr_count}")
+        logger.info(f"  With Approvals: {with_approvals_count}")
+        logger.info(f"  Linked Tickets: {linked_tickets_count}")
+        logger.info(f"")
         logger.info(f"  Errors/Skipped: {error_count}")
         logger.info(f"  Finished: {datetime.now()}")
         logger.info(f"{'='*60}")
@@ -1693,16 +2337,15 @@ def main():
         
         checkpoint_mgr.clear()
         
-        logger.info("\n🎯 v2.7 Optimizations Active:")
+        logger.info("\n🎯 v2.8 Features Active:")
+        logger.info("  ✓ ALL 20 additional fields captured")
+        logger.info("  ✓ Complete field coverage (48 total fields)")
         logger.info("  ✓ Connection pooling (20 connections)")
-        logger.info("  ✓ Parallel conversation fetching (5 workers)")
-        logger.info("  ✓ Increased batch sizes (50 tickets, 50 uploads)")
-        logger.info("  ✓ Cached HTML stripping (LRU 10K)")
-        logger.info("  ✓ API-level filtering (server-side)")
-        logger.info("  ✓ Reduced document size (70% smaller)")
+        logger.info("  ✓ Parallel conversation fetching")
+        logger.info("  ✓ API-level filtering")
         logger.info("  ✓ Pre-calculated analytics")
-        logger.info("  ✓ Bounded memory caches (5K max)")
-        logger.info("  ✓ Proactive token refresh")
+        logger.info("  ✓ Bounded memory caches")
+        logger.info("  ✓ Enhanced analytics reporting")
         logger.info("")
         
         perf.print_report()
@@ -1716,3 +2359,11 @@ if __name__ == "__main__":
         logger.error(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+
+
+
+
+
+
+
+
