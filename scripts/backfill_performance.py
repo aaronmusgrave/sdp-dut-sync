@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.1.6
+Performance Data Backfill Script v15.2.1
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
-Optimized: Smart pagination + parallel processing (removed unsupported fields param)
+Azure AD profile integration (job title, department, location)
+Optimized: Smart pagination + parallel processing
 """
 
 import os
@@ -16,7 +17,6 @@ import argparse
 import re
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 
 # Configuration
 WORK_HOURS_PER_DAY = 8
@@ -32,10 +32,6 @@ TOKEN_CACHE = {
     'sdp_token': None,
     'sdp_expires': None
 }
-
-# Debug tracking (thread-safe)
-debug_lock = Lock()
-debug_counter = {'count': 0}
 
 # Credential cleaning
 def clean_credential(value):
@@ -91,10 +87,8 @@ def get_graph_token():
     """Get Microsoft Graph token with caching and rate limit handling"""
     if TOKEN_CACHE['graph_token'] and TOKEN_CACHE['graph_expires']:
         if datetime.now() < TOKEN_CACHE['graph_expires']:
-            logger.debug("Using cached Graph token")
             return TOKEN_CACHE['graph_token']
     
-    logger.debug("Requesting new Graph token...")
     url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         'client_id': CLIENT_ID,
@@ -111,7 +105,6 @@ def get_graph_token():
                 token = response.json()['access_token']
                 TOKEN_CACHE['graph_token'] = token
                 TOKEN_CACHE['graph_expires'] = datetime.now() + timedelta(minutes=45)
-                logger.debug("✓ Graph token obtained and cached")
                 return token
             elif response.status_code == 429:
                 wait_time = 2 ** attempt * 30
@@ -134,10 +127,8 @@ def get_sdp_token():
     """Get ServiceDesk token with caching and rate limit handling"""
     if TOKEN_CACHE['sdp_token'] and TOKEN_CACHE['sdp_expires']:
         if datetime.now() < TOKEN_CACHE['sdp_expires']:
-            logger.debug("Using cached SDP token")
             return TOKEN_CACHE['sdp_token']
     
-    logger.debug("Requesting new SDP token...")
     payload = {
         'client_id': SDP_CLIENT_ID,
         'client_secret': SDP_CLIENT_SECRET,
@@ -153,7 +144,6 @@ def get_sdp_token():
                 token = response.json()['access_token']
                 TOKEN_CACHE['sdp_token'] = token
                 TOKEN_CACHE['sdp_expires'] = datetime.now() + timedelta(minutes=45)
-                logger.debug("✓ SDP token obtained and cached")
                 return token
             elif response.status_code == 429 or 'too many requests' in response.text.lower():
                 wait_time = 2 ** attempt * 30
@@ -178,8 +168,38 @@ def get_sdp_token():
     
     raise Exception("Failed to get SDP token after max retries. Please wait 10 minutes and try again.")
 
-def discover_technicians(sdp_token):
-    """Find active technicians"""
+def get_azure_profile(email, graph_token):
+    """Fetch user profile from Azure AD including job title"""
+    if not email:
+        return None
+    
+    url = f"https://graph.microsoft.com/v1.0/users/{email}"
+    headers = {
+        'Authorization': f'Bearer {graph_token}',
+        'ConsistencyLevel': 'eventual'
+    }
+    params = {
+        '\$select': 'displayName,jobTitle,department,officeLocation,mail,mobilePhone,businessPhones'
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code == 200:
+            profile = response.json()
+            return {
+                'job_title': profile.get('jobTitle'),
+                'department': profile.get('department'),
+                'office_location': profile.get('officeLocation'),
+                'mobile_phone': profile.get('mobilePhone'),
+                'business_phones': profile.get('businessPhones', [])
+            }
+    except Exception as e:
+        logger.warning(f"Error fetching Azure profile for {email}: {e}")
+    
+    return None
+
+def discover_technicians(sdp_token, graph_token):
+    """Find active technicians and enrich with Azure AD profiles"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -207,8 +227,17 @@ def discover_technicians(sdp_token):
             if tech and isinstance(tech, dict):
                 name = tech.get('name')
                 email = tech.get('email_id')
+                
                 if name and name != 'Unassigned' and name not in technicians:
-                    technicians[name] = email
+                    # Fetch Azure AD profile for job title
+                    azure_profile = get_azure_profile(email, graph_token)
+                    
+                    technicians[name] = {
+                        'email': email,
+                        'job_title': azure_profile.get('job_title') if azure_profile else None,
+                        'department': azure_profile.get('department') if azure_profile else None,
+                        'office_location': azure_profile.get('office_location') if azure_profile else None
+                    }
     
     return technicians
 
@@ -270,11 +299,8 @@ def get_meetings(email, graph_token, date):
         logger.warning(f"Error fetching meetings for {email}: {e}")
         return {'count': 0, 'hours': 0}
 
-def safe_timestamp_to_date(value, debug=False):
-    """
-    Convert ServiceDesk timestamp to datetime
-    ServiceDesk stores times in UTC milliseconds
-    """
+def safe_timestamp_to_date(value):
+    """Convert ServiceDesk timestamp to datetime (CST)"""
     if not value:
         return None
     try:
@@ -286,28 +312,12 @@ def safe_timestamp_to_date(value, debug=False):
         # Convert milliseconds to datetime (UTC)
         dt_utc = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
         
-        if debug:
-            # Show all timezone interpretations
-            offsets = {
-                'UTC': timedelta(hours=0),
-                'CST': timedelta(hours=-6),
-                'Israel': timedelta(hours=+2),
-                'India': timedelta(hours=+5, minutes=30)
-            }
-            
-            logger.info(f"  Timestamp: {value}")
-            for tz_name, offset in offsets.items():
-                dt_local = dt_utc + offset
-                logger.info(f"    {tz_name:8s}: {dt_local.strftime('%Y-%m-%d %H:%M:%S')} (date: {dt_local.date()})")
-        
-        # Use CST
+        # Convert to CST
         central_offset = timedelta(hours=-6)
         dt_local = dt_utc + central_offset
         
         return dt_local
-    except Exception as e:
-        if debug:
-            logger.error(f"  Error converting timestamp: {e}")
+    except:
         return None
 
 def get_ticket_details(ticket_id, sdp_token):
@@ -333,20 +343,12 @@ def verify_ticket_belongs_to_tech(ticket, tech_name):
         return False
     return tech.get('name', '') == tech_name
 
-def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
-    """
-    Count tickets closed by technician on specific date
-    v15.1.6: Optimized with smart pagination + parallel processing
-    """
+def count_closed_tickets(tech_name, sdp_token, target_date):
+    """Count tickets closed by technician on specific date"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
-    
-    if debug:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"DEBUG: Counting tickets for {tech_name} on {target_date}")
-        logger.info(f"{'='*60}")
     
     # Fetch closed tickets with SMART PAGINATION
     all_tickets = []
@@ -356,9 +358,6 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
     
     # Buffer zone: fetch 2 days before target to be safe
     date_buffer = target_date - timedelta(days=2)
-    
-    if debug:
-        logger.info("Fetching tickets with pagination (optimized)...")
     
     for page_num in range(1, max_pages + 1):
         list_info = {
@@ -380,19 +379,12 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             response = requests.get(url, headers=headers, params=params, timeout=30)
             
             if response.status_code != 200:
-                if debug:
-                    logger.warning(f"Page {page_num}: API returned status {response.status_code}")
                 break
             
             tickets = response.json().get('requests', [])
             
             if not tickets:
-                if debug:
-                    logger.info(f"Page {page_num}: No more tickets")
                 break
-            
-            if debug:
-                logger.info(f"Page {page_num}: Fetched {len(tickets)} tickets")
             
             # Validate tickets belong to this technician
             validated = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
@@ -409,109 +401,61 @@ def count_closed_tickets(tech_name, sdp_token, target_date, debug=False):
             
             # Stop if oldest ticket is before our buffer zone
             if oldest_in_page and oldest_in_page.date() < date_buffer:
-                if debug:
-                    logger.info(f"Page {page_num}: Reached buffer zone (oldest: {oldest_in_page.date()}, target: {target_date})")
                 break
             
             # If we got less than page_size, we're at the end
             if len(tickets) < page_size:
-                if debug:
-                    logger.info(f"Page {page_num}: Last page ({len(tickets)} tickets)")
                 break
             
             # Move to next page
             start_index += page_size
             
-        except Exception as e:
-            if debug:
-                logger.error(f"Page {page_num}: Error: {e}")
+        except:
             break
     
     if not all_tickets:
-        if debug:
-            logger.info("No closed tickets found")
         return 0
-    
-    if debug:
-        logger.info(f"Total fetched: {len(all_tickets)} tickets across {page_num} pages")
     
     # Check if resolved_time is in the response
     if all_tickets and 'resolved_time' in all_tickets[0]:
         # FAST PATH: resolved_time in list - filter by date in Python
         count = 0
-        matched_tickets = []
-        oldest_date = None
-        
-        if debug:
-            logger.info("✓ FAST PATH: resolved_time in list response")
         
         for ticket in all_tickets:
-            ticket_id = ticket.get('id')
-            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'), debug=debug and len(matched_tickets) < 3)
-            
-            # Track oldest ticket date
-            if resolved_time:
-                if oldest_date is None or resolved_time.date() < oldest_date:
-                    oldest_date = resolved_time.date()
+            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
             
             if resolved_time and resolved_time.date() == target_date:
                 count += 1
-                matched_tickets.append(ticket_id)
-                if debug and len(matched_tickets) <= 5:
-                    logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
-        
-        if debug:
-            if matched_tickets:
-                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
-            else:
-                logger.info(f"✗ NO MATCHES for target date {target_date}")
-            if oldest_date:
-                logger.info(f"Oldest ticket date: {oldest_date}")
         
         return count
     else:
         # SLOW PATH: resolved_time NOT in list - fetch each ticket individually
-        if debug:
-            logger.info("⚠️  SLOW PATH: resolved_time not in list, fetching individual tickets")
-        
         def check_ticket(ticket_id):
             details = get_ticket_details(ticket_id, sdp_token)
             if not details:
-                return (False, None, None)
+                return False
             if not verify_ticket_belongs_to_tech(details, tech_name):
-                return (False, None, None)
+                return False
             status = details.get('status')
             if not status or not isinstance(status, dict):
-                return (False, None, None)
+                return False
             if status.get('name', '') != 'Closed':
-                return (False, None, None)
+                return False
             
             resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
             
             if resolved_time and resolved_time.date() == target_date:
-                return (True, ticket_id, resolved_time)
-            return (False, ticket_id, resolved_time)
+                return True
+            return False
         
         ticket_ids = [t['id'] for t in all_tickets]
         count = 0
-        matched_tickets = []
         
         with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
             futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
             for future in as_completed(futures):
-                result, ticket_id, resolved_time = future.result()
-                
-                if result:
+                if future.result():
                     count += 1
-                    matched_tickets.append(ticket_id)
-                    if debug and len(matched_tickets) <= 5:
-                        logger.info(f"  ✓ Ticket #{ticket_id}: {resolved_time.strftime('%Y-%m-%d %H:%M')} - MATCH")
-        
-        if debug:
-            if matched_tickets:
-                logger.info(f"✓ MATCHED {len(matched_tickets)} tickets: {matched_tickets[:10]}")
-            else:
-                logger.info(f"✗ NO MATCHES for target date {target_date}")
         
         return count
 
@@ -570,15 +514,31 @@ def calculate_performance(meetings, tickets_closed, active_tickets):
         'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1)
     }
 
-def process_technician(tech_name, tech_email, graph_token, sdp_token, target_date, debug=False):
+def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
     """Process single technician's data"""
+    # Handle both dict and string formats
+    if isinstance(tech_info, dict):
+        tech_email = tech_info['email']
+        tech_job_title = tech_info.get('job_title')
+        tech_department = tech_info.get('department')
+        tech_office = tech_info.get('office_location')
+    else:
+        tech_email = tech_info
+        tech_job_title = None
+        tech_department = None
+        tech_office = None
+    
     meetings = get_meetings(tech_email, graph_token, target_date)
-    closed = count_closed_tickets(tech_name, sdp_token, target_date.date(), debug=debug)
+    closed = count_closed_tickets(tech_name, sdp_token, target_date.date())
     active = get_active_tickets(tech_name, sdp_token)
     performance = calculate_performance(meetings, closed, active)
     
     return {
         'name': tech_name,
+        'email': tech_email,
+        'job_title': tech_job_title,
+        'department': tech_department,
+        'office_location': tech_office,
         'meetings': meetings,
         'tickets': {
             'closed_today': closed,
@@ -595,6 +555,12 @@ def save_to_file(tech_data, date):
     for tech_name, data in tech_data.items():
         output[tech_name] = {
             'date': date.isoformat(),
+            'profile': {
+                'email': data.get('email'),
+                'job_title': data.get('job_title'),
+                'department': data.get('department'),
+                'office_location': data.get('office_location')
+            },
             'meetings': {
                 'count': data['meetings']['count'],
                 'hours': data['meetings']['hours']
@@ -627,15 +593,31 @@ def upload_to_dust(tech_data, date):
         t = data['tickets']
         p = data['performance']
         
+        # Build tags
+        tags = [
+            "performance-metrics",
+            f"technician:{tech_name.lower().replace(' ', '-')}",
+            f"date:{date_str}"
+        ]
+        
+        if data.get('job_title'):
+            tags.append(f"job-title:{data.get('job_title').lower().replace(' ', '-')}")
+        
+        if data.get('department'):
+            tags.append(f"department:{data.get('department').lower().replace(' ', '-')}")
+        
         document = {
             "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
             "timestamp": int(date.timestamp() * 1000),
-            "tags": [
-                "performance-metrics",
-                f"technician:{tech_name.lower().replace(' ', '-')}",
-                f"date:{date_str}"
-            ],
+            "tags": tags,
             "text": f"""# {tech_name} - {date.strftime('%B %d, %Y')}
+
+## Profile
+- **Name:** {tech_name}
+- **Job Title:** {data.get('job_title') or 'N/A'}
+- **Department:** {data.get('department') or 'N/A'}
+- **Location:** {data.get('office_location') or 'N/A'}
+- **Email:** {data.get('email') or 'N/A'}
 
 ## Calendar & Availability
 - **Meetings:** {m['count']} meetings
@@ -652,6 +634,10 @@ def upload_to_dust(tech_data, date):
 """,
             "structured_data": {
                 "technician_name": tech_name,
+                "job_title": data.get('job_title'),
+                "department": data.get('department'),
+                "office_location": data.get('office_location'),
+                "email": data.get('email'),
                 "date": date_str,
                 "meeting_count": m['count'],
                 "meeting_hours": m['hours'],
@@ -690,7 +676,7 @@ def save_progress(progress):
     with open(PROGRESS_FILE, 'w') as f:
         json.dump(progress, f, indent=2)
 
-def process_single_date(target_date, technicians, debug=False):
+def process_single_date(target_date, technicians):
     """Process all technicians for a single date"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
@@ -709,17 +695,14 @@ def process_single_date(target_date, technicians, debug=False):
     with ThreadPoolExecutor(max_workers=PARALLEL_TECHNICIANS) as executor:
         # Submit all technicians for parallel processing
         futures = {}
-        for idx, (tech_name, tech_email) in enumerate(tech_list):
-            # Only debug first 2 technicians
-            debug_this = debug and idx < 2
+        for tech_name, tech_info in tech_list:
             future = executor.submit(
                 process_technician,
                 tech_name,
-                tech_email,
+                tech_info,
                 graph_token,
                 sdp_token,
-                target_date,
-                debug_this
+                target_date
             )
             futures[future] = tech_name
         
@@ -729,6 +712,10 @@ def process_single_date(target_date, technicians, debug=False):
             try:
                 result = future.result()
                 tech_data[result['name']] = {
+                    'email': result['email'],
+                    'job_title': result['job_title'],
+                    'department': result['department'],
+                    'office_location': result['office_location'],
                     'meetings': result['meetings'],
                     'tickets': result['tickets'],
                     'performance': result['performance']
@@ -746,7 +733,8 @@ def process_single_date(target_date, technicians, debug=False):
         m = data['meetings']
         t = data['tickets']
         p = data['performance']
-        print(f"{tech_name:25} | {t['closed_today']:2} closed | {m['count']:2} mtgs | Score: {p['score']:5.1f}")
+        job_title = data.get('job_title', 'N/A')[:20]  # Truncate to 20 chars
+        print(f"{tech_name:25} | {job_title:20} | {t['closed_today']:2} closed | {m['count']:2} mtgs | Score: {p['score']:5.1f}")
     
     print()
     
@@ -763,11 +751,10 @@ def main():
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
-    parser.add_argument('--debug', action='store_true', help='Enable debug logging for first date')
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.1.6 (OPTIMIZED)")
+    print("PERFORMANCE DATA BACKFILL v15.2.1 (Azure AD Profiles)")
     print("="*70)
     print()
     
@@ -802,8 +789,8 @@ def main():
         sys.exit(1)
     
     try:
-        logger.info("Discovering technicians...")
-        technicians = discover_technicians(sdp_token)
+        logger.info("Discovering technicians and fetching Azure profiles...")
+        technicians = discover_technicians(sdp_token, graph_token)
         logger.info(f"✓ Found {len(technicians)} technicians")
         print()
     except Exception as e:
@@ -864,9 +851,7 @@ def main():
     
     for i, date in enumerate(dates_to_process, 1):
         try:
-            # Enable debug for first date only
-            debug_mode = args.debug and i == 1
-            process_single_date(date, technicians, debug=debug_mode)
+            process_single_date(date, technicians)
             progress['completed'].append(date.strftime('%Y-%m-%d'))
             save_progress(progress)
             
