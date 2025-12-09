@@ -467,7 +467,7 @@ def fetch_all_tickets():
                 logger.info(f"STATS Incremental sync: Fetching tickets updated since {last_sync_dt}")
                 incremental = True
             except:
-                logger.warning(WARNING  Invalid last sync time, performing full sync")
+                logger.warning("WARNING  Invalid last sync time, performing full sync")
                 incremental = False
         else:
             logger.info("SYNC No last sync time found - performing initial full sync")
