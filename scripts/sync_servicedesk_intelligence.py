@@ -1197,8 +1197,9 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             # 13. LINKED TICKETS
             linked_requests = safe_list(details.get('linked_requests'))
             linked_ticket_count = len(linked_requests)
+            has_linked_tickets = linked_ticket_count > 0
             linked_ticket_ids = [safe_string(lr.get('id')) for lr in linked_requests if isinstance(lr, dict)]
-            
+
             parent_request_obj = details.get('parent_request', {})
             parent_request_id = None
             has_parent = False
