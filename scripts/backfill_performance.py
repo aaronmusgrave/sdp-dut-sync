@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.2.3
+Performance Data Backfill Script v15.3.0
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
 Azure AD profile integration (job title, department, location)
-Fixed: Remove \$select parameter - fetch all fields works!
+NEW: Role-based performance scoring with job title multipliers
 Optimized: Smart pagination + parallel processing
 """
 
@@ -491,19 +491,110 @@ def get_active_tickets(tech_name, sdp_token):
     
     return 0
 
-def calculate_performance(meetings, tickets_closed, active_tickets):
-    """Calculate performance metrics"""
+def calculate_performance(meetings, tickets_closed, active_tickets, job_title=None):
+    """
+    Calculate performance metrics with role-based adjustments
+    v15.3.0: Role-aware scoring using job title
+    """
     meeting_hours = meetings['hours']
     available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
-    velocity = tickets_closed / available_hours if available_hours > 0 else 0
-    score = min(40, velocity * 10)
     
-    if 5 <= active_tickets <= 15:
-        score += 15
-    elif active_tickets < 5:
-        score += active_tickets * 3
+    # Role-based velocity multipliers
+    role_multipliers = {
+        'director': 20,
+        'application manager': 20,
+        'manager': 15,
+        'senior': 12,
+        'engineer': 10,
+        'technician': 10,
+        'specialist': 8
+    }
+    
+    # Determine role multiplier from job title
+    multiplier = 10  # Default
+    if job_title:
+        job_title_lower = job_title.lower()
+        # Check in priority order (more specific first)
+        if 'director' in job_title_lower or 'application manager' in job_title_lower:
+            multiplier = 20
+        elif 'manager' in job_title_lower:
+            multiplier = 15
+        elif 'senior' in job_title_lower:
+            multiplier = 12
+        elif 'engineer' in job_title_lower or 'technician' in job_title_lower:
+            multiplier = 10
+        elif 'specialist' in job_title_lower:
+            multiplier = 8
+    
+    # Velocity score with role multiplier
+    velocity = tickets_closed / available_hours if available_hours > 0 else 0
+    score = min(40, velocity * multiplier)
+    
+    # Role-based active load scoring
+    if job_title:
+        job_title_lower = job_title.lower()
+        
+        # IT Director / Application Manager
+        if 'director' in job_title_lower or 'application manager' in job_title_lower:
+            if 3 <= active_tickets <= 8:
+                score += 15
+            elif active_tickets < 3:
+                score += active_tickets * 5
+            else:
+                score += max(0, 15 - (active_tickets - 8) * 1.0)
+        
+        # IT Manager
+        elif 'manager' in job_title_lower:
+            if 5 <= active_tickets <= 12:
+                score += 15
+            elif active_tickets < 5:
+                score += active_tickets * 3
+            else:
+                score += max(0, 15 - (active_tickets - 12) * 0.7)
+        
+        # Senior Engineer
+        elif 'senior' in job_title_lower:
+            if 8 <= active_tickets <= 15:
+                score += 15
+            elif active_tickets < 8:
+                score += active_tickets * 2
+            else:
+                score += max(0, 15 - (active_tickets - 15) * 0.5)
+        
+        # Support Engineer / Technician
+        elif 'engineer' in job_title_lower or 'technician' in job_title_lower:
+            if 10 <= active_tickets <= 20:
+                score += 15
+            elif active_tickets < 10:
+                score += active_tickets * 1.5
+            else:
+                score += max(0, 15 - (active_tickets - 20) * 0.3)
+        
+        # Support Specialist
+        elif 'specialist' in job_title_lower:
+            if 12 <= active_tickets <= 25:
+                score += 15
+            elif active_tickets < 12:
+                score += active_tickets * 1.2
+            else:
+                score += max(0, 15 - (active_tickets - 25) * 0.2)
+        
+        else:
+            # Default scoring for unknown roles
+            if 5 <= active_tickets <= 15:
+                score += 15
+            elif active_tickets < 5:
+                score += active_tickets * 3
+            else:
+                score += max(0, 15 - (active_tickets - 15) * 0.5)
     else:
-        score += max(0, 15 - (active_tickets - 15) * 0.5)
+        # No job title - use default scoring
+        if 5 <= active_tickets <= 15:
+            score += 15
+        elif active_tickets < 5:
+            score += active_tickets * 3
+        else:
+            score += max(0, 15 - (active_tickets - 15) * 0.5)
     
     score = max(0, min(100, score))
     
@@ -511,7 +602,8 @@ def calculate_performance(meetings, tickets_closed, active_tickets):
         'available_hours': round(available_hours, 2),
         'velocity': round(velocity, 2),
         'score': round(score, 1),
-        'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1)
+        'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1),
+        'role_multiplier': multiplier
     }
 
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
@@ -531,7 +623,9 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
     meetings = get_meetings(tech_email, graph_token, target_date)
     closed = count_closed_tickets(tech_name, sdp_token, target_date.date())
     active = get_active_tickets(tech_name, sdp_token)
-    performance = calculate_performance(meetings, closed, active)
+    
+    # Pass job_title to calculate_performance for role-based scoring
+    performance = calculate_performance(meetings, closed, active, tech_job_title)
     
     return {
         'name': tech_name,
@@ -628,8 +722,9 @@ def upload_to_dust(tech_data, date):
 - **Closed:** {t['closed_today']}
 - **Active:** {t['active_tickets']}
 
-## Performance
+## Performance (Role-Based Scoring)
 - **Velocity:** {p['velocity']} tickets/hour
+- **Role Multiplier:** {p['role_multiplier']}x
 - **Score:** {p['score']}/100
 """,
             "structured_data": {
@@ -646,6 +741,7 @@ def upload_to_dust(tech_data, date):
                 "tickets_closed_today": t['closed_today'],
                 "active_tickets": t['active_tickets'],
                 "velocity": p['velocity'],
+                "role_multiplier": p['role_multiplier'],
                 "score": p['score']
             }
         }
@@ -755,7 +851,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.2.3 (Azure AD Profiles - FIXED)")
+    print("PERFORMANCE DATA BACKFILL v15.3.0 (Role-Based Scoring)")
     print("="*70)
     print()
     
