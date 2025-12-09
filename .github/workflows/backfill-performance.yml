@@ -53,7 +53,7 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}" --debug
+        run: python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}"
       
       - name: Run backfill (without debug)
         if: \${{ inputs.debug == false }}
