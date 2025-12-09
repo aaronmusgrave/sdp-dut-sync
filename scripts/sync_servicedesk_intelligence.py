@@ -1178,6 +1178,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
             
             approvals = safe_list(details.get('approvals'))
             approval_count = len(approvals)
+            has_approvals = approval_count > 0  # <-- THIS WAS MISSING
             has_pending_approvals = any(
                 safe_get_name(a.get('approval_status', {})) == 'Pending' 
                 for a in approvals if isinstance(a, dict)
