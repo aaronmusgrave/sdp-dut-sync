@@ -1585,18 +1585,12 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                 "department": department,
                 "requester_department": department,
                 
-                # 13. LINKED TICKETS
-            linked_requests = safe_list(details.get('linked_requests'))
-            linked_ticket_count = len(linked_requests)
-            has_linked_tickets = linked_ticket_count > 0  # <-- THIS WAS MISSING
-            linked_ticket_ids = [safe_string(lr.get('id')) for lr in linked_requests if isinstance(lr, dict)]
-            
-            parent_request_obj = details.get('parent_request', {})
-            parent_request_id = None
-            has_parent = False
-            if parent_request_obj and isinstance(parent_request_obj, dict):
-                parent_request_id = safe_string(parent_request_obj.get('id'))
-                has_parent = bool(parent_request_id)
+                 # 13. Linked Tickets
+                "linked_ticket_count": linked_ticket_count,
+                "linked_ticket_ids": linked_ticket_ids,
+                "has_linked_tickets": linked_ticket_count > 0,
+                "parent_request_id": parent_request_id,
+                "has_parent": has_parent,
                 
                 # 14. Attachments
                 "attachment_count": attachment_count,
