@@ -2167,7 +2167,7 @@ def main():
         if processed_ids:
             original_count = len(tickets)
             tickets = [t for t in tickets if t.get('id') not in processed_ids]
-            logger.info(fℹ️  Resuming: {len(processed_ids)} already processed, {len(tickets)} remaining")
+            logger.info(f"INFO:  Resuming: {len(processed_ids)} already processed, {len(tickets)} remaining")
         
         logger.info(f"\nTotal tickets to process: {len(tickets)}\n")
         
