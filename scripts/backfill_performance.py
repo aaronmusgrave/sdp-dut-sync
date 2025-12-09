@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v15.2.1
+Performance Data Backfill Script v15.2.2
 Uses the same working logic as track_meeting_load.py
 Processes historical dates sequentially
 Azure AD profile integration (job title, department, location)
 Optimized: Smart pagination + parallel processing
+Fixed: Proper None handling for Azure profile fields
 """
 
 import os
@@ -593,7 +594,7 @@ def upload_to_dust(tech_data, date):
         t = data['tickets']
         p = data['performance']
         
-        # Build tags
+        # Build tags - safely handle None values
         tags = [
             "performance-metrics",
             f"technician:{tech_name.lower().replace(' ', '-')}",
@@ -733,7 +734,8 @@ def process_single_date(target_date, technicians):
         m = data['meetings']
         t = data['tickets']
         p = data['performance']
-        job_title = data.get('job_title', 'N/A')[:20]  # Truncate to 20 chars
+        # Safely truncate job title - handle None
+        job_title = (data.get('job_title') or 'N/A')[:20]
         print(f"{tech_name:25} | {job_title:20} | {t['closed_today']:2} closed | {m['count']:2} mtgs | Score: {p['score']:5.1f}")
     
     print()
@@ -754,7 +756,7 @@ def main():
     args = parser.parse_args()
     
     print("="*70)
-    print("PERFORMANCE DATA BACKFILL v15.2.1 (Azure AD Profiles)")
+    print("PERFORMANCE DATA BACKFILL v15.2.2 (Azure AD Profiles)")
     print("="*70)
     print()
     
