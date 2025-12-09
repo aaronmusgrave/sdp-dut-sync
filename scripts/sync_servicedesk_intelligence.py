@@ -227,7 +227,7 @@ class PerformanceMonitor:
     
     def print_report(self):
         logger.info("\n" + "="*60)
-        logger.info("📊 PERFORMANCE REPORT (v2.8 COMPLETE)")
+        logger.info("STATS PERFORMANCE REPORT (v2.8 COMPLETE)")
         logger.info("="*60)
         for op, times in sorted(self.timings.items()):
             if times:
@@ -253,7 +253,7 @@ class CheckpointManager:
             }
             with open(self.checkpoint_file, 'w') as f:
                 json.dump(checkpoint, f)
-            logger.info(f"💾 Checkpoint saved: {success_count} successful, {error_count} errors")
+            logger.info(f"SAVED Checkpoint saved: {success_count} successful, {error_count} errors")
         except Exception as e:
             logger.error(f"Could not save checkpoint: {e}")
     
@@ -262,7 +262,7 @@ class CheckpointManager:
             if os.path.exists(self.checkpoint_file):
                 with open(self.checkpoint_file, 'r') as f:
                     checkpoint = json.load(f)
-                logger.info(f"📂 Loaded checkpoint: {len(checkpoint['processed_ids'])} tickets already processed")
+                logger.info(f"LOADED Loaded checkpoint: {len(checkpoint['processed_ids'])} tickets already processed")
                 return set(checkpoint['processed_ids']), checkpoint['success_count'], checkpoint['error_count']
         except Exception as e:
             logger.error(f"Could not load checkpoint: {e}")
@@ -273,7 +273,7 @@ class CheckpointManager:
         try:
             if os.path.exists(self.checkpoint_file):
                 os.remove(self.checkpoint_file)
-                logger.info("🗑️  Checkpoint cleared")
+                logger.info("CLEARED  Checkpoint cleared")
         except Exception as e:
             logger.error(f"Could not clear checkpoint: {e}")
 
@@ -297,7 +297,7 @@ def validate_environment():
     if config['SDP_DOMAIN'] and ('http://' in config['SDP_DOMAIN'] or 'https://' in config['SDP_DOMAIN']):
         raise ValueError("SDP_DOMAIN should not include http:// or https://")
     
-    logger.info("✓ Environment validation passed")
+    logger.info("OK Environment validation passed")
     return config
 
 def get_access_token(force_refresh=False):
@@ -309,7 +309,7 @@ def get_access_token(force_refresh=False):
         if datetime.now() + timedelta(minutes=TOKEN_REFRESH_BUFFER_MINUTES) < _token_expiry:
             return _access_token
         else:
-            logger.info("🔄 Proactive token refresh (approaching expiry)")
+            logger.info("SYNC Proactive token refresh (approaching expiry)")
             force_refresh = True
     
     logger.info("Getting access token...")
@@ -332,7 +332,7 @@ def get_access_token(force_refresh=False):
         _access_token = data['access_token']
         expires_in = data.get('expires_in', 3600)
         _token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
-        logger.info("✓ Access token obtained")
+        logger.info("OK Access token obtained")
         return _access_token
     else:
         raise Exception(f"Failed to get access token: {response.status_code}")
@@ -464,13 +464,13 @@ def fetch_all_tickets():
             try:
                 last_sync_ms = int(last_sync_time)
                 last_sync_dt = datetime.fromtimestamp(last_sync_ms / 1000)
-                logger.info(f"📊 Incremental sync: Fetching tickets updated since {last_sync_dt}")
+                logger.info(f"STATS Incremental sync: Fetching tickets updated since {last_sync_dt}")
                 incremental = True
             except:
-                logger.warning(⚠️  Invalid last sync time, performing full sync")
+                logger.warning(WARNING  Invalid last sync time, performing full sync")
                 incremental = False
         else:
-            logger.info("🔄 No last sync time found - performing initial full sync")
+            logger.info("SYNC No last sync time found - performing initial full sync")
             incremental = False
         
         logger.info(f"Fetching {'updated' if incremental else 'all'} tickets...")
@@ -480,7 +480,7 @@ def fetch_all_tickets():
         
         page_limit = 20 if incremental else 100
         
-        logger.info(f"  📊 Page limit: {page_limit} pages (up to {page_limit * TICKETS_PER_PAGE} tickets)")
+        logger.info(f"  STATS Page limit: {page_limit} pages (up to {page_limit * TICKETS_PER_PAGE} tickets)")
         
         session = get_session()
         
@@ -523,7 +523,7 @@ def fetch_all_tickets():
                     tickets = result.get('requests', [])
                     
                     if not tickets:
-                        logger.info(f"  ✓ No more tickets available from API")
+                        logger.info(f"  OK No more tickets available from API")
                         break
                     
                     pages_checked += 1
@@ -550,15 +550,15 @@ def fetch_all_tickets():
                     time.sleep(0.3)
                     
                 else:
-                    logger.warning(f"  ⚠️  API returned status {response.status_code}")
+                    logger.warning(f"  WARNING  API returned status {response.status_code}")
                     break
                     
             except Exception as e:
-                logger.error(f"  ⚠️  Error fetching tickets: {e}")
+                logger.error(f"  WARNING  Error fetching tickets: {e}")
                 break
         
         sync_type = "incremental" if incremental else "full"
-        logger.info(f"✓ Fetched {len(all_tickets)} tickets ({sync_type} sync)")
+        logger.info(f"OK Fetched {len(all_tickets)} tickets ({sync_type} sync)")
         return all_tickets
 
 def fetch_ticket_details(ticket_id, access_token):
@@ -575,7 +575,7 @@ def fetch_ticket_details(ticket_id, access_token):
                 return response.json().get('request', {})
             return None
     except Exception as e:
-        logger.error(f"  ⚠️  Error fetching details for {ticket_id}: {str(e)[:100]}")
+        logger.error(f"  WARNING  Error fetching details for {ticket_id}: {str(e)[:100]}")
         return None
 
 def fetch_single_notification_detail(ticket_id, notif_id, access_token):
@@ -652,7 +652,7 @@ def fetch_ticket_conversations_parallel(ticket_id, access_token):
             return conversations
             
     except Exception as e:
-        logger.error(f"  ⚠️  Error fetching conversations for {ticket_id}: {str(e)[:50]}")
+        logger.error(f"  WARNING  Error fetching conversations for {ticket_id}: {str(e)[:50]}")
         return []
 def calculate_complexity_score(ticket_data, conversations, age_days):
     """Calculate ticket complexity score (0-10)"""
@@ -958,7 +958,7 @@ def generate_resolution_suggestions(category, keywords, similar_count=0):
         suggestions.append("🌐 Test connectivity and verify VPN")
     
     if similar_count > 3:
-        suggestions.append(f"📊 {similar_count} similar tickets found - review for solutions")
+        suggestions.append(f"STATS {similar_count} similar tickets found - review for solutions")
     
     return suggestions[:5]
 
@@ -1861,7 +1861,7 @@ def format_ticket_with_intelligence(ticket, details, conversations):
                     dust_tags.append(f"custom-tag:{tag.lower().replace(' ', '-')}")
 # ========== OPTIMIZED TEXT CONTENT (v2.8) ==========
             
-            status_indicator = "🔴 ACTIVE" if is_active else "✅ CLOSED"
+            status_indicator = "🔴 ACTIVE" if is_active else "DONE CLOSED"
             
             text_content = f"""# {status_indicator} - Ticket #{display_id}
 
@@ -1987,7 +1987,7 @@ def upload_to_dust(document):
             
             return False
     except Exception as e:
-        logger.error(f" ⚠️  Upload error: {str(e)[:50]}")
+        logger.error(f" WARNING  Upload error: {str(e)[:50]}")
         return False
 
 def upload_batch_to_dust(documents, max_workers=MAX_PARALLEL_WORKERS):
@@ -2005,9 +2005,9 @@ def upload_batch_to_dust(documents, max_workers=MAX_PARALLEL_WORKERS):
                         if result:
                             success += 1
                     except Exception as e:
-                        logger.error(f"  ⚠️  Upload failed: {str(e)[:50]}")
+                        logger.error(f"  WARNING  Upload failed: {str(e)[:50]}")
             except concurrent.futures.TimeoutError:
-                logger.error("  ⏱️  Batch upload timed out")
+                logger.error("  TIMEOUT  Batch upload timed out")
         
         return success
 # ========== ANALYTICS REPORTING ==========
@@ -2050,7 +2050,7 @@ def save_analytics_report():
         with open(filename, 'w') as f:
             json.dump(report, f, indent=2, default=str)
         
-        logger.info(f"\n📊 Analytics report saved: {filename}")
+        logger.info(f"\nSTATS Analytics report saved: {filename}")
         
     except Exception as e:
         logger.error(f"Could not save analytics report: {e}")
@@ -2058,7 +2058,7 @@ def save_analytics_report():
 def print_analytics_summary():
     """Print analytics summary - v2.8 with NEW insights"""
     logger.info("\n" + "="*60)
-    logger.info("📊 ANALYTICS SUMMARY (v2.8 COMPLETE)")
+    logger.info("STATS ANALYTICS SUMMARY (v2.8 COMPLETE)")
     logger.info("="*60)
     
     logger.info("\n🏆 Top Categories:")
@@ -2111,14 +2111,14 @@ def print_analytics_summary():
     fcr_stats = analytics_cache.raw_data['fcr_stats']
     if fcr_stats['total'] > 0:
         fcr_rate = (fcr_stats['fcr'] / fcr_stats['total']) * 100
-        logger.info(f"\n✅ First Call Resolution Rate: {fcr_rate:.1f}% ({fcr_stats['fcr']}/{fcr_stats['total']})")
+        logger.info(f"\nDONE First Call Resolution Rate: {fcr_rate:.1f}% ({fcr_stats['fcr']}/{fcr_stats['total']})")
     
     logger.info("="*60 + "\n")
 # ========== MAIN EXECUTION ==========
 
 def main():
     logger.info("=" * 60)
-    logger.info(f"🚀 SERVICEDESK INTELLIGENCE SUITE v2.8 - COMPLETE")
+    logger.info(f"START SERVICEDESK INTELLIGENCE SUITE v2.8 - COMPLETE")
     logger.info(f"Starting at {datetime.now()}")
     logger.info("=" * 60)
     logger.info("✨ v2.8 COMPLETE FIELD COVERAGE:")
@@ -2172,11 +2172,11 @@ def main():
         logger.info(f"\nTotal tickets to process: {len(tickets)}\n")
         
         if not tickets:
-            logger.info("✅ No tickets to process - system is up to date!")
+            logger.info("DONE No tickets to process - system is up to date!")
             current_time_ms = int(datetime.now().timestamp() * 1000)
             with open('last_sync_time.txt', 'w') as f:
                 f.write(str(current_time_ms))
-            logger.info(f"\n📅 Timestamp updated: {current_time_ms}")
+            logger.info(f"\nDATE Timestamp updated: {current_time_ms}")
             checkpoint_mgr.clear()
             return
         
@@ -2218,7 +2218,7 @@ def main():
                     details = fetch_ticket_details(ticket_id, access_token)
                     
                     if not details:
-                        logger.error(f"  ⚠️  Failed to fetch details for {ticket_id} - skipping")
+                        logger.error(f"  WARNING  Failed to fetch details for {ticket_id} - skipping")
                         error_count += 1
                         processed_ids.add(ticket_id)
                         continue
@@ -2273,19 +2273,19 @@ def main():
                             success_count += batch_success
                             document_batch = []
                             
-                            logger.info(f"  ✓ Uploaded batch | Total: {success_count}/{idx} | Active: {active_count} | Errors: {error_count}")
+                            logger.info(f"  OK Uploaded batch | Total: {success_count}/{idx} | Active: {active_count} | Errors: {error_count}")
                     else:
                         error_count += 1
                         processed_ids.add(ticket_id)
                 
                 except requests.exceptions.Timeout:
-                    logger.error(f"  ⏱️  TIMEOUT: {ticket_id} - skipping")
+                    logger.error(f"  TIMEOUT  TIMEOUT: {ticket_id} - skipping")
                     error_count += 1
                     processed_ids.add(ticket_id)
                     continue
                 
                 except Exception as e:
-                    logger.error(f"  ⚠️  ERROR: {ticket_id} - {str(e)[:100]}")
+                    logger.error(f"  WARNING  ERROR: {ticket_id} - {str(e)[:100]}")
                     error_count += 1
                     processed_ids.add(ticket_id)
                     continue
@@ -2299,10 +2299,10 @@ def main():
         if document_batch:
             batch_success = upload_batch_to_dust(document_batch)
             success_count += batch_success
-            logger.info(f"  ✓ Final batch uploaded: {batch_success} documents")
+            logger.info(f"  OK Final batch uploaded: {batch_success} documents")
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"✅ INTELLIGENCE SYNC COMPLETED (v2.8 COMPLETE)")
+        logger.info(f"DONE INTELLIGENCE SYNC COMPLETED (v2.8 COMPLETE)")
         logger.info(f"{'='*60}")
         logger.info(f"  Total Processed: {success_count}/{len(tickets)}")
         logger.info(f"  Active Tickets: {active_count}")
@@ -2329,7 +2329,7 @@ def main():
         save_analytics_report()
         
         current_time_ms = int(datetime.now().timestamp() * 1000)
-        logger.info(f"\n📅 Current sync timestamp: {current_time_ms}")
+        logger.info(f"\nDATE Current sync timestamp: {current_time_ms}")
         logger.info(f"   (Will be used for next incremental sync)")
         
         with open('last_sync_time.txt', 'w') as f:
@@ -2337,15 +2337,15 @@ def main():
         
         checkpoint_mgr.clear()
         
-        logger.info("\n🎯 v2.8 Features Active:")
-        logger.info("  ✓ ALL 20 additional fields captured")
-        logger.info("  ✓ Complete field coverage (48 total fields)")
-        logger.info("  ✓ Connection pooling (20 connections)")
-        logger.info("  ✓ Parallel conversation fetching")
-        logger.info("  ✓ API-level filtering")
-        logger.info("  ✓ Pre-calculated analytics")
-        logger.info("  ✓ Bounded memory caches")
-        logger.info("  ✓ Enhanced analytics reporting")
+        logger.info("\nTARGET v2.8 Features Active:")
+        logger.info("  OK ALL 20 additional fields captured")
+        logger.info("  OK Complete field coverage (48 total fields)")
+        logger.info("  OK Connection pooling (20 connections)")
+        logger.info("  OK Parallel conversation fetching")
+        logger.info("  OK API-level filtering")
+        logger.info("  OK Pre-calculated analytics")
+        logger.info("  OK Bounded memory caches")
+        logger.info("  OK Enhanced analytics reporting")
         logger.info("")
         
         perf.print_report()
@@ -2354,7 +2354,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("\n⚠️  Sync interrupted by user - checkpoint saved")
+        logger.info("\nWARNING  Sync interrupted by user - checkpoint saved")
     except Exception as e:
         logger.error(f"FATAL ERROR: {e}")
         import traceback
