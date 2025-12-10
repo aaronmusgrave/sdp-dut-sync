@@ -32,24 +32,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate start date
-        id: start
-        run: |
-          if [ -n "\${{ inputs.start_date }}" ]; then
-            echo "value=\${{ inputs.start_date }}" >> \$GITHUB_OUTPUT
-          else
-            echo "value=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-          fi
-      
-      - name: Calculate end date
-        id: end
-        run: |
-          if [ -n "\${{ inputs.end_date }}" ]; then
-            echo "value=\${{ inputs.end_date }}" >> \$GITHUB_OUTPUT
-          else
-            echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-          fi
-      
       - name: Run performance data backfill
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
@@ -61,4 +43,17 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date "\${{ steps.start.outputs.value }}" --end-date "\${{ steps.end.outputs.value }}"
+          INPUT_START: \${{ inputs.start_date }}
+          INPUT_END: \${{ inputs.end_date }}
+        run: |
+          if [ -z "\$INPUT_START" ]; then
+            START=\$(date -d '7 days ago' +%Y-%m-%d)
+          else
+            START="\$INPUT_START"
+          fi
+          if [ -z "\$INPUT_END" ]; then
+            END=\$(date -d yesterday +%Y-%m-%d)
+          else
+            END="\$INPUT_END"
+          fi
+          python scripts/backfill_performance.py --start-date \$START --end-date \$END
