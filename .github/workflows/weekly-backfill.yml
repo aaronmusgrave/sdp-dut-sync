@@ -32,34 +32,27 @@ jobs:
       
       - name: Determine dates
         id: dates
+        env:
+          EVENT_NAME: \${{ github.event_name }}
+          INPUT_START: \${{ inputs.start_date }}
+          INPUT_END: \${{ inputs.end_date }}
         run: |
-          echo "Event name: \${{ github.event_name }}"
-          echo "Input start_date: '\${{ inputs.start_date }}'"
-          echo "Input end_date: '\${{ inputs.end_date }}'"
+          echo "Event name: \$EVENT_NAME"
+          echo "Input start: '\$INPUT_START'"
+          echo "Input end: '\$INPUT_END'"
           
-          if [ "\${{ github.event_name }}" = "schedule" ]; then
+          if [ "\$EVENT_NAME" = "schedule" ] || [ -z "\$INPUT_START" ]; then
             START=\$(date -d '7 days ago' +%Y-%m-%d)
             END=\$(date -d yesterday +%Y-%m-%d)
-            echo "Using scheduled defaults"
-          elif [ -z "\${{ inputs.start_date }}" ]; then
-            START=\$(date -d '7 days ago' +%Y-%m-%d)
-            END=\$(date -d yesterday +%Y-%m-%d)
-            echo "No input, using defaults"
+            echo "Using defaults: \$START to \$END"
           else
-            START="\${{ inputs.start_date }}"
-            END="\${{ inputs.end_date }}"
-            echo "Using provided inputs"
+            START="\$INPUT_START"
+            END="\$INPUT_END"
+            echo "Using inputs: \$START to \$END"
           fi
           
-          echo "Calculated START: \$START"
-          echo "Calculated END: \$END"
           echo "start=\$START" >> \$GITHUB_OUTPUT
           echo "end=\$END" >> \$GITHUB_OUTPUT
-      
-      - name: Verify outputs
-        run: |
-          echo "Step output start: '\${{ steps.dates.outputs.start }}'"
-          echo "Step output end: '\${{ steps.dates.outputs.end }}'"
       
       - name: Run performance data backfill
         env:
@@ -72,8 +65,5 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          START="\${{ steps.dates.outputs.start }}"
-          END="\${{ steps.dates.outputs.end }}"
-          echo "About to run with: START='\$START' END='\$END'"
-          python scripts/backfill_performance.py --start-date "\$START" --end-date "\$END"
+          START_DATE: \${{ steps.dates.outputs.start }}
+          END_
