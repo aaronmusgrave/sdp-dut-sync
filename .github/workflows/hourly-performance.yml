@@ -23,23 +23,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Get today's date
-        id: date
-        run: echo "today=$(date +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Get current time  
-        id: time
-        run: echo "now=$(date +%H-%M)" >> \$GITHUB_OUTPUT
-      
-      - name: Verify outputs
-        run: |
-          echo "Date captured: \${{ steps.date.outputs.today }}"
-          echo "Time captured: \${{ steps.time.outputs.now }}"
-          if [ -z "\${{ steps.date.outputs.today }}" ]; then
-            echo "ERROR: Date not captured"
-            exit 1
-          fi
-      
       - name: Run performance data collection
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
@@ -51,13 +34,13 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date "\${{ steps.date.outputs.today }}" --end-date "\${{ steps.date.outputs.today }}"
+        run: python scripts/backfill_performance.py --start-date $(date +%Y-%m-%d) --end-date $(date +%Y-%m-%d)
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-hourly-\${{ steps.date.outputs.today }}-\${{ steps.time.outputs.now }}
+          name: performance-hourly-\$(date +%Y-%m-%d-%H-%M)
           path: tech_performance_*.json
           retention-days: 2
           if-no-files-found: warn
