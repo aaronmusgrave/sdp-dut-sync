@@ -8,7 +8,7 @@ on:
       date:
         description: 'Date to process (YYYY-MM-DD, leave empty for yesterday)'
         required: false
-        type: string
+        default: ''
 
 jobs:
   collect-performance-snapshot:
@@ -28,22 +28,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Get yesterday's date
-        if: inputs.date == ''
-        id: yesterday
-        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
       - name: Set target date
-        id: target
+        id: vars
         run: |
           if [ -n "\${{ inputs.date }}" ]; then
-            echo "value=\${{ inputs.date }}" >> \$GITHUB_OUTPUT
+            TARGET="\${{ inputs.date }}"
           else
-            echo "value=\${{ steps.yesterday.outputs.value }}" >> \$GITHUB_OUTPUT
+            TARGET=\$(date -d yesterday +%Y-%m-%d)
           fi
-      
-      - name: Display target date
-        run: echo "Processing date: \${{ steps.target.outputs.value }}"
+          echo "date=\${TARGET}" >> "\$GITHUB_OUTPUT"
+          echo "Target date: \${TARGET}"
       
       - name: Run performance data collection
         env:
@@ -56,15 +50,14 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          echo "Capturing snapshot for \${{ steps.target.outputs.value }}"
-          python scripts/backfill_performance.py --start-date "\${{ steps.target.outputs.value }}" --end-date "\${{ steps.target.outputs.value }}"
+          TARGET_DATE: \${{ steps.vars.outputs.date }}
+        run: python scripts/backfill_performance.py --start-date "\${TARGET_DATE}" --end-date "\${TARGET_DATE}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-snapshot-\${{ steps.target.outputs.value }}
+          name: performance-snapshot-\${{ steps.vars.outputs.date }}
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
