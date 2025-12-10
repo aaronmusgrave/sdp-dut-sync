@@ -35,12 +35,3 @@ jobs:
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
         run: python scripts/backfill_performance.py --start-date $(date +%Y-%m-%d) --end-date $(date +%Y-%m-%d)
-      
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: performance-hourly-\${{ github.run_number }}
-          path: tech_performance_*.json
-          retention-days: 2
-          if-no-files-found: warn
