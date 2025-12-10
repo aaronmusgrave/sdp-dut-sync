@@ -1,17 +1,12 @@
-name: Weekly Performance Data Backfill
+name: Hourly Performance Data Update
 
 on:
   schedule:
-    - cron: '0 13 * * 0'
+    - cron: '0 14-23 * * 1-5'
   workflow_dispatch:
-    inputs:
-      days:
-        description: 'Number of days to backfill'
-        required: false
-        default: '7'
 
 jobs:
-  backfill-performance-data:
+  update-current-performance:
     runs-on: ubuntu-latest
     
     steps:
@@ -28,7 +23,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Run performance data backfill
+      - name: Run performance data collection
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -39,13 +34,4 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          DAYS_INPUT: \${{ inputs.days }}
-        run: |
-          if [ -z "\$DAYS_INPUT" ]; then
-            DAYS=7
-          else
-            DAYS="\$DAYS_INPUT"
-          fi
-          START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
-          END_DATE=\$(date -d yesterday +%Y-%m-%d)
-          python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
+        run: python scripts/backfill_performance.py --start-date $(date +%Y-%m-%d) --end-date $(date +%Y-%m-%d)
