@@ -23,18 +23,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Get current date
-        id: date
-        run: echo "value=$(date +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Get current time
-        id: time
-        run: echo "value=$(date +%H-%M)" >> \$GITHUB_OUTPUT
-      
-      - name: Display date info
+      - name: Set date variables
+        id: vars
         run: |
-          echo "Date to process: \${{ steps.date.outputs.value }}"
-          echo "Time: \${{ steps.time.outputs.value }}"
+          TODAY=\$(date +%Y-%m-%d)
+          TIME=\$(date +%H-%M)
+          echo "date=\${TODAY}" >> "\$GITHUB_OUTPUT"
+          echo "time=\${TIME}" >> "\$GITHUB_OUTPUT"
+          echo "Date: \${TODAY}"
+          echo "Time: \${TIME}"
       
       - name: Run performance data collection
         env:
@@ -47,19 +44,14 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          echo "Updating performance data for \${{ steps.date.outputs.value }}"
-          python scripts/backfill_performance.py --start-date "\${{ steps.date.outputs.value }}" --end-date "\${{ steps.date.outputs.value }}"
+          TARGET_DATE: \${{ steps.vars.outputs.date }}
+        run: python scripts/backfill_performance.py --start-date "\${TARGET_DATE}" --end-date "\${TARGET_DATE}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-hourly-\${{ steps.date.outputs.value }}-\${{ steps.time.outputs.value }}
+          name: performance-hourly-\${{ steps.vars.outputs.date }}-\${{ steps.vars.outputs.time }}
           path: tech_performance_*.json
           retention-days: 2
           if-no-files-found: warn
-      
-      - name: Summary
-        if: success()
-        run: echo "Performance data updated for \${{ steps.date.outputs.value }}"
