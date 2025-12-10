@@ -49,6 +49,10 @@ jobs:
         run: |
           echo "Start: \${{ steps.start.outputs.value }}"
           echo "End: \${{ steps.end.outputs.value }}"
+          if [ -z "\${{ steps.start.outputs.value }}" ] || [ -z "\${{ steps.end.outputs.value }}" ]; then
+            echo "ERROR: Dates not set"
+            exit 1
+          fi
       
       - name: Run performance data backfill
         env:
@@ -61,7 +65,7 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date \${{ steps.start.outputs.value }} --end-date \${{ steps.end.outputs.value }}
+        run: python scripts/backfill_performance.py --start-date "\${{ steps.start.outputs.value }}" --end-date "\${{ steps.end.outputs.value }}"
       
       - name: Upload artifacts
         if: always()
