@@ -39,6 +39,7 @@ jobs:
           echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
       
       - name: Run performance data backfill
+        shell: bash
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -51,4 +52,7 @@ jobs:
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
           START_DATE: \${{ inputs.start_date || steps.defaults.outputs.start }}
           END_DATE: \${{ inputs.end_date || steps.defaults.outputs.end }}
-        run: python scripts/backfill_performance.py --start-date \$START_DATE --end-date \$END_DATE
+        run: |
+          echo "START_DATE is: \$START_DATE"
+          echo "END_DATE is: \$END_DATE"
+          python scripts/backfill_performance.py --start-date "\${START_DATE}" --end-date "\${END_DATE}"
