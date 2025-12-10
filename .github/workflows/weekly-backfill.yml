@@ -28,32 +28,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Get days input
-        id: days
-        run: |
-          DAYS="\${{ inputs.days }}"
-          if [ -z "\$DAYS" ]; then
-            DAYS=7
-          fi
-          echo "value=\$DAYS" >> \$GITHUB_OUTPUT
-      
-      - name: Calculate start date
-        id: start
-        run: echo "value=$(date -d '\${{ steps.days.outputs.value }} days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Calculate end date
-        id: end
-        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Verify dates
-        run: |
-          echo "Start: \${{ steps.start.outputs.value }}"
-          echo "End: \${{ steps.end.outputs.value }}"
-          if [ -z "\${{ steps.start.outputs.value }}" ] || [ -z "\${{ steps.end.outputs.value }}" ]; then
-            echo "ERROR: Dates not set"
-            exit 1
-          fi
-      
       - name: Run performance data backfill
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
@@ -65,13 +39,22 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date "\${{ steps.start.outputs.value }}" --end-date "\${{ steps.end.outputs.value }}"
+          DAYS_INPUT: \${{ inputs.days }}
+        run: |
+          if [ -z "\$DAYS_INPUT" ]; then
+            DAYS=7
+          else
+            DAYS="\$DAYS_INPUT"
+          fi
+          START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
+          END_DATE=\$(date -d yesterday +%Y-%m-%d)
+          python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-backfill-\${{ steps.end.outputs.value }}
+          name: performance-backfill-\$(date +%Y-%m-%d)
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
