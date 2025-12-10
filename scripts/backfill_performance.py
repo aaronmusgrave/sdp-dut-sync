@@ -10,6 +10,7 @@ Optimized: Fast parallel processing
 v17.1.2 Changes:
 - Hybrid ticket counting: Accurate for today, estimated for last 7 days, 0 for older
 - Designed for daily scheduled runs to build accurate history over time
+- 24-HOUR MEETING TRACKING: Counts all meetings (not just business hours)
 """
 
 import os
@@ -313,12 +314,13 @@ def fix_datetime_str(dt_str):
     return re.sub(r'\.(\d{6})\d+', r'.\1', dt_str)
 
 def get_meetings(email, graph_token, date):
-    """Get meetings for technician on specific date"""
+    """Get meetings for technician on specific date - FULL 24-HOUR DAY"""
     if not email:
         return {'count': 0, 'hours': 0}
     
-    start_time = date.replace(hour=8, minute=0, second=0, microsecond=0)
-    end_time = date.replace(hour=17, minute=0, second=0, microsecond=0)
+    # Count ALL meetings for the full 24-hour day
+    start_time = date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_time = date.replace(hour=23, minute=59, second=59, microsecond=0)
     
     url = f"https://graph.microsoft.com/v1.0/users/{email}/calendar/calendarView"
     headers = {
@@ -339,27 +341,27 @@ def get_meetings(email, graph_token, date):
             count = 0
             
             for event in events:
-                if event.get('isCancelled') or event.get('responseStatus', {}).get('response') == 'declined':
+                # Only skip cancelled meetings (count declined, tentative, everything else)
+                if event.get('isCancelled'):
                     continue
                 
                 if event.get('isAllDay'):
-                    duration_minutes = WORK_HOURS_PER_DAY * 60
+                    # All-day events count as 8 hours
+                    duration_minutes = 8 * 60
                 else:
                     start = datetime.fromisoformat(fix_datetime_str(event['start']['dateTime']))
                     end = datetime.fromisoformat(fix_datetime_str(event['end']['dateTime']))
                     
-                    meeting_start = max(start, start_time)
-                    meeting_end = min(end, end_time)
-                    if meeting_end > meeting_start:
-                        duration_minutes = (meeting_end - meeting_start).total_seconds() / 60
-                    else:
-                        continue
+                    # Calculate duration for the meeting
+                    duration_minutes = (end - start).total_seconds() / 60
                 
-                duration_minutes = min(duration_minutes, WORK_HOURS_PER_DAY * 60)
+                # Cap any single meeting at 8 hours
+                duration_minutes = min(duration_minutes, 8 * 60)
                 total_minutes += duration_minutes
                 count += 1
             
-            total_minutes = min(total_minutes, WORK_HOURS_PER_DAY * 60)
+            # Cap total at 24 hours (though unlikely)
+            total_minutes = min(total_minutes, 24 * 60)
             return {'count': count, 'hours': round(total_minutes / 60, 2)}
     except Exception as e:
         logger.warning(f"Error fetching meetings for {email}: {e}")
@@ -777,6 +779,7 @@ def upload_to_dust(tech_data, date):
 - For detailed ticket information (complexity, SLA, priority, conversations), query the ServiceDesk Intelligence data source
 - This file tracks meeting load, availability, and current open ticket count for quick capacity planning
 - Script runs daily at 6 AM to capture accurate ticket counts going forward
+- Meeting tracking: Full 24-hour day (not just business hours)
 """,
             "structured_data": {
                 "technician_name": tech_name,
@@ -953,6 +956,11 @@ def main():
     print("  ✓ Older dates: Not counted (will be captured by daily scheduled runs)")
     print("  → Run this script daily at 6 AM to build accurate history over time")
     print()
+    print("Meeting Tracking:")
+    print("  ✓ Full 24-hour day (not just business hours)")
+    print("  ✓ Includes declined/tentative meetings")
+    print("  ✓ Excludes only cancelled meetings")
+    print()
     
     if not args.days and not args.start_date:
         print("Choose backfill mode:")
@@ -1089,6 +1097,7 @@ def main():
     print()
     print("v17.1.2 Features:")
     print("  ✓ Meeting load tracking (count, hours, percentage)")
+    print("  ✓ Full 24-hour meeting tracking (not just business hours)")
     print("  ✓ Job title and department from Azure AD")
     print("  ✓ Manager information (organizational hierarchy)")
     print("  ✓ Detailed location (city, state, country)")
@@ -1101,7 +1110,7 @@ def main():
     print("  ✓ Performance: ~30-40 seconds per date")
     print()
     print("Data Usage:")
-    print("  - Meeting data: Use for capacity planning (accurate for all dates)")
+    print("  - Meeting data: Full 24-hour day for accurate capacity planning")
     print("  - Open tickets today: Accurate real-time snapshot")
     print("  - Open tickets last 7 days: Estimated (85-90% accurate)")
     print("  - Open tickets older: Will be captured by daily scheduled runs")
