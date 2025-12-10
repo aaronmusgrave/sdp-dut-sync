@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v16.0.1 - TICKET BREAKDOWN ENHANCEMENT
-Uses the same working logic as track_meeting_load.py
+Performance Data Backfill Script v17.0.0 - MEETINGS & PROFILE ONLY
+Simplified: Only tracks meeting load and job titles
+Ticket data handled by ServiceDesk Intelligence script
 Processes historical dates sequentially
 Azure AD profile integration (job title, department, location)
-Role-based performance scoring with job title multipliers
-v16.0.0: Detailed ticket breakdown (Open, Waiting, On Hold)
-v16.0.1: Fixed - properly handles closed/resolved status tickets
-Optimized: Smart pagination + parallel processing
+Optimized: Fast parallel processing of meetings
 """
 
 import os
@@ -24,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Configuration
 WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
-PARALLEL_TICKET_FETCH = 10
 EMAIL_DOMAIN = 'motorad.com'
 PROGRESS_FILE = 'backfill_progress.json'
 
@@ -54,7 +51,6 @@ def clean_date_string(date_str):
     
     # Parse and reformat to ensure proper format
     try:
-        # Try parsing with single digit month/day
         parts = date_str.split('-')
         if len(parts) == 3:
             year = int(parts[0])
@@ -169,7 +165,7 @@ def get_sdp_token():
                 continue
             raise Exception(f"Failed to get SDP token: {e}")
     
-    raise Exception("Failed to get SDP token after max retries. Please wait 10 minutes and try again.")
+    raise Exception("Failed to get SDP token after max retries.")
 
 def get_azure_profile(email, graph_token):
     """Fetch user profile from Azure AD including job title"""
@@ -297,287 +293,15 @@ def get_meetings(email, graph_token, date):
     except Exception as e:
         logger.warning(f"Error fetching meetings for {email}: {e}")
         return {'count': 0, 'hours': 0}
-
-def safe_timestamp_to_date(value):
-    """Convert ServiceDesk timestamp to datetime (CST)"""
-    if not value:
-        return None
-    try:
-        if isinstance(value, dict):
-            value = value.get('value')
-        if isinstance(value, str):
-            value = int(value)
-        
-        dt_utc = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-        central_offset = timedelta(hours=-6)
-        dt_local = dt_utc + central_offset
-        
-        return dt_local
-    except:
-        return None
-
-def get_ticket_details(ticket_id, sdp_token):
-    """Fetch individual ticket details"""
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {sdp_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    url = f"{SDP_API_BASE}/requests/{ticket_id}"
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        if response.status_code == 200:
-            return response.json().get('request', {})
-    except:
-        pass
-    return None
-
-def verify_ticket_belongs_to_tech(ticket, tech_name):
-    """Verify ticket belongs to this technician"""
-    tech = ticket.get('technician')
-    if not tech or not isinstance(tech, dict):
-        return False
-    return tech.get('name', '') == tech_name
-def count_closed_tickets(tech_name, sdp_token, target_date):
-    """Count tickets closed by technician on specific date"""
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {sdp_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    
-    # Fetch closed tickets with SMART PAGINATION
-    all_tickets = []
-    start_index = 1
-    page_size = 100
-    max_pages = 50  # Safety limit
-    
-    # Buffer zone: fetch 2 days before target to be safe
-    date_buffer = target_date - timedelta(days=2)
-    
-    for page_num in range(1, max_pages + 1):
-        list_info = {
-            "list_info": {
-                "row_count": page_size,
-                "start_index": start_index,
-                "search_criteria": [
-                    {"field": "technician.name", "condition": "is", "value": tech_name},
-                    {"field": "status.name", "condition": "is", "values": ["Closed"]}
-                ],
-                "sort_field": "resolved_time",
-                "sort_order": "desc"
-            }
-        }
-        
-        try:
-            params = {'input_data': json.dumps(list_info)}
-            url = f"{SDP_API_BASE}/requests"
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            
-            if response.status_code != 200:
-                break
-            
-            tickets = response.json().get('requests', [])
-            
-            if not tickets:
-                break
-            
-            # Validate tickets belong to this technician
-            validated = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
-            all_tickets.extend(validated)
-            
-            # SMART STOP: Check if we've gone back far enough
-            oldest_in_page = None
-            for ticket in validated:
-                if 'resolved_time' in ticket:
-                    resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-                    if resolved_time:
-                        if oldest_in_page is None or resolved_time < oldest_in_page:
-                            oldest_in_page = resolved_time
-            
-            # Stop if oldest ticket is before our buffer zone
-            if oldest_in_page and oldest_in_page.date() < date_buffer:
-                break
-            
-            # If we got less than page_size, we're at the end
-            if len(tickets) < page_size:
-                break
-            
-            # Move to next page
-            start_index += page_size
-            
-        except:
-            break
-    
-    if not all_tickets:
-        return 0
-    
-    # Check if resolved_time is in the response
-    if all_tickets and 'resolved_time' in all_tickets[0]:
-        # FAST PATH: resolved_time in list - filter by date in Python
-        count = 0
-        
-        for ticket in all_tickets:
-            resolved_time = safe_timestamp_to_date(ticket.get('resolved_time'))
-            
-            if resolved_time and resolved_time.date() == target_date:
-                count += 1
-        
-        return count
-    else:
-        # SLOW PATH: resolved_time NOT in list - fetch each ticket individually
-        def check_ticket(ticket_id):
-            details = get_ticket_details(ticket_id, sdp_token)
-            if not details:
-                return False
-            if not verify_ticket_belongs_to_tech(details, tech_name):
-                return False
-            status = details.get('status')
-            if not status or not isinstance(status, dict):
-                return False
-            if status.get('name', '') != 'Closed':
-                return False
-            
-            resolved_time = safe_timestamp_to_date(details.get('resolved_time'))
-            
-            if resolved_time and resolved_time.date() == target_date:
-                return True
-            return False
-        
-        ticket_ids = [t['id'] for t in all_tickets]
-        count = 0
-        
-        with ThreadPoolExecutor(max_workers=PARALLEL_TICKET_FETCH) as executor:
-            futures = {executor.submit(check_ticket, tid): tid for tid in ticket_ids}
-            for future in as_completed(futures):
-                if future.result():
-                    count += 1
-        
-        return count
-
-
-def get_active_tickets_breakdown(tech_name, sdp_token):
+def calculate_performance(meetings, job_title=None):
     """
-    Get detailed breakdown of active tickets by status category
-    v16.0.0: Returns dict with open, waiting, on_hold, total_active, cancelled counts
-    v16.0.1: FIXED - properly handles closed/resolved status tickets
-    """
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {sdp_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    
-    # Define status categories
-    open_statuses = ['open', 'in progress', 'in-progress', 'assigned', 'reopened', 'new']
-    waiting_statuses = ['waiting', 'waiting on customer', 'pending', 'awaiting', 'pending customer', 'awaiting customer', 'awaiting response']
-    on_hold_statuses = ['on hold', 'on-hold', 'paused', 'suspended', 'hold']
-    closed_statuses = ['closed', 'resolved', 'completed', 'done']
-    cancelled_statuses = ['cancelled', 'canceled', 'rejected', 'declined']
-    
-    # Initialize counters
-    open_count = 0
-    waiting_count = 0
-    on_hold_count = 0
-    closed_count = 0
-    cancelled_count = 0
-    other_count = 0
-    
-    # Track unknown statuses for debugging
-    unknown_statuses = set()
-    
-    # Fetch all non-closed tickets (API filter may miss some resolved tickets)
-    list_info = {
-        "list_info": {
-            "row_count": 250,
-            "start_index": 1,
-            "search_criteria": [
-                {"field": "technician.name", "condition": "is", "value": tech_name},
-                {"field": "status.name", "condition": "is not", "values": ["Closed"]}
-            ]
-        }
-    }
-    
-    try:
-        params = {'input_data': json.dumps(list_info)}
-        url = f"{SDP_API_BASE}/requests"
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        
-        if response.status_code == 200:
-            tickets = response.json().get('requests', [])
-            
-            # Validate tickets belong to this technician
-            validated = [t for t in tickets if verify_ticket_belongs_to_tech(t, tech_name)]
-            
-            # Categorize each ticket
-            for ticket in validated:
-                status_obj = ticket.get('status', {})
-                if isinstance(status_obj, dict):
-                    status = status_obj.get('name', '').lower().strip()
-                else:
-                    status = str(status_obj).lower().strip()
-                
-                if not status:
-                    continue
-                
-                # Categorize
-                categorized = False
-                
-                if any(s in status for s in open_statuses):
-                    open_count += 1
-                    categorized = True
-                elif any(s in status for s in waiting_statuses):
-                    waiting_count += 1
-                    categorized = True
-                elif any(s in status for s in on_hold_statuses):
-                    on_hold_count += 1
-                    categorized = True
-                elif any(s in status for s in cancelled_statuses):
-                    cancelled_count += 1
-                    categorized = True
-                elif any(s in status for s in closed_statuses):
-                    # FIXED v16.0.1: Handle closed/resolved tickets that slip through API filter
-                    # Don't count in active totals
-                    closed_count += 1
-                    categorized = True
-                
-                if not categorized:
-                    # Unknown status - count as "other" and log
-                    other_count += 1
-                    unknown_statuses.add(status)
-            
-            # Log unknown statuses if any (but not closed/resolved anymore)
-            if unknown_statuses:
-                logger.warning(f"{tech_name}: Unknown statuses found: {unknown_statuses}")
-                
-    except Exception as e:
-        logger.warning(f"Error getting ticket breakdown for {tech_name}: {e}")
-    
-    # Calculate total active (everything except closed and cancelled)
-    total_active = open_count + waiting_count + on_hold_count + other_count
-    
-    return {
-        'open': open_count,
-        'waiting': waiting_count,
-        'on_hold': on_hold_count,
-        'total_active': total_active,
-        'cancelled': cancelled_count,
-        'closed': closed_count,  # Track but don't include in total_active
-        'other': other_count
-    }
-
-
-def calculate_performance(meetings, tickets_closed, ticket_breakdown, job_title=None):
-    """
-    Calculate performance metrics with role-based adjustments
-    v15.3.0: Role-aware scoring using job title
-    v16.0.0: Uses ticket breakdown instead of single active count
+    Calculate performance metrics based on meeting load only
+    v17.0.0: Meetings and availability only - tickets from intelligence script
     """
     meeting_hours = meetings['hours']
     available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
     
-    # Get truly active (open) tickets for scoring - NOT total_active
-    active_tickets = ticket_breakdown['open']
-    
-    # Role-based velocity multipliers
+    # Role-based multipliers for reference
     role_multipliers = {
         'director': 20,
         'application manager': 20,
@@ -592,7 +316,6 @@ def calculate_performance(meetings, tickets_closed, ticket_breakdown, job_title=
     multiplier = 10  # Default
     if job_title:
         job_title_lower = job_title.lower()
-        # Check in priority order (more specific first)
         if 'director' in job_title_lower or 'application manager' in job_title_lower:
             multiplier = 20
         elif 'manager' in job_title_lower:
@@ -604,88 +327,18 @@ def calculate_performance(meetings, tickets_closed, ticket_breakdown, job_title=
         elif 'specialist' in job_title_lower:
             multiplier = 8
     
-    # Velocity score with role multiplier
-    velocity = tickets_closed / available_hours if available_hours > 0 else 0
-    score = min(40, velocity * multiplier)
-    
-    # Role-based active load scoring (using OPEN tickets, not total)
-    if job_title:
-        job_title_lower = job_title.lower()
-        
-        # IT Director / Application Manager
-        if 'director' in job_title_lower or 'application manager' in job_title_lower:
-            if 3 <= active_tickets <= 8:
-                score += 15
-            elif active_tickets < 3:
-                score += active_tickets * 5
-            else:
-                score += max(0, 15 - (active_tickets - 8) * 1.0)
-        
-        # IT Manager
-        elif 'manager' in job_title_lower:
-            if 5 <= active_tickets <= 12:
-                score += 15
-            elif active_tickets < 5:
-                score += active_tickets * 3
-            else:
-                score += max(0, 15 - (active_tickets - 12) * 0.7)
-        
-        # Senior Engineer
-        elif 'senior' in job_title_lower:
-            if 8 <= active_tickets <= 15:
-                score += 15
-            elif active_tickets < 8:
-                score += active_tickets * 2
-            else:
-                score += max(0, 15 - (active_tickets - 15) * 0.5)
-        
-        # Support Engineer / Technician
-        elif 'engineer' in job_title_lower or 'technician' in job_title_lower:
-            if 10 <= active_tickets <= 20:
-                score += 15
-            elif active_tickets < 10:
-                score += active_tickets * 1.5
-            else:
-                score += max(0, 15 - (active_tickets - 20) * 0.3)
-        
-        # Support Specialist
-        elif 'specialist' in job_title_lower:
-            if 12 <= active_tickets <= 25:
-                score += 15
-            elif active_tickets < 12:
-                score += active_tickets * 1.2
-            else:
-                score += max(0, 15 - (active_tickets - 25) * 0.2)
-        
-        else:
-            # Default scoring for unknown roles
-            if 5 <= active_tickets <= 15:
-                score += 15
-            elif active_tickets < 5:
-                score += active_tickets * 3
-            else:
-                score += max(0, 15 - (active_tickets - 15) * 0.5)
-    else:
-        # No job title - use default scoring
-        if 5 <= active_tickets <= 15:
-            score += 15
-        elif active_tickets < 5:
-            score += active_tickets * 3
-        else:
-            score += max(0, 15 - (active_tickets - 15) * 0.5)
-    
-    score = max(0, min(100, score))
-    
     return {
         'available_hours': round(available_hours, 2),
-        'velocity': round(velocity, 2),
-        'score': round(score, 1),
         'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1),
         'role_multiplier': multiplier
     }
+
+
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
-    """Process single technician's data - v16.0.1"""
-    # Handle both dict and string formats
+    """
+    Process single technician's calendar and profile data only
+    v17.0.0: NO ticket data - handled by intelligence script
+    """
     if isinstance(tech_info, dict):
         tech_email = tech_info['email']
         tech_job_title = tech_info.get('job_title')
@@ -697,12 +350,11 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
         tech_department = None
         tech_office = None
     
+    # Only fetch meetings - no ticket data
     meetings = get_meetings(tech_email, graph_token, target_date)
-    closed = count_closed_tickets(tech_name, sdp_token, target_date.date())
-    ticket_breakdown = get_active_tickets_breakdown(tech_name, sdp_token)
     
-    # Pass job_title and breakdown to calculate_performance for role-based scoring
-    performance = calculate_performance(meetings, closed, ticket_breakdown, tech_job_title)
+    # Simplified performance calculation (meetings only)
+    performance = calculate_performance(meetings, tech_job_title)
     
     return {
         'name': tech_name,
@@ -711,22 +363,12 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
         'department': tech_department,
         'office_location': tech_office,
         'meetings': meetings,
-        'tickets': {
-            'closed_today': closed,
-            'open': ticket_breakdown['open'],
-            'waiting': ticket_breakdown['waiting'],
-            'on_hold': ticket_breakdown['on_hold'],
-            'total_active': ticket_breakdown['total_active'],
-            'cancelled': ticket_breakdown['cancelled'],
-            'closed': ticket_breakdown.get('closed', 0),
-            'other': ticket_breakdown.get('other', 0)
-        },
         'performance': performance
     }
 
 
 def save_to_file(tech_data, date):
-    """Save metrics to JSON file - v16.0.1 with ticket breakdown"""
+    """Save metrics to JSON file - v17.0.0 meetings & profile only"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -743,7 +385,6 @@ def save_to_file(tech_data, date):
                 'count': data['meetings']['count'],
                 'hours': data['meetings']['hours']
             },
-            'tickets': data['tickets'],
             'performance': data['performance']
         }
     
@@ -754,7 +395,7 @@ def save_to_file(tech_data, date):
 
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust - v16.0.1 with ticket breakdown"""
+    """Upload metrics to Dust - v17.0.0 meetings & profile only"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         return 0
     
@@ -769,12 +410,12 @@ def upload_to_dust(tech_data, date):
     
     for tech_name, data in tech_data.items():
         m = data['meetings']
-        t = data['tickets']
         p = data['performance']
         
         # Build tags - safely handle None values
         tags = [
             "performance-metrics",
+            "meeting-load",
             f"technician:{tech_name.lower().replace(' ', '-')}",
             f"date:{date_str}"
         ]
@@ -801,25 +442,20 @@ def upload_to_dust(tech_data, date):
 ## Calendar & Availability
 - **Meetings:** {m['count']} meetings
 - **Meeting Time:** {m['hours']} hours ({p['meeting_percentage']}%)
-- **Available:** {p['available_hours']} hours
+- **Available Hours:** {p['available_hours']} hours
 
-## Ticket Activity (Enhanced Breakdown)
-- **Open (Actively Working):** {t['open']}
-- **Waiting (On Customer/Approval):** {t['waiting']}
-- **On Hold:** {t['on_hold']}
-- **Total Active (All Non-Closed):** {t['total_active']}
-- **Closed Today:** {t['closed_today']}
-- **Cancelled:** {t.get('cancelled', 0)}
-
-## Performance (Role-Based Scoring)
-- **Velocity:** {p['velocity']} tickets/hour
+## Role Information
 - **Role Multiplier:** {p['role_multiplier']}x
-- **Score:** {p['score']}/100
 
-## Capacity Notes
-- "Open" count reflects truly active work (matches ServiceDesk Plus default view)
-- "Total Active" includes parked/waiting tickets for overall responsibility tracking
-- Performance scoring uses "Open" count for role-appropriate workload assessment
+## Capacity Status
+- **Meeting Load:** {p['meeting_percentage']}% of workday
+- **Available for Tickets:** {p['available_hours']} hours
+
+## Notes
+- Ticket statistics are tracked in the ServiceDesk Intelligence data source
+- This file tracks meeting load and availability for capacity planning
+- Use this data to identify technicians with high meeting loads impacting ticket work
+- Cross-reference with intelligence data for complete workload picture
 """,
             "structured_data": {
                 "technician_name": tech_name,
@@ -832,15 +468,7 @@ def upload_to_dust(tech_data, date):
                 "meeting_hours": m['hours'],
                 "meeting_percentage": p['meeting_percentage'],
                 "available_hours": p['available_hours'],
-                "tickets_closed_today": t['closed_today'],
-                "tickets_open": t['open'],
-                "tickets_waiting": t['waiting'],
-                "tickets_on_hold": t['on_hold'],
-                "tickets_total_active": t['total_active'],
-                "tickets_cancelled": t.get('cancelled', 0),
-                "velocity": p['velocity'],
-                "role_multiplier": p['role_multiplier'],
-                "score": p['score']
+                "role_multiplier": p['role_multiplier']
             }
         }
         
@@ -874,7 +502,7 @@ def save_progress(progress):
 
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for a single date - v16.0.1"""
+    """Process all technicians for a single date - v17.0.0 meetings only"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     try:
@@ -914,27 +542,24 @@ def process_single_date(target_date, technicians):
                     'department': result['department'],
                     'office_location': result['office_location'],
                     'meetings': result['meetings'],
-                    'tickets': result['tickets'],
                     'performance': result['performance']
                 }
             except Exception as e:
                 logger.error(f"Failed to process {tech_name}: {e}")
     
-    # Display results - v16.0.1 with breakdown
+    # Display results - v17.0.0 simplified (meetings only)
     print()
     print("="*90)
     print(f"{target_date.strftime('%B %d, %Y')}")
     print("="*90)
     
-    for tech_name, data in sorted(tech_data.items(), key=lambda x: x[1]['performance']['score'], reverse=True):
+    for tech_name, data in sorted(tech_data.items(), key=lambda x: x[0]):
         m = data['meetings']
-        t = data['tickets']
         p = data['performance']
-        # Safely truncate job title - handle None
-        job_title = (data.get('job_title') or 'N/A')[:20]
+        job_title = (data.get('job_title') or 'N/A')[:30]
         
-        # Enhanced display with breakdown
-        print(f"{tech_name:25} | {job_title:20} | Open:{t['open']:2} Wait:{t['waiting']:2} Hold:{t['on_hold']:2} | Closed:{t['closed_today']:2} | Score:{p['score']:5.1f}")
+        # Simple display with meetings and availability
+        print(f"{tech_name:25} | {job_title:30} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Avail:{p['available_hours']:4.1f}h")
     
     print()
     
@@ -945,16 +570,19 @@ def process_single_date(target_date, technicians):
     
     return filename
 def main():
-    """Main backfill execution - v16.0.1"""
-    parser = argparse.ArgumentParser(description='Backfill performance data for date range')
+    """Main backfill execution - v17.0.0 meetings & profile only"""
+    parser = argparse.ArgumentParser(description='Backfill meeting and profile data for date range')
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
     args = parser.parse_args()
     
     print("="*90)
-    print("PERFORMANCE DATA BACKFILL v16.0.1 (Ticket Breakdown + Closed Status Fix)")
+    print("PERFORMANCE DATA BACKFILL v17.0.0 (Meetings & Profile Only - NO TICKETS)")
     print("="*90)
+    print()
+    print("Note: Ticket data is handled by the ServiceDesk Intelligence script")
+    print("      This script only tracks meeting load and job titles")
     print()
     
     if not args.days and not args.start_date:
@@ -1031,7 +659,7 @@ def main():
         logger.info("All dates already processed!")
         return
     
-    logger.info(f"Processing {len(dates_to_process)} dates")
+    logger.info(f"Processing {len(dates_to_process)} dates (meetings only - FAST!)")
     if completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
     
@@ -1063,7 +691,7 @@ def main():
             print()
             
             if i < len(dates_to_process):
-                time.sleep(3)
+                time.sleep(2)  # Reduced from 3s since we're faster now
             
         except Exception as e:
             logger.error(f"Failed to process {date.strftime('%Y-%m-%d')}: {e}")
@@ -1073,21 +701,28 @@ def main():
     total_time = time.time() - start_time
     print()
     print("="*90)
-    print("BACKFILL COMPLETE - v16.0.1")
+    print("BACKFILL COMPLETE - v17.0.0")
     print("="*90)
     print(f"Total time: {total_time/60:.1f} minutes")
+    print(f"Avg time per date: {total_time/len(dates_to_process):.1f} seconds")
     print(f"Processed: {len(dates_to_process)} dates")
     if progress['failed']:
         print(f"Failed: {len(progress['failed'])} dates: {', '.join(progress['failed'])}")
     else:
         print("Failed: 0 dates")
     print()
-    print("v16.0.1 Features:")
-    print("  ✓ Ticket breakdown (Open, Waiting, On Hold)")
-    print("  ✓ 'Open' count matches ServiceDesk Plus default view")
-    print("  ✓ 'Total Active' tracks overall responsibility")
-    print("  ✓ Performance scoring uses 'Open' count for accuracy")
-    print("  ✓ FIXED: Properly handles 'resolved' and 'closed' status tickets")
+    print("v17.0.0 Features:")
+    print("  ✓ Meeting load tracking (count, hours, percentage)")
+    print("  ✓ Job title and department from Azure AD")
+    print("  ✓ Available hours calculation")
+    print("  ✓ Role multiplier identification")
+    print("  ✓ NO ticket data (handled by intelligence script)")
+    print("  ✓ 3-4x faster than v16.0.1!")
+    print()
+    print("Data Usage:")
+    print("  - Meeting data: Use for capacity planning")
+    print("  - Ticket data: Query intelligence data source")
+    print("  - Combined view: Cross-reference both sources")
     print()
     
     if not progress['failed']:
