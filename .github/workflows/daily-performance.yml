@@ -1,0 +1,75 @@
+name: Daily Performance Data Collection
+
+on:
+  # Run daily at 6:00 AM CST (12:00 PM UTC)
+  schedule:
+    - cron: '0 12 * * *'
+  
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to process (YYYY-MM-DD, leave empty for yesterday)'
+        required: false
+        type: string
+
+jobs:
+  collect-performance-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Calculate date to process
+        id: calc-date
+        run: |
+          if [ -n "\${{ inputs.date }}" ]; then
+            # Manual run with specific date
+            PROCESS_DATE="\${{ inputs.date }}"
+          else
+            # Scheduled run - process yesterday
+            PROCESS_DATE=\$(date -d "yesterday" +%Y-%m-%d)
+          fi
+          echo "date=\$PROCESS_DATE" >> \$GITHUB_OUTPUT
+          echo "Processing date: \$PROCESS_DATE"
+      
+      - name: Run performance data collection
+        env:
+          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        run: |
+          python scripts/backfill_performance.py \
+            --start-date "\${{ steps.calc-date.outputs.date }}" \
+            --end-date "\${{ steps.calc-date.outputs.date }}"
+      
+      - name: Upload artifacts (if any files generated)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-data-\${{ steps.calc-date.outputs.date }}
+          path: tech_performance_*.json
+          retention-days: 7
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Performance data collection failed for \${{ steps.calc-date.outputs.date }}"
+          echo "Check the workflow logs for details"
