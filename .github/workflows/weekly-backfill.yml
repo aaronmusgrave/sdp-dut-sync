@@ -33,19 +33,33 @@ jobs:
       - name: Determine dates
         id: dates
         run: |
+          echo "Event name: \${{ github.event_name }}"
+          echo "Input start_date: '\${{ inputs.start_date }}'"
+          echo "Input end_date: '\${{ inputs.end_date }}'"
+          
           if [ "\${{ github.event_name }}" = "schedule" ]; then
-            echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-            echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-            echo "Using scheduled defaults: last 7 days"
+            START=\$(date -d '7 days ago' +%Y-%m-%d)
+            END=\$(date -d yesterday +%Y-%m-%d)
+            echo "Using scheduled defaults"
           elif [ -z "\${{ inputs.start_date }}" ]; then
-            echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-            echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-            echo "No input provided, using defaults: last 7 days"
+            START=\$(date -d '7 days ago' +%Y-%m-%d)
+            END=\$(date -d yesterday +%Y-%m-%d)
+            echo "No input, using defaults"
           else
-            echo "start=\${{ inputs.start_date }}" >> \$GITHUB_OUTPUT
-            echo "end=\${{ inputs.end_date }}" >> \$GITHUB_OUTPUT
-            echo "Using provided dates: \${{ inputs.start_date }} to \${{ inputs.end_date }}"
+            START="\${{ inputs.start_date }}"
+            END="\${{ inputs.end_date }}"
+            echo "Using provided inputs"
           fi
+          
+          echo "Calculated START: \$START"
+          echo "Calculated END: \$END"
+          echo "start=\$START" >> \$GITHUB_OUTPUT
+          echo "end=\$END" >> \$GITHUB_OUTPUT
+      
+      - name: Verify outputs
+        run: |
+          echo "Step output start: '\${{ steps.dates.outputs.start }}'"
+          echo "Step output end: '\${{ steps.dates.outputs.end }}'"
       
       - name: Run performance data backfill
         env:
@@ -58,4 +72,8 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date \${{ steps.dates.outputs.start }} --end-date \${{ steps.dates.outputs.end }}
+        run: |
+          START="\${{ steps.dates.outputs.start }}"
+          END="\${{ steps.dates.outputs.end }}"
+          echo "About to run with: START='\$START' END='\$END'"
+          python scripts/backfill_performance.py --start-date "\$START" --end-date "\$END"
