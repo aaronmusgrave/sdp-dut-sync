@@ -28,24 +28,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate date to process
-        id: calc-date
+      - name: Get yesterday's date
+        if: inputs.date == ''
+        id: yesterday
+        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+      
+      - name: Set target date
+        id: target
         run: |
           if [ -n "\${{ inputs.date }}" ]; then
-            PROCESS_DATE="\${{ inputs.date }}"
+            echo "value=\${{ inputs.date }}" >> \$GITHUB_OUTPUT
           else
-            PROCESS_DATE=\$(date -d "yesterday" +%Y-%m-%d)
+            echo "value=\${{ steps.yesterday.outputs.value }}" >> \$GITHUB_OUTPUT
           fi
-          echo "date=\$PROCESS_DATE" >> \$GITHUB_OUTPUT
-          echo "📸 Creating final snapshot for \$PROCESS_DATE"
       
-      - name: Verify date was set
-        run: |
-          echo "Captured date: \${{ steps.calc-date.outputs.date }}"
-          if [ -z "\${{ steps.calc-date.outputs.date }}" ]; then
-            echo "ERROR: Date was not set properly"
-            exit 1
-          fi
+      - name: Display target date
+        run: echo "Processing date: \${{ steps.target.outputs.value }}"
       
       - name: Run performance data collection
         env:
@@ -58,22 +56,15 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          TARGET_DATE: \${{ steps.calc-date.outputs.date }}
         run: |
-          echo "📸 Capturing final snapshot for yesterday..."
-          echo "Target date: \$TARGET_DATE"
-          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
+          echo "Capturing snapshot for \${{ steps.target.outputs.value }}"
+          python scripts/backfill_performance.py --start-date "\${{ steps.target.outputs.value }}" --end-date "\${{ steps.target.outputs.value }}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-snapshot-\${{ steps.calc-date.outputs.date }}
+          name: performance-snapshot-\${{ steps.target.outputs.value }}
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
-      
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "❌ Daily snapshot failed for \${{ steps.calc-date.outputs.date }}"
