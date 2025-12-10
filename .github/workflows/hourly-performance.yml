@@ -1,17 +1,17 @@
-name: Daily Performance Data Snapshot
+name: Weekly Performance Data Backfill
 
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 13 * * 0'
   workflow_dispatch:
     inputs:
-      date:
-        description: 'Date to process (YYYY-MM-DD, leave empty for yesterday)'
+      days:
+        description: 'Number of days to backfill'
         required: false
-        default: ''
+        default: '7'
 
 jobs:
-  collect-performance-snapshot:
+  backfill-performance-data:
     runs-on: ubuntu-latest
     
     steps:
@@ -28,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Run performance data collection
+      - name: Run performance data backfill
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -39,11 +39,13 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          INPUT_DATE: \${{ inputs.date }}
+          DAYS_INPUT: \${{ inputs.days }}
         run: |
-          if [ -n "\$INPUT_DATE" ]; then
-            TARGET_DATE="\$INPUT_DATE"
+          if [ -z "\$DAYS_INPUT" ]; then
+            DAYS=7
           else
-            TARGET_DATE=\$(date -d yesterday +%Y-%m-%d)
+            DAYS="\$DAYS_INPUT"
           fi
-          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
+          START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
+          END_DATE=\$(date -d yesterday +%Y-%m-%d)
+          python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
