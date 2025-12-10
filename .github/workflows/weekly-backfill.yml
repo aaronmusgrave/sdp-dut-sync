@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'Start date (YYYY-MM-DD)'
-        required: true
+        description: 'Start date (YYYY-MM-DD, leave empty for defaults)'
+        required: false
         default: ''
       end_date:
-        description: 'End date (YYYY-MM-DD)'
-        required: true
+        description: 'End date (YYYY-MM-DD, leave empty for defaults)'
+        required: false
         default: ''
 
 jobs:
@@ -32,8 +32,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Set dates for scheduled run
-        id: dates
+      - name: Calculate default dates
+        id: defaults
         run: |
           echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
           echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
@@ -49,7 +49,6 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          START="\${{ inputs.start_date || steps.dates.outputs.start }}"
-          END="\${{ inputs.end_date || steps.dates.outputs.end }}"
-          python scripts/backfill_performance.py --start-date \$START --end-date \$END
+          START_DATE: \${{ inputs.start_date || steps.defaults.outputs.start }}
+          END_DATE: \${{ inputs.end_date || steps.defaults.outputs.end }}
+        run: python scripts/backfill_performance.py --start-date \$START_DATE --end-date \$END_DATE
