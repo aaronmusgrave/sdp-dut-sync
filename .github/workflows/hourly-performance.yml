@@ -1,12 +1,17 @@
-name: Hourly Performance Data Update
+name: Daily Performance Data Snapshot
 
 on:
   schedule:
-    - cron: '0 14-23 * * 1-5'
+    - cron: '0 12 * * *'
   workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to process (YYYY-MM-DD, leave empty for yesterday)'
+        required: false
+        default: ''
 
 jobs:
-  update-current-performance:
+  collect-performance-snapshot:
     runs-on: ubuntu-latest
     
     steps:
@@ -34,4 +39,11 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date $(date +%Y-%m-%d) --end-date $(date +%Y-%m-%d)
+          INPUT_DATE: \${{ inputs.date }}
+        run: |
+          if [ -n "\$INPUT_DATE" ]; then
+            TARGET_DATE="\$INPUT_DATE"
+          else
+            TARGET_DATE=\$(date -d yesterday +%Y-%m-%d)
+          fi
+          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
