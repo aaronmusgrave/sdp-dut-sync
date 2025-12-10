@@ -9,7 +9,6 @@ on:
         description: 'Number of days to backfill'
         required: false
         default: '7'
-        type: string
 
 jobs:
   backfill-performance-data:
@@ -29,21 +28,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate start date
-        id: start
+      - name: Calculate date range
+        id: vars
         run: |
-          DAYS=\${{ inputs.days }}
-          if [ -z "\$DAYS" ]; then
+          DAYS="\${{ inputs.days }}"
+          if [ -z "\${DAYS}" ]; then
             DAYS=7
           fi
-          echo "value=$(date -d "\$DAYS days ago" +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Calculate end date
-        id: end
-        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Display date range
-        run: echo "Backfilling from \${{ steps.start.outputs.value }} to \${{ steps.end.outputs.value }}"
+          START=$(date -d "\${DAYS} days ago" +%Y-%m-%d)
+          END=\$(date -d yesterday +%Y-%m-%d)
+          echo "start=\${START}" >> "\$GITHUB_OUTPUT"
+          echo "end=\${END}" >> "\$GITHUB_OUTPUT"
+          echo "Range: \${START} to \${END}"
       
       - name: Run performance data backfill
         env:
@@ -56,13 +52,15 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date "\${{ steps.start.outputs.value }}" --end-date "\${{ steps.end.outputs.value }}"
+          START_DATE: \${{ steps.vars.outputs.start }}
+          END_DATE: \${{ steps.vars.outputs.end }}
+        run: python scripts/backfill_performance.py --start-date "\${START_DATE}" --end-date "\${END_DATE}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-backfill-\${{ steps.end.outputs.value }}
+          name: performance-backfill-\${{ steps.vars.outputs.end }}
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
