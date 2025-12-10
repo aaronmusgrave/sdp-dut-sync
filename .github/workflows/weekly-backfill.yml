@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'Start date (YYYY-MM-DD, leave empty for 7 days ago)'
-        required: false
+        description: 'Start date (YYYY-MM-DD)'
+        required: true
         default: ''
       end_date:
-        description: 'End date (YYYY-MM-DD, leave empty for yesterday)'
-        required: false
+        description: 'End date (YYYY-MM-DD)'
+        required: true
         default: ''
 
 jobs:
@@ -32,22 +32,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate dates
+      - name: Set dates for scheduled run
         id: dates
         run: |
-          if [ -n "\${{ inputs.start_date }}" ]; then
-            START="\${{ inputs.start_date }}"
-          else
-            START=\$(date -d '7 days ago' +%Y-%m-%d)
-          fi
-          if [ -n "\${{ inputs.end_date }}" ]; then
-            END="\${{ inputs.end_date }}"
-          else
-            END=\$(date -d yesterday +%Y-%m-%d)
-          fi
-          echo "start=\$START" >> \$GITHUB_OUTPUT
-          echo "end=\$END" >> \$GITHUB_OUTPUT
-          echo "Calculated: \$START to \$END"
+          echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
       
       - name: Run performance data backfill
         env:
@@ -60,6 +49,7 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          START_DATE: \${{ steps.dates.outputs.start }}
-          END_DATE: \${{ steps.dates.outputs.end }}
-        run: python scripts/backfill_performance.py --start-date \$START_DATE --end-date \$END_DATE
+        run: |
+          START="\${{ inputs.start_date || steps.dates.outputs.start }}"
+          END="\${{ inputs.end_date || steps.dates.outputs.end }}"
+          python scripts/backfill_performance.py --start-date \$START --end-date \$END
