@@ -28,19 +28,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate date range
-        id: vars
-        shell: bash
+      - name: Get days input
+        id: days
         run: |
           DAYS="\${{ inputs.days }}"
           if [ -z "\$DAYS" ]; then
             DAYS=7
           fi
-          echo "start=$(date -d "\$DAYS days ago" +%Y-%m-%d)" >> "\$GITHUB_OUTPUT"
-          echo "end=$(date -d yesterday +%Y-%m-%d)" >> "\$GITHUB_OUTPUT"
+          echo "value=\$DAYS" >> \$GITHUB_OUTPUT
+      
+      - name: Calculate start date
+        id: start
+        run: echo "value=$(date -d '\${{ steps.days.outputs.value }} days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+      
+      - name: Calculate end date
+        id: end
+        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+      
+      - name: Verify dates
+        run: |
+          echo "Start: \${{ steps.start.outputs.value }}"
+          echo "End: \${{ steps.end.outputs.value }}"
       
       - name: Run performance data backfill
-        shell: bash
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -51,16 +61,13 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          python scripts/backfill_performance.py \
-            --start-date '\${{ steps.vars.outputs.start }}' \
-            --end-date '\${{ steps.vars.outputs.end }}'
+        run: python scripts/backfill_performance.py --start-date \${{ steps.start.outputs.value }} --end-date \${{ steps.end.outputs.value }}
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-backfill-\${{ steps.vars.outputs.end }}
+          name: performance-backfill-\${{ steps.end.outputs.value }}
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
