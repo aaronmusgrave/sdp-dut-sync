@@ -8,9 +8,6 @@ on:
 jobs:
   update-current-performance:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
     
     steps:
       - name: Checkout repository
@@ -28,13 +25,13 @@ jobs:
       
       - name: Set date variables
         id: vars
+        shell: bash
         run: |
-          TODAY="\$(date +%Y-%m-%d)"
-          TIME="\$(date +%H-%M)"
-          echo "date=\$TODAY" >> "\$GITHUB_OUTPUT"
-          echo "time=\$TIME" >> "\$GITHUB_OUTPUT"
+          echo "date=$(date +%Y-%m-%d)" >> "\$GITHUB_OUTPUT"
+          echo "time=$(date +%H-%M)" >> "\$GITHUB_OUTPUT"
       
       - name: Run performance data collection
+        shell: bash
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -45,9 +42,10 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          TARGET_DATE: \${{ steps.vars.outputs.date }}
         run: |
-          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
+          python scripts/backfill_performance.py \
+            --start-date '\${{ steps.vars.outputs.date }}' \
+            --end-date '\${{ steps.vars.outputs.date }}'
       
       - name: Upload artifacts
         if: always()
