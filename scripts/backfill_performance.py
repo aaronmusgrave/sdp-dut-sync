@@ -463,21 +463,21 @@ def calculate_performance(meetings, closed_tickets, job_title=None):
         },
         'senior': {
             'multiplier': 12,
-            'expected_tickets_per_day': 8,
+            'expected_tickets_per_day': 6,
             'expected_complexity': 6,
             'normal_meeting_hours': (1, 3),
             'title_keywords': ['senior']
         },
         'engineer': {
             'multiplier': 10,
-            'expected_tickets_per_day': 10,
+            'expected_tickets_per_day': 6,
             'expected_complexity': 5,
             'normal_meeting_hours': (0, 2),
             'title_keywords': ['engineer', 'technician']
         },
         'specialist': {
             'multiplier': 8,
-            'expected_tickets_per_day': 12,
+            'expected_tickets_per_day': 8,
             'expected_complexity': 3,
             'normal_meeting_hours': (0, 1),
             'title_keywords': ['specialist', 'analyst']
