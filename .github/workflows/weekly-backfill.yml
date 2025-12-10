@@ -54,7 +54,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-backfill-\$(date +%Y-%m-%d)
+          name: performance-backfill-\${{ github.run_number }}
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
