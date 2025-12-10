@@ -75,6 +75,4 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          START_DATE: \${{ steps.start.outputs.value }}
-          END_DATE: \${{ steps.end.outputs.value }}
-        run: python scripts/backfill_performance.py --start-date \$START_DATE --end-date \$END_DATE
+        run: python scripts/backfill_performance.py --start-date \${{ steps.start.outputs.value }} --end-date \${{ steps.end.outputs.value }}
