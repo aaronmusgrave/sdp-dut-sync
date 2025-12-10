@@ -28,6 +28,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
+      - name: Get yesterday's date
+        id: yesterday
+        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+      
+      - name: Determine target date
+        id: target
+        run: |
+          if [ -n "\${{ inputs.date }}" ]; then
+            echo "value=\${{ inputs.date }}" >> \$GITHUB_OUTPUT
+          else
+            echo "value=\${{ steps.yesterday.outputs.value }}" >> \$GITHUB_OUTPUT
+          fi
+      
       - name: Run performance data collection
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
@@ -39,11 +52,5 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          MANUAL_DATE: \${{ inputs.date }}
-        run: |
-          if [ -z "\$MANUAL_DATE" ]; then
-            TARGET=\$(date -d yesterday +%Y-%m-%d)
-          else
-            TARGET="\$MANUAL_DATE"
-          fi
-          python scripts/backfill_performance.py --start-date "\$TARGET" --end-date "\$TARGET"
+          TARGET_DATE: \${{ steps.target.outputs.value }}
+        run: python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
