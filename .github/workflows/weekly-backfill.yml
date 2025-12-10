@@ -2,7 +2,7 @@ name: Weekly Performance Data Backfill
 
 on:
   schedule:
-    - cron: '0 13 * * 0'  # 7 AM CST Sundays
+    - cron: '0 13 * * 0'
   workflow_dispatch:
     inputs:
       start_date:
@@ -77,4 +77,4 @@ jobs:
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
           START_DATE: \${{ steps.start.outputs.value }}
           END_DATE: \${{ steps.end.outputs.value }}
-        run: python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
+        run: python scripts/backfill_performance.py --start-date \$START_DATE --end-date \$END_DATE
