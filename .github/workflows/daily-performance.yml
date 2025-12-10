@@ -42,7 +42,12 @@ jobs:
           fi
       
       - name: Verify target
-        run: echo "Target date: \${{ steps.target.outputs.value }}"
+        run: |
+          echo "Target date: \${{ steps.target.outputs.value }}"
+          if [ -z "\${{ steps.target.outputs.value }}" ]; then
+            echo "ERROR: Target date not set"
+            exit 1
+          fi
       
       - name: Run performance data collection
         env:
@@ -55,7 +60,7 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date \${{ steps.target.outputs.value }} --end-date \${{ steps.target.outputs.value }}
+        run: python scripts/backfill_performance.py --start-date "\${{ steps.target.outputs.value }}" --end-date "\${{ steps.target.outputs.value }}"
       
       - name: Upload artifacts
         if: always()
