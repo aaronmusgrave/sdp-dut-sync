@@ -43,9 +43,9 @@ jobs:
           END_DATE=\$(date -d "yesterday" +%Y-%m-%d)
           START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
           
-          echo "start=\$START_DATE" >> \$GITHUB_OUTPUT
-          echo "end=\$END_DATE" >> \$GITHUB_OUTPUT
-          echo "Backfilling from \$START_DATE to \$END_DATE"
+          echo "start=\${START_DATE}" >> \$GITHUB_OUTPUT
+          echo "end=\${END_DATE}" >> \$GITHUB_OUTPUT
+          echo "Backfilling from \${START_DATE} to \${END_DATE}"
       
       - name: Run performance data backfill
         env:
@@ -67,6 +67,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-data-backfill-\${{ steps.calc-range.outputs.end }}
+          name: performance-backfill-\${{ steps.calc-range.outputs.end }}
           path: tech_performance_*.json
           retention-days: 7
+          if-no-files-found: warn
