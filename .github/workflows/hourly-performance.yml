@@ -1,0 +1,67 @@
+name: Hourly Performance Data Update
+
+on:
+  # Run every hour during business hours (8 AM - 6 PM CST = 2 PM - 12 AM UTC)
+  schedule:
+    - cron: '0 14-23 * * 1-5'  # Sun-Fri, 12 AM - 7 PM CST (hourly)
+  
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  update-current-performance:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Get current date
+        id: calc-date
+        run: |
+          CURRENT_DATE=\$(date +%Y-%m-%d)
+          CURRENT_TIME=\$(date +"%H:%M %Z")
+          echo "date=\$CURRENT_DATE" >> \$GITHUB_OUTPUT
+          echo "time=\$CURRENT_TIME" >> \$GITHUB_OUTPUT
+          echo "Updating performance data for \$CURRENT_DATE at \$CURRENT_TIME"
+      
+      - name: Run performance data collection (TODAY)
+        env:
+          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        run: |
+          echo "🔄 Updating current day performance data..."
+          python scripts/backfill_performance.py \
+            --start-date "\${{ steps.calc-date.outputs.date }}" \
+            --end-date "\${{ steps.calc-date.outputs.date }}"
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-data-hourly-\${{ steps.calc-date.outputs.date }}
+          path: tech_performance_*.json
+          retention-days: 2
+      
+      - name: Summary
+        if: success()
+        run: |
+          echo "✅ Performance data updated at \${{ steps.calc-date.outputs.time }}"
+          echo "📊 Current day snapshot with real-time ticket counts"
