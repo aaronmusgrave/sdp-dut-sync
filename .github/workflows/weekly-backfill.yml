@@ -6,16 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'Start date (YYYY-MM-DD, leave empty for defaults)'
+        description: 'Start date (YYYY-MM-DD, leave empty for last 7 days)'
         required: false
-        default: ''
       end_date:
-        description: 'End date (YYYY-MM-DD, leave empty for defaults)'
+        description: 'End date (YYYY-MM-DD, leave empty for yesterday)'
         required: false
-        default: ''
 
 jobs:
-  backfill-performance-data:
+  weekly-or-custom-backfill:
     runs-on: ubuntu-latest
     
     steps:
@@ -32,14 +30,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate default dates
-        id: defaults
+      - name: Determine dates
+        id: dates
         run: |
-          echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-          echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          if [ "\${{ github.event_name }}" = "schedule" ]; then
+            echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+            echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+            echo "Using scheduled defaults: last 7 days"
+          elif [ -z "\${{ inputs.start_date }}" ]; then
+            echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+            echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+            echo "No input provided, using defaults: last 7 days"
+          else
+            echo "start=\${{ inputs.start_date }}" >> \$GITHUB_OUTPUT
+            echo "end=\${{ inputs.end_date }}" >> \$GITHUB_OUTPUT
+            echo "Using provided dates: \${{ inputs.start_date }} to \${{ inputs.end_date }}"
+          fi
       
       - name: Run performance data backfill
-        shell: bash
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -50,9 +58,4 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          START_DATE: \${{ inputs.start_date || steps.defaults.outputs.start }}
-          END_DATE: \${{ inputs.end_date || steps.defaults.outputs.end }}
-        run: |
-          echo "START_DATE is: \$START_DATE"
-          echo "END_DATE is: \$END_DATE"
-          python scripts/backfill_performance.py --start-date "\${START_DATE}" --end-date "\${END_DATE}"
+        run: python scripts/backfill_performance.py --start-date \${{ steps.dates.outputs.start }} --end-date \${{ steps.dates.outputs.end }}
