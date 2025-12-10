@@ -1,12 +1,17 @@
-name: Hourly Performance Data Update
+name: Daily Performance Data Snapshot
 
 on:
   schedule:
-    - cron: '0 14-23 * * 1-5'
+    - cron: '0 12 * * *'
   workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to process (YYYY-MM-DD, leave empty for yesterday)'
+        required: false
+        default: ''
 
 jobs:
-  update-current-performance:
+  collect-performance-snapshot:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,13 +31,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Set date variables
+      - name: Set target date
         id: vars
         run: |
-          TODAY="\$(date +%Y-%m-%d)"
-          TIME="\$(date +%H-%M)"
-          echo "date=\$TODAY" >> "\$GITHUB_OUTPUT"
-          echo "time=\$TIME" >> "\$GITHUB_OUTPUT"
+          if [ -n "\${{ inputs.date }}" ]; then
+            TARGET="\${{ inputs.date }}"
+          else
+            TARGET="\$(date -d yesterday +%Y-%m-%d)"
+          fi
+          echo "date=\$TARGET" >> "\$GITHUB_OUTPUT"
       
       - name: Run performance data collection
         env:
@@ -53,7 +60,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-hourly-\${{ steps.vars.outputs.date }}-\${{ steps.vars.outputs.time }}
+          name: performance-snapshot-\${{ steps.vars.outputs.date }}
           path: tech_performance_*.json
-          retention-days: 2
+          retention-days: 7
           if-no-files-found: warn
