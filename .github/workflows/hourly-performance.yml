@@ -25,11 +25,22 @@ jobs:
       
       - name: Get current date and time
         id: datetime
-        shell: bash
         run: |
-          echo "date=$(date +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-          echo "time=$(date +%H-%M)" >> \$GITHUB_OUTPUT
-          echo "Updating performance data for $(date +%Y-%m-%d) at $(date +%H:%M)"
+          CURRENT_DATE=\$(date +%Y-%m-%d)
+          CURRENT_TIME=\$(date +%H-%M)
+          echo "date=\$CURRENT_DATE" >> \$GITHUB_OUTPUT
+          echo "time=\$CURRENT_TIME" >> \$GITHUB_OUTPUT
+          echo "Date to process: \$CURRENT_DATE"
+          echo "Time: \$CURRENT_TIME"
+      
+      - name: Verify date was set
+        run: |
+          echo "Captured date: \${{ steps.datetime.outputs.date }}"
+          echo "Captured time: \${{ steps.datetime.outputs.time }}"
+          if [ -z "\${{ steps.datetime.outputs.date }}" ]; then
+            echo "ERROR: Date was not set properly"
+            exit 1
+          fi
       
       - name: Run performance data collection
         env:
@@ -42,12 +53,11 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        shell: bash
+          TARGET_DATE: \${{ steps.datetime.outputs.date }}
         run: |
           echo "🔄 Updating current day performance data..."
-          python scripts/backfill_performance.py \
-            --start-date "\${{ steps.datetime.outputs.date }}" \
-            --end-date "\${{ steps.datetime.outputs.date }}"
+          echo "Target date: \$TARGET_DATE"
+          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
       
       - name: Upload artifacts
         if: always()
@@ -60,7 +70,6 @@ jobs:
       
       - name: Summary
         if: success()
-        shell: bash
         run: |
           echo "✅ Performance data updated for \${{ steps.datetime.outputs.date }}"
           echo "📊 Current day snapshot with real-time ticket counts"
