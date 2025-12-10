@@ -1,11 +1,8 @@
 name: Weekly Performance Data Backfill
 
 on:
-  # Run every Sunday at 7:00 AM CST (1:00 PM UTC)
   schedule:
     - cron: '0 13 * * 0'
-  
-  # Allow manual trigger
   workflow_dispatch:
     inputs:
       days:
@@ -34,15 +31,14 @@ jobs:
       
       - name: Calculate date range
         id: calc-range
+        shell: bash
         run: |
           DAYS="\${{ inputs.days }}"
           if [ -z "\$DAYS" ]; then
             DAYS=7
           fi
-          
           END_DATE=\$(date -d "yesterday" +%Y-%m-%d)
           START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
-          
           echo "start=\${START_DATE}" >> \$GITHUB_OUTPUT
           echo "end=\${END_DATE}" >> \$GITHUB_OUTPUT
           echo "Backfilling from \${START_DATE} to \${END_DATE}"
@@ -58,6 +54,7 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        shell: bash
         run: |
           python scripts/backfill_performance.py \
             --start-date "\${{ steps.calc-range.outputs.start }}" \
