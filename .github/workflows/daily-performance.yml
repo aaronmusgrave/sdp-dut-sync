@@ -13,9 +13,6 @@ on:
 jobs:
   collect-performance-snapshot:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
     
     steps:
       - name: Checkout repository
@@ -33,15 +30,16 @@ jobs:
       
       - name: Set target date
         id: vars
+        shell: bash
         run: |
           if [ -n "\${{ inputs.date }}" ]; then
-            TARGET="\${{ inputs.date }}"
+            echo "date=\${{ inputs.date }}" >> "\$GITHUB_OUTPUT"
           else
-            TARGET="\$(date -d yesterday +%Y-%m-%d)"
+            echo "date=$(date -d yesterday +%Y-%m-%d)" >> "\$GITHUB_OUTPUT"
           fi
-          echo "date=\$TARGET" >> "\$GITHUB_OUTPUT"
       
       - name: Run performance data collection
+        shell: bash
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -52,9 +50,10 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          TARGET_DATE: \${{ steps.vars.outputs.date }}
         run: |
-          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
+          python scripts/backfill_performance.py \
+            --start-date '\${{ steps.vars.outputs.date }}' \
+            --end-date '\${{ steps.vars.outputs.date }}'
       
       - name: Upload artifacts
         if: always()
