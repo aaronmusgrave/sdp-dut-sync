@@ -6,84 +6,30 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: 'Start date (YYYY-MM-DD, leave empty for last 7 days)'
+        description: 'Start date (YYYY-MM-DD)'
         required: false
-        default: ''
       end_date:
-        description: 'End date (YYYY-MM-DD, leave empty for yesterday)'
+        description: 'End date (YYYY-MM-DD)'
         required: false
-        default: ''
 
 jobs:
-  weekly-or-custom-backfill:
+  backfill:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
-      - name: Install dependencies
+      - run: pip install requests
+      
+      - id: calc_dates
         run: |
-          python -m pip install --upgrade pip
-          pip install requests
+          echo "start=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          echo "end=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
       
-      - name: Calculate default start
-        id: default_start
-        run: echo "value=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Calculate default end
-        id: default_end
-        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
-      
-      - name: Verify defaults
-        run: |
-          echo "Default start: \${{ steps.default_start.outputs.value }}"
-          echo "Default end: \${{ steps.default_end.outputs.value }}"
-      
-      - name: Set start date
-        id: start
-        env:
-          INPUT: \${{ inputs.start_date }}
-          DEFAULT: \${{ steps.default_start.outputs.value }}
-        run: |
-          echo "INPUT is: '\$INPUT'"
-          echo "DEFAULT is: '\$DEFAULT'"
-          echo "GITHUB_OUTPUT is: \$GITHUB_OUTPUT"
-          if [ -z "\$INPUT" ]; then
-            echo "Using default"
-            echo "value=\$DEFAULT" >> \$GITHUB_OUTPUT
-          else
-            echo "Using input"
-            echo "value=\$INPUT" >> \$GITHUB_OUTPUT
-          fi
-          echo "Contents of GITHUB_OUTPUT:"
-          cat \$GITHUB_OUTPUT || echo "Could not read GITHUB_OUTPUT"
-      
-      - name: Set end date
-        id: end
-        env:
-          INPUT: \${{ inputs.end_date }}
-          DEFAULT: \${{ steps.default_end.outputs.value }}
-        run: |
-          echo "INPUT is: '\$INPUT'"
-          echo "DEFAULT is: '\$DEFAULT'"
-          if [ -z "\$INPUT" ]; then
-            echo "value=\$DEFAULT" >> \$GITHUB_OUTPUT
-          else
-            echo "value=\$INPUT" >> \$GITHUB_OUTPUT
-          fi
-      
-      - name: Verify final dates
-        run: |
-          echo "Final start: '\${{ steps.start.outputs.value }}'"
-          echo "Final end: '\${{ steps.end.outputs.value }}'"
-      
-      - name: Run performance data backfill
+      - run: python scripts/backfill_performance.py --start-date \${{ inputs.start_date || steps.calc_dates.outputs.start }} --end-date \${{ inputs.end_date || steps.calc_dates.outputs.end }}
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -94,6 +40,3 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          echo "About to run with start=\${{ steps.start.outputs.value }} end=\${{ steps.end.outputs.value }}"
-          python scripts/backfill_performance.py --start-date "\${{ steps.start.outputs.value }}" --end-date "\${{ steps.end.outputs.value }}"
