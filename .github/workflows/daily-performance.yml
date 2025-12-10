@@ -28,6 +28,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
+      - name: Calculate target date
+        id: date
+        run: |
+          if [ -n "\${{ inputs.date }}" ]; then
+            echo "value=\${{ inputs.date }}" >> \$GITHUB_OUTPUT
+          else
+            echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          fi
+      
       - name: Run performance data collection
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
@@ -39,20 +48,4 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          INPUT_DATE: \${{ inputs.date }}
-        run: |
-          if [ -n "\$INPUT_DATE" ]; then
-            TARGET_DATE="\$INPUT_DATE"
-          else
-            TARGET_DATE=\$(date -d yesterday +%Y-%m-%d)
-          fi
-          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
-      
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: performance-snapshot-\${{ github.run_number }}
-          path: tech_performance_*.json
-          retention-days: 7
-          if-no-files-found: warn
+        run: python scripts/backfill_performance.py --start-date "\${{ steps.date.outputs.value }}" --end-date "\${{ steps.date.outputs.value }}"
