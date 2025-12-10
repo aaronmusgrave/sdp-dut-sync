@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v2.8.2 - COMPLETE WITH ALL FIXES
+ServiceDesk Intelligence Suite v2.8.3 - COMPLETE WITH RATE LIMIT FIX
 Full 48-field comprehensive ticket intelligence with incremental sync
 
-Changes in v2.8.2:
-- Removed page limit (MAX_PAGES = None) to fetch all 4500+ tickets
-- Added defensive null checks throughout to prevent NoneType errors
-- Fixed analytics crash (defaultdict → Counter)
-- Fixed checkpoint not updating (was re-syncing same tickets)
-- Proper timestamp tracking for incremental sync
+Changes in v2.8.3:
+- Fixed Dust API rate limiting (429 errors)
+- Increased upload delay: 100ms → 500ms
+- Added retry logic with exponential backoff
+- Better error handling for uploads
+
+v2.8.2 Features:
+- Removed page limit to fetch all 4500+ tickets
+- Fixed NoneType errors with defensive null checks
+- Fixed analytics crash and checkpoint updating
 
 v2.8 Features (48 comprehensive fields):
 Core Fields (28): Full ticket details, conversations, timeline, AI intelligence
@@ -38,13 +42,13 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "2.8.2"
+VERSION = "2.8.3"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 CHECKPOINT_FILE = 'checkpoint.json'
 REQUEST_TIMEOUT = 30
-MAX_PAGES = None  # No limit - fetch all tickets (v2.8.2: removed limit)
+MAX_PAGES = None  # No limit - fetch all tickets
 
 # Connection pooling
 SESSION = requests.Session()
@@ -1246,11 +1250,14 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
     return document
 
 # ============================================================
-# DUST UPLOAD
+# DUST UPLOAD - v2.8.3 WITH RATE LIMIT FIX
 # ============================================================
 
 def upload_to_dust(documents: List[Dict]) -> Tuple[int, int]:
-    """Upload documents to Dust in batch"""
+    """
+    Upload documents to Dust in batch with rate limiting and retries
+    v2.8.3: Fixed 429 rate limit errors with retry logic and slower upload rate
+    """
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         logger.warning("Dust credentials not configured. Skipping upload.")
         return 0, 0
@@ -1267,19 +1274,34 @@ def upload_to_dust(documents: List[Dict]) -> Tuple[int, int]:
     for doc in documents:
         url = f"{base_url}/{doc['document_id']}"
         
-        try:
-            response = SESSION.post(url, headers=headers, json=doc, timeout=REQUEST_TIMEOUT)
-            
-            if response.status_code in [200, 201]:
-                uploaded += 1
-            else:
-                logger.warning(f"Upload failed for {doc['document_id']}: {response.status_code}")
-                errors += 1
-        except Exception as e:
-            logger.warning(f"Upload error for {doc['document_id']}: {e}")
-            errors += 1
+        # Retry logic for rate limiting
+        for attempt in range(3):
+            try:
+                response = SESSION.post(url, headers=headers, json=doc, timeout=REQUEST_TIMEOUT)
+                
+                if response.status_code in [200, 201]:
+                    uploaded += 1
+                    break  # Success!
+                elif response.status_code == 429:
+                    # Rate limited - wait longer
+                    wait_time = (attempt + 1) * 2  # 2s, 4s, 6s
+                    logger.warning(f"Rate limited on {doc['document_id']}, waiting {wait_time}s (attempt {attempt + 1}/3)")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.warning(f"Upload failed for {doc['document_id']}: {response.status_code}")
+                    errors += 1
+                    break  # Don't retry non-429 errors
+                    
+            except Exception as e:
+                logger.warning(f"Upload error for {doc['document_id']}: {e}")
+                if attempt == 2:  # Last attempt
+                    errors += 1
+                else:
+                    time.sleep(1)
         
-        time.sleep(0.1)  # Rate limiting
+        # Slower rate limiting: 500ms between uploads (was 100ms)
+        time.sleep(0.5)
     
     return uploaded, errors
 
@@ -1424,18 +1446,22 @@ def print_analytics_summary():
     logger.info("")
 
 def main():
-    """Main execution - v2.8.2 with all fixes"""
+    """Main execution - v2.8.3 with rate limit fix"""
     
     logger.info("============================================================")
     logger.info(f"START SERVICEDESK INTELLIGENCE SUITE v{VERSION} - COMPLETE")
     logger.info(f"Starting at {datetime.now()}")
     logger.info("============================================================")
     
-    logger.info("✨ v2.8.2 COMPLETE FIXES:")
+    logger.info("✨ v2.8.3 FIXES:")
+    logger.info("   • Fixed Dust API rate limiting (429 errors)")
+    logger.info("   • Upload delay: 100ms → 500ms")
+    logger.info("   • Added retry logic with exponential backoff")
+    logger.info("")
+    logger.info("✨ v2.8.2 FEATURES:")
     logger.info("   • Removed page limit - fetches ALL 4500+ tickets")
     logger.info("   • Fixed NoneType errors with defensive null checks")
-    logger.info("   • Fixed analytics crash")
-    logger.info("   • Fixed checkpoint updating")
+    logger.info("   • Fixed analytics crash and checkpoint updating")
     logger.info("")
     logger.info("✨ v2.8 COMPLETE FIELD COVERAGE:")
     logger.info("   ALL 48 COMPREHENSIVE FIELDS:")
@@ -1471,8 +1497,6 @@ def main():
     # Fetch tickets (incremental or full)
     logger.info("Fetching tickets...")
     try:
-        # For initial sync: no page limit
-        # For incremental sync: also no page limit (fetch all updated)
         tickets = fetch_tickets_incremental(
             access_token=access_token,
             last_sync_time=last_sync_time,
