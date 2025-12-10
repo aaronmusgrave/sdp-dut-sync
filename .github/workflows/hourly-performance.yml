@@ -1,20 +1,12 @@
-name: Daily Performance Data Snapshot
+name: Hourly Performance Data Update
 
 on:
-  # Run at 6:00 AM CST (12:00 PM UTC) to capture yesterday's final data
   schedule:
-    - cron: '0 12 * * *'
-  
-  # Allow manual trigger
+    - cron: '0 14-23 * * 1-5'
   workflow_dispatch:
-    inputs:
-      date:
-        description: 'Date to process (YYYY-MM-DD, leave empty for yesterday)'
-        required: false
-        type: string
 
 jobs:
-  collect-performance-snapshot:
+  update-current-performance:
     runs-on: ubuntu-latest
     
     steps:
@@ -31,20 +23,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate date to process
-        id: calc-date
+      - name: Get current date and time
+        id: datetime
+        shell: bash
         run: |
-          if [ -n "\${{ inputs.date }}" ]; then
-            # Manual run with specific date
-            PROCESS_DATE="\${{ inputs.date }}"
-          else
-            # Scheduled run - process yesterday for final snapshot
-            PROCESS_DATE=\$(date -d "yesterday" +%Y-%m-%d)
-          fi
-          echo "date=\${PROCESS_DATE}" >> \$GITHUB_OUTPUT
-          echo "📸 Creating final snapshot for \${PROCESS_DATE}"
+          echo "date=$(date +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          echo "time=$(date +%H-%M)" >> \$GITHUB_OUTPUT
+          echo "Updating performance data for $(date +%Y-%m-%d) at $(date +%H:%M)"
       
-      - name: Run performance data collection (YESTERDAY FINAL)
+      - name: Run performance data collection
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
@@ -55,23 +42,25 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        shell: bash
         run: |
-          echo "📸 Capturing final snapshot for yesterday..."
+          echo "🔄 Updating current day performance data..."
           python scripts/backfill_performance.py \
-            --start-date "\${{ steps.calc-date.outputs.date }}" \
-            --end-date "\${{ steps.calc-date.outputs.date }}"
+            --start-date "\${{ steps.datetime.outputs.date }}" \
+            --end-date "\${{ steps.datetime.outputs.date }}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-snapshot-\${{ steps.calc-date.outputs.date }}
+          name: performance-hourly-\${{ steps.datetime.outputs.date }}-\${{ steps.datetime.outputs.time }}
           path: tech_performance_*.json
-          retention-days: 7
+          retention-days: 2
           if-no-files-found: warn
       
-      - name: Notify on failure
-        if: failure()
+      - name: Summary
+        if: success()
+        shell: bash
         run: |
-          echo "❌ Daily snapshot failed for \${{ steps.calc-date.outputs.date }}"
-          echo "Check the workflow logs for details"
+          echo "✅ Performance data updated for \${{ steps.datetime.outputs.date }}"
+          echo "📊 Current day snapshot with real-time ticket counts"
