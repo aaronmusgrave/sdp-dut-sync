@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v17.1.3 - MEETINGS, PROFILE & CLOSED TICKETS
-Tracks meeting load, enhanced Azure AD profile, and tickets CLOSED (historically accurate!)
+Performance Data Backfill Script v17.1.3 - MEETINGS, PROFILE, CLOSED TICKETS & PERFORMANCE SCORING
+Tracks meeting load, enhanced Azure AD profile, tickets closed, and role-weighted performance
 Ticket details (complexity, SLA, conversations) handled by ServiceDesk Intelligence script
-Enhanced: Manager, location details, account status, tenure, CLOSED ticket tracking
+Enhanced: Manager, location details, account status, tenure, CLOSED ticket tracking with scoring
 Processes historical dates sequentially
 Optimized: Fast parallel processing
 
 v17.1.3 Changes:
 - CLOSED tickets instead of open tickets (historically queryable!)
-- Works for ANY date (past, present, future)
-- Accurate throughput/productivity metrics
+- Role-based performance scoring with ticket expectations
+- Meeting impact penalties based on role
+- Weighted performance scores for fair comparison across roles
 - 24-HOUR MEETING TRACKING: Counts all meetings (not just business hours)
 """
 
@@ -436,51 +437,134 @@ def count_closed_tickets(tech_email, sdp_token, target_date):
     return 0
 
 
-def calculate_performance(meetings, job_title=None):
+def calculate_performance(meetings, closed_tickets, job_title=None):
     """
-    Calculate performance metrics based on meeting load only
-    v17.1.3: Meetings and availability only - detailed ticket data from intelligence script
+    Calculate performance metrics with role-based weighting
+    v17.1.3: Comprehensive scoring considering meetings, tickets closed, and role expectations
     """
     meeting_hours = meetings['hours']
     available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
     
-    # Role-based multipliers for reference
-    role_multipliers = {
-        'director': 20,
-        'application manager': 20,
-        'manager': 15,
-        'senior': 12,
-        'engineer': 10,
-        'technician': 10,
-        'specialist': 8
+    # Role-based expectations
+    role_expectations = {
+        'director': {
+            'multiplier': 20,
+            'expected_tickets_per_day': 3,
+            'expected_complexity': 8,
+            'normal_meeting_hours': (4, 6),
+            'title_keywords': ['director', 'application manager']
+        },
+        'manager': {
+            'multiplier': 15,
+            'expected_tickets_per_day': 5,
+            'expected_complexity': 7,
+            'normal_meeting_hours': (3, 5),
+            'title_keywords': ['manager']
+        },
+        'senior': {
+            'multiplier': 12,
+            'expected_tickets_per_day': 8,
+            'expected_complexity': 6,
+            'normal_meeting_hours': (1, 3),
+            'title_keywords': ['senior']
+        },
+        'engineer': {
+            'multiplier': 10,
+            'expected_tickets_per_day': 10,
+            'expected_complexity': 5,
+            'normal_meeting_hours': (0, 2),
+            'title_keywords': ['engineer', 'technician']
+        },
+        'specialist': {
+            'multiplier': 8,
+            'expected_tickets_per_day': 12,
+            'expected_complexity': 3,
+            'normal_meeting_hours': (0, 1),
+            'title_keywords': ['specialist', 'analyst']
+        }
     }
     
-    # Determine role multiplier from job title
-    multiplier = 10  # Default
+    # Determine role from job title
+    role = 'engineer'  # Default
+    multiplier = 10
+    expected_tickets = 10
+    normal_mtg_hours = (0, 2)
+    
     if job_title:
         job_title_lower = job_title.lower()
-        if 'director' in job_title_lower or 'application manager' in job_title_lower:
-            multiplier = 20
-        elif 'manager' in job_title_lower:
-            multiplier = 15
-        elif 'senior' in job_title_lower:
-            multiplier = 12
-        elif 'engineer' in job_title_lower or 'technician' in job_title_lower:
-            multiplier = 10
-        elif 'specialist' in job_title_lower:
-            multiplier = 8
+        for role_key, role_data in role_expectations.items():
+            if any(keyword in job_title_lower for keyword in role_data['title_keywords']):
+                role = role_key
+                multiplier = role_data['multiplier']
+                expected_tickets = role_data['expected_tickets_per_day']
+                normal_mtg_hours = role_data['normal_meeting_hours']
+                break
+    
+    # Calculate meeting impact factor
+    mtg_min, mtg_max = normal_mtg_hours
+    if meeting_hours <= mtg_max:
+        meeting_impact = 0  # Within normal range
+    else:
+        # Calculate penalty for excessive meetings
+        excess_hours = meeting_hours - mtg_max
+        if role == 'specialist':
+            meeting_impact = min(excess_hours * 0.15, 0.5)  # 15% per hour over, max 50%
+        elif role == 'engineer':
+            meeting_impact = min(excess_hours * 0.12, 0.4)  # 12% per hour over, max 40%
+        elif role == 'senior':
+            meeting_impact = min(excess_hours * 0.10, 0.35)  # 10% per hour over, max 35%
+        elif role == 'manager':
+            meeting_impact = min(excess_hours * 0.08, 0.25)  # 8% per hour over, max 25%
+        else:  # director
+            meeting_impact = min(excess_hours * 0.05, 0.15)  # 5% per hour over, max 15%
+    
+    # Calculate ticket performance score
+    if closed_tickets == 0:
+        ticket_score = 0
+    else:
+        # Base score: actual vs expected
+        ticket_ratio = closed_tickets / expected_tickets
+        
+        # Apply meeting impact penalty
+        effective_ratio = ticket_ratio * (1 - meeting_impact)
+        
+        # Convert to 0-100 scale
+        ticket_score = min(effective_ratio * 100, 150)  # Cap at 150% (overperformance)
+    
+    # Calculate weighted performance score
+    weighted_score = ticket_score * (multiplier / 10)
+    
+    # Performance rating
+    if weighted_score >= 100:
+        rating = "Excellent"
+    elif weighted_score >= 80:
+        rating = "Good"
+    elif weighted_score >= 60:
+        rating = "Fair"
+    elif weighted_score >= 40:
+        rating = "Below Expected"
+    else:
+        rating = "Low"
     
     return {
         'available_hours': round(available_hours, 2),
         'meeting_percentage': round((meeting_hours / WORK_HOURS_PER_DAY) * 100, 1),
-        'role_multiplier': multiplier
+        'role_multiplier': multiplier,
+        'role': role,
+        'expected_tickets': expected_tickets,
+        'closed_tickets': closed_tickets,
+        'ticket_ratio': round(closed_tickets / expected_tickets, 2) if expected_tickets > 0 else 0,
+        'meeting_impact_penalty': round(meeting_impact * 100, 1),
+        'ticket_score': round(ticket_score, 1),
+        'weighted_score': round(weighted_score, 1),
+        'performance_rating': rating
     }
 
 
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
     """
     Process single technician's calendar, profile data, and closed ticket count
-    v17.1.3: CLOSED tickets (historically accurate!)
+    v17.1.3: CLOSED tickets (historically accurate!) with performance scoring
     """
     if isinstance(tech_info, dict):
         tech_email = tech_info['email']
@@ -517,8 +601,8 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
     # Fetch CLOSED ticket count (v17.1.3 - historically accurate!)
     closed_tickets = count_closed_tickets(tech_email, sdp_token, target_date)
     
-    # Simplified performance calculation (meetings only)
-    performance = calculate_performance(meetings, tech_job_title)
+    # Calculate performance with role-based weighting
+    performance = calculate_performance(meetings, closed_tickets, tech_job_title)
     
     return {
         'name': tech_name,
@@ -542,7 +626,7 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
 
 
 def save_to_file(tech_data, date):
-    """Save metrics to JSON file - v17.1.3 with closed ticket count"""
+    """Save metrics to JSON file - v17.1.3 with closed ticket count and performance"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -579,7 +663,7 @@ def save_to_file(tech_data, date):
 
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust - v17.1.3 with closed ticket count"""
+    """Upload metrics to Dust - v17.1.3 with closed ticket count and performance scoring"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         return 0
     
@@ -612,7 +696,8 @@ def upload_to_dust(tech_data, date):
             "performance-metrics",
             "meeting-load",
             f"technician:{tech_name.lower().replace(' ', '-')}",
-            f"date:{date_str}"
+            f"date:{date_str}",
+            f"role:{p['role']}"
         ]
         
         if data.get('job_title'):
@@ -629,6 +714,9 @@ def upload_to_dust(tech_data, date):
         
         if data.get('account_enabled') == False:
             tags.append("account-disabled")
+        
+        # Add performance rating tags
+        tags.append(f"performance:{p['performance_rating'].lower().replace(' ', '-')}")
         
         # Add productivity tags based on closed tickets (v17.1.3)
         if closed_tickets >= 10:
@@ -649,6 +737,7 @@ def upload_to_dust(tech_data, date):
 ## Profile
 - **Name:** {data.get('display_name') or tech_name}
 - **Job Title:** {data.get('job_title') or 'N/A'}
+- **Role Category:** {p['role'].title()}
 - **Department:** {data.get('department') or 'N/A'}
 - **Location:** {location_string}
 - **Company:** {data.get('company_name') or 'N/A'}
@@ -662,18 +751,31 @@ def upload_to_dust(tech_data, date):
 - **Meetings:** {m['count']} meetings
 - **Meeting Time:** {m['hours']} hours ({p['meeting_percentage']}%)
 - **Available Hours:** {p['available_hours']} hours
+- **Normal Meeting Range:** {p['role']} role expects meetings within reasonable range
 
 ## Productivity Metrics
 - **Tickets Closed:** {closed_tickets} tickets resolved on this date
+- **Expected Tickets:** {p['expected_tickets']} for {p['role']} role
+- **Ticket Ratio:** {p['ticket_ratio']} ({closed_tickets}/{p['expected_tickets']})
 - **Throughput:** {closed_tickets} tickets completed
+
+## Performance Score
+- **Base Ticket Score:** {p['ticket_score']}/100
+- **Meeting Impact Penalty:** -{p['meeting_impact_penalty']}%
+- **Role Multiplier:** {p['role_multiplier']}x
+- **Weighted Score:** {p['weighted_score']}
+- **Performance Rating:** {p['performance_rating']}
 
 ## Role Information
 - **Role Multiplier:** {p['role_multiplier']}x
+- **Role:** {p['role'].title()}
+- **Expected Daily Tickets:** {p['expected_tickets']}
 
 ## Capacity Status
 - **Meeting Load:** {p['meeting_percentage']}% of workday
 - **Available for Tickets:** {p['available_hours']} hours
 - **Productivity:** {closed_tickets} tickets closed on this date
+- **Performance:** {p['performance_rating']} ({p['weighted_score']} weighted score)
 
 ## Account Status
 - **Account Enabled:** {'Yes' if data.get('account_enabled') else 'No' if data.get('account_enabled') == False else 'Unknown'}
@@ -681,8 +783,11 @@ def upload_to_dust(tech_data, date):
 
 ## Notes
 - Closed ticket count is historically accurate for any date (past, present, future)
+- Performance scoring weighted by role expectations for fair comparison
+- Meeting impact penalties vary by role (directors less impacted than specialists)
 - For detailed ticket information (complexity, SLA, priority, conversations), query the ServiceDesk Intelligence data source
-- This file tracks meeting load, availability, and tickets CLOSED for productivity tracking
+- This file tracks meeting load, availability, tickets CLOSED, and performance scoring
+- Meeting
 - Meeting tracking: Full 24-hour day (not just business hours)
 - Closed tickets show throughput and resolution velocity
 """,
@@ -708,7 +813,14 @@ def upload_to_dust(tech_data, date):
                 "meeting_percentage": p['meeting_percentage'],
                 "available_hours": p['available_hours'],
                 "closed_tickets": closed_tickets,  # v17.1.3
-                "role_multiplier": p['role_multiplier']
+                "role_multiplier": p['role_multiplier'],
+                "role": p['role'],
+                "expected_tickets": p['expected_tickets'],
+                "ticket_ratio": p['ticket_ratio'],
+                "ticket_score": p['ticket_score'],
+                "meeting_impact_penalty": p['meeting_impact_penalty'],
+                "weighted_score": p['weighted_score'],
+                "performance_rating": p['performance_rating']
             }
         }
         
@@ -742,7 +854,7 @@ def save_progress(progress):
 
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for a single date - v17.1.3 with closed ticket tracking"""
+    """Process all technicians for a single date - v17.1.3 with closed ticket tracking and performance scoring"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     try:
@@ -797,21 +909,21 @@ def process_single_date(target_date, technicians):
             except Exception as e:
                 logger.error(f"Failed to process {tech_name}: {e}")
     
-    # Display results - v17.1.3 with closed ticket counts
+    # Display results - v17.1.3 with closed ticket counts and performance scores
     print()
-    print("="*115)
+    print("="*130)
     print(f"{target_date.strftime('%B %d, %Y')}")
-    print("="*115)
+    print("="*130)
     
     for tech_name, data in sorted(tech_data.items(), key=lambda x: x[0]):
         m = data['meetings']
         p = data['performance']
         closed_tickets = data.get('closed_tickets', 0)
         job_title = (data.get('job_title') or 'N/A')[:30]
-        manager = (data.get('manager_name') or 'N/A')[:20]
+        manager = (data.get('manager_name') or 'N/A')[:15]
         
-        # Display with meetings, availability, closed tickets, and manager
-        print(f"{tech_name:25} | {job_title:30} | Mgr:{manager:20} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Avail:{p['available_hours']:4.1f}h | Closed:{closed_tickets:3}")
+        # Display with meetings, closed tickets, and performance score
+        print(f"{tech_name:25} | {job_title:30} | Mgr:{manager:15} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Closed:{closed_tickets:2}/{p['expected_tickets']:2} | Score:{p['weighted_score']:5.1f} ({p['performance_rating']})")
     
     print()
     
@@ -824,19 +936,19 @@ def process_single_date(target_date, technicians):
 
 
 def main():
-    """Main backfill execution - v17.1.3 meetings, profile & closed ticket count"""
-    parser = argparse.ArgumentParser(description='Backfill meeting, profile, and closed ticket data for date range')
+    """Main backfill execution - v17.1.3 meetings, profile, closed tickets & performance scoring"""
+    parser = argparse.ArgumentParser(description='Backfill meeting, profile, closed tickets, and performance data for date range')
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
     args = parser.parse_args()
     
-    print("="*115)
-    print("PERFORMANCE DATA BACKFILL v17.1.3 (Meetings, Profile & Closed Tickets)")
-    print("="*115)
+    print("="*130)
+    print("PERFORMANCE DATA BACKFILL v17.1.3 (Meetings, Profile, Closed Tickets & Performance Scoring)")
+    print("="*130)
     print()
     print("Note: Detailed ticket data (complexity, SLA, conversations) is handled by the ServiceDesk Intelligence script")
-    print("      This script tracks meeting load, enhanced Azure AD profile, and CLOSED ticket counts")
+    print("      This script tracks meeting load, enhanced Azure AD profile, CLOSED tickets, and performance scoring")
     print()
     print("Enhanced Azure Fields:")
     print("  ✓ Manager (organizational hierarchy)")
@@ -851,6 +963,12 @@ def main():
     print("  ✓ Shows productivity/throughput metrics")
     print("  ✓ Tracks resolution velocity")
     print("  ✓ Can backfill unlimited historical data")
+    print()
+    print("Performance Scoring (v17.1.3):")
+    print("  ✓ Role-based ticket expectations (Directors: 3/day, Engineers: 10/day, etc.)")
+    print("  ✓ Meeting impact penalties (varies by role)")
+    print("  ✓ Weighted scoring for fair comparison across roles")
+    print("  ✓ Performance ratings: Excellent, Good, Fair, Below Expected, Low")
     print()
     print("Meeting Tracking:")
     print("  ✓ Full 24-hour day (not just business hours)")
@@ -939,7 +1057,7 @@ def main():
         logger.info("All dates already processed!")
         return
     
-    logger.info(f"Processing {len(dates_to_process)} dates (meetings + profiles + closed tickets)")
+    logger.info(f"Processing {len(dates_to_process)} dates (meetings + profiles + closed tickets + performance)")
     if completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
     
@@ -980,9 +1098,9 @@ def main():
     
     total_time = time.time() - start_time
     print()
-    print("="*115)
+    print("="*130)
     print("BACKFILL COMPLETE - v17.1.3")
-    print("="*115)
+    print("="*130)
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Avg time per date: {total_time/len(dates_to_process):.1f} seconds")
     print(f"Processed: {len(dates_to_process)} dates")
@@ -1002,6 +1120,9 @@ def main():
     print("  ✓ Account creation date (tenure)")
     print("  ✓ CLOSED tickets (historically accurate for ANY date!)")
     print("  ✓ Productivity/throughput metrics")
+    print("  ✓ Role-based performance scoring")
+    print("  ✓ Meeting impact penalties (role-specific)")
+    print("  ✓ Weighted scores for fair comparison")
     print("  ✓ Available hours calculation")
     print("  ✓ Role multiplier identification")
     print("  ✓ Performance: ~30-40 seconds per date")
@@ -1009,15 +1130,16 @@ def main():
     print("Data Usage:")
     print("  - Meeting data: Full 24-hour day for accurate capacity planning")
     print("  - Closed tickets: Historically accurate - shows productivity and throughput")
+    print("  - Performance scoring: Role-weighted for fair comparison (Director vs Specialist)")
     print("  - Profile data: Use for org structure and routing")
     print("  - Detailed ticket data: Query intelligence data source for complexity, SLA, conversations")
     print()
-    print("Benefits of Closed Ticket Tracking:")
-    print("  ✓ Works for historical dates (backfill as far back as needed)")
-    print("  ✓ Shows actual productivity/resolution velocity")
-    print("  ✓ Enables throughput analysis")
-    print("  ✓ Identifies high-performers")
-    print("  ✓ Correlates meetings vs productivity")
+    print("Benefits of Performance Scoring:")
+    print("  ✓ Fair comparison across different roles (Directors vs Engineers vs Specialists)")
+    print("  ✓ Meeting impact factored into performance (heavy meetings = adjusted expectations)")
+    print("  ✓ Identifies high-performers within their role")
+    print("  ✓ Highlights meeting overload impact on productivity")
+    print("  ✓ Weighted scoring accounts for role complexity")
     print()
     
     if not progress['failed']:
