@@ -33,8 +33,12 @@ jobs:
       
       - name: Verify outputs
         run: |
-          echo "Date: \${{ steps.date.outputs.today }}"
-          echo "Time: \${{ steps.time.outputs.now }}"
+          echo "Date captured: \${{ steps.date.outputs.today }}"
+          echo "Time captured: \${{ steps.time.outputs.now }}"
+          if [ -z "\${{ steps.date.outputs.today }}" ]; then
+            echo "ERROR: Date not captured"
+            exit 1
+          fi
       
       - name: Run performance data collection
         env:
@@ -47,7 +51,7 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date \${{ steps.date.outputs.today }} --end-date \${{ steps.date.outputs.today }}
+        run: python scripts/backfill_performance.py --start-date "\${{ steps.date.outputs.today }}" --end-date "\${{ steps.date.outputs.today }}"
       
       - name: Upload artifacts
         if: always()
@@ -57,4 +61,3 @@ jobs:
           path: tech_performance_*.json
           retention-days: 2
           if-no-files-found: warn
-          
