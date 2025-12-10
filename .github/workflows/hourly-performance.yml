@@ -23,24 +23,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Get current date and time
-        id: datetime
-        run: |
-          CURRENT_DATE=\$(date +%Y-%m-%d)
-          CURRENT_TIME=\$(date +%H-%M)
-          echo "date=\$CURRENT_DATE" >> \$GITHUB_OUTPUT
-          echo "time=\$CURRENT_TIME" >> \$GITHUB_OUTPUT
-          echo "Date to process: \$CURRENT_DATE"
-          echo "Time: \$CURRENT_TIME"
+      - name: Get current date
+        id: date
+        run: echo "value=$(date +%Y-%m-%d)" >> \$GITHUB_OUTPUT
       
-      - name: Verify date was set
+      - name: Get current time
+        id: time
+        run: echo "value=$(date +%H-%M)" >> \$GITHUB_OUTPUT
+      
+      - name: Display date info
         run: |
-          echo "Captured date: \${{ steps.datetime.outputs.date }}"
-          echo "Captured time: \${{ steps.datetime.outputs.time }}"
-          if [ -z "\${{ steps.datetime.outputs.date }}" ]; then
-            echo "ERROR: Date was not set properly"
-            exit 1
-          fi
+          echo "Date to process: \${{ steps.date.outputs.value }}"
+          echo "Time: \${{ steps.time.outputs.value }}"
       
       - name: Run performance data collection
         env:
@@ -53,23 +47,19 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          TARGET_DATE: \${{ steps.datetime.outputs.date }}
         run: |
-          echo "🔄 Updating current day performance data..."
-          echo "Target date: \$TARGET_DATE"
-          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
+          echo "Updating performance data for \${{ steps.date.outputs.value }}"
+          python scripts/backfill_performance.py --start-date "\${{ steps.date.outputs.value }}" --end-date "\${{ steps.date.outputs.value }}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-hourly-\${{ steps.datetime.outputs.date }}-\${{ steps.datetime.outputs.time }}
+          name: performance-hourly-\${{ steps.date.outputs.value }}-\${{ steps.time.outputs.value }}
           path: tech_performance_*.json
           retention-days: 2
           if-no-files-found: warn
       
       - name: Summary
         if: success()
-        run: |
-          echo "✅ Performance data updated for \${{ steps.datetime.outputs.date }}"
-          echo "📊 Current day snapshot with real-time ticket counts"
+        run: echo "Performance data updated for \${{ steps.date.outputs.value }}"
