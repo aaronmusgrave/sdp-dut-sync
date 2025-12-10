@@ -1,0 +1,72 @@
+name: Weekly Performance Data Backfill
+
+on:
+  # Run every Sunday at 7:00 AM CST (1:00 PM UTC)
+  schedule:
+    - cron: '0 13 * * 0'
+  
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Number of days to backfill'
+        required: false
+        default: '7'
+        type: string
+
+jobs:
+  backfill-performance-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Calculate date range
+        id: calc-range
+        run: |
+          DAYS="\${{ inputs.days }}"
+          if [ -z "\$DAYS" ]; then
+            DAYS=7
+          fi
+          
+          END_DATE=\$(date -d "yesterday" +%Y-%m-%d)
+          START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
+          
+          echo "start=\$START_DATE" >> \$GITHUB_OUTPUT
+          echo "end=\$END_DATE" >> \$GITHUB_OUTPUT
+          echo "Backfilling from \$START_DATE to \$END_DATE"
+      
+      - name: Run performance data backfill
+        env:
+          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        run: |
+          python scripts/backfill_performance.py \
+            --start-date "\${{ steps.calc-range.outputs.start }}" \
+            --end-date "\${{ steps.calc-range.outputs.end }}"
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-data-backfill-\${{ steps.calc-range.outputs.end }}
+          path: tech_performance_*.json
+          retention-days: 7
