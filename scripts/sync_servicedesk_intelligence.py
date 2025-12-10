@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v2.8.1 - COMPLETE WITH FIXES
+ServiceDesk Intelligence Suite v2.8.2 - COMPLETE WITH ALL FIXES
 Full 48-field comprehensive ticket intelligence with incremental sync
-Fixes: Analytics crash, checkpoint not updating
 
-Changes in v2.8.1:
-- Fixed analytics summary crash (defaultdict → Counter)
+Changes in v2.8.2:
+- Removed page limit (MAX_PAGES = None) to fetch all 4500+ tickets
+- Added defensive null checks throughout to prevent NoneType errors
+- Fixed analytics crash (defaultdict → Counter)
 - Fixed checkpoint not updating (was re-syncing same tickets)
 - Proper timestamp tracking for incremental sync
 
@@ -37,13 +38,13 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "2.8.1"
+VERSION = "2.8.2"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 CHECKPOINT_FILE = 'checkpoint.json'
 REQUEST_TIMEOUT = 30
-MAX_PAGES = 20  # Limit pages to avoid runaway syncs (100 tickets/page = 2000 max)
+MAX_PAGES = None  # No limit - fetch all tickets (v2.8.2: removed limit)
 
 # Connection pooling
 SESSION = requests.Session()
@@ -238,10 +239,10 @@ def get_access_token() -> str:
 # TICKET FETCHING - INCREMENTAL SYNC
 # ============================================================
 
-def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[datetime], page_limit: int = MAX_PAGES) -> List[Dict]:
+def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
     """
     Fetch tickets updated since last sync (incremental)
-    v2.8.1: Improved timestamp handling for proper incremental sync
+    v2.8.2: No page limit by default, improved timestamp handling
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
@@ -261,7 +262,7 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
         })
         logger.info(f"STATS Incremental sync: Fetching tickets updated since {last_sync_time}")
     else:
-        logger.info("STATS Full sync: Fetching all tickets (no checkpoint found)")
+        logger.info("STATS Full sync: Fetching ALL tickets (no checkpoint found)")
     
     list_info = {
         "list_info": {
@@ -280,9 +281,17 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
     all_tickets = []
     page = 1
     
-    logger.info(f"  STATS Page limit: {page_limit} pages (up to {page_limit * 100} tickets)")
+    if page_limit:
+        logger.info(f"  STATS Page limit: {page_limit} pages (up to {page_limit * 100} tickets)")
+    else:
+        logger.info(f"  STATS No page limit - fetching ALL tickets")
     
-    while page <= page_limit:
+    while True:
+        # Check page limit if set
+        if page_limit and page > page_limit:
+            logger.warning(f"  Reached page limit of {page_limit}. Stopping.")
+            break
+        
         list_info["list_info"]["start_index"] = (page - 1) * 100 + 1
         params = {'input_data': json.dumps(list_info)}
         
@@ -297,13 +306,14 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
                     break
                 
                 all_tickets.extend(tickets)
-                logger.info(f"  Page {page}: Found {len(tickets)} tickets")
+                logger.info(f"  Page {page}: Found {len(tickets)} tickets (Total: {len(all_tickets)})")
                 
                 # Check if there are more pages
                 list_info_response = data.get('list_info', {})
                 has_more = list_info_response.get('has_more_rows', False)
                 
                 if not has_more:
+                    logger.info(f"  No more pages. Total fetched: {len(all_tickets)}")
                     break
                 
                 page += 1
@@ -390,10 +400,11 @@ def calculate_complexity_score(ticket: Dict, conversations: List[Dict]) -> int:
     score += min(tech_count, 3)
     
     # Priority
-    priority = ticket.get('priority', {}).get('name', '').lower()
-    if 'urgent' in priority or 'critical' in priority:
+    priority = ticket.get('priority', {})
+    priority_name = priority.get('name', '').lower() if priority else ''
+    if 'urgent' in priority_name or 'critical' in priority_name:
         score += 2
-    elif 'high' in priority:
+    elif 'high' in priority_name:
         score += 1
     
     return min(score, 10)
@@ -428,7 +439,11 @@ def predict_sla_breach(ticket: Dict, conversations: List[Dict]) -> Tuple[str, in
         return ("unknown", 0)
     
     try:
-        due = datetime.fromisoformat(due_date.get('display_value', '').replace('Z', '+00:00'))
+        due_display = due_date.get('display_value', '') if isinstance(due_date, dict) else ''
+        if not due_display:
+            return ("unknown", 0)
+        
+        due = datetime.fromisoformat(due_display.replace('Z', '+00:00'))
         now = datetime.now(timezone.utc)
         hours_remaining = (due - now).total_seconds() / 3600
         
@@ -450,10 +465,11 @@ def estimate_resolution_time(ticket: Dict, conversations: List[Dict], complexity
     base_hours = complexity * 2
     
     # Adjust for priority
-    priority = ticket.get('priority', {}).get('name', '').lower()
-    if 'urgent' in priority:
+    priority = ticket.get('priority', {})
+    priority_name = priority.get('name', '').lower() if priority else ''
+    if 'urgent' in priority_name:
         base_hours *= 0.5
-    elif 'low' in priority:
+    elif 'low' in priority_name:
         base_hours *= 1.5
     
     # Adjust for conversation volume
@@ -532,18 +548,27 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
     }
 
 # ============================================================
-# FIELD EXTRACTION - v2.8 COMPLETE (48 fields)
+# FIELD EXTRACTION - v2.8.2 WITH DEFENSIVE NULL CHECKS
 # ============================================================
 
 def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     """
     Extract all 48 comprehensive fields from ticket
-    v2.8: Complete field coverage including all 20 missing fields
+    v2.8.2: Added defensive null checks for tickets with missing data
     """
     fields = {}
     
+    # Helper function for safe nested gets
+    def safe_get(obj, key, default=''):
+        """Safely get value from dict, handling None"""
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return default
+    
     # ========================================
-    # CORE FIELDS (28) - Already implemented
+    # CORE FIELDS (28)
     # ========================================
     
     # Basic info
@@ -551,148 +576,164 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['subject'] = ticket.get('subject', 'No subject')
     fields['description'] = ticket.get('description', 'No description')
     
-    # Status
-    status = ticket.get('status', {})
-    fields['status'] = status.get('name', 'Unknown')
+    # Status - safe handling
+    status = ticket.get('status') or {}
+    fields['status'] = safe_get(status, 'name', 'Unknown')
     fields['status_category'] = 'active' if fields['status'].lower() in ['open', 'in progress', 'pending'] else 'closed'
     
-    # Priority
-    priority = ticket.get('priority', {})
-    fields['priority'] = priority.get('name', 'Normal')
+    # Priority - safe handling
+    priority = ticket.get('priority') or {}
+    fields['priority'] = safe_get(priority, 'name', 'Normal')
     
-    # People
-    requester = ticket.get('requester', {})
-    fields['requester_name'] = requester.get('name', 'Unknown')
-    fields['requester_email'] = requester.get('email_id', '')
+    # People - safe handling
+    requester = ticket.get('requester') or {}
+    fields['requester_name'] = safe_get(requester, 'name', 'Unknown')
+    fields['requester_email'] = safe_get(requester, 'email_id', '')
     
-    technician = ticket.get('technician', {})
-    fields['technician_name'] = technician.get('name', 'Unassigned')
-    fields['technician_email'] = technician.get('email_id', '')
+    technician = ticket.get('technician') or {}
+    fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
+    fields['technician_email'] = safe_get(technician, 'email_id', '')
     
-    # Category
-    category = ticket.get('category', {})
-    fields['category'] = category.get('name', 'Uncategorized')
+    # Category - safe handling
+    category = ticket.get('category') or {}
+    fields['category'] = safe_get(category, 'name', 'Uncategorized')
     
-    subcategory = ticket.get('subcategory', {})
-    fields['subcategory'] = subcategory.get('name', '')
+    subcategory = ticket.get('subcategory') or {}
+    fields['subcategory'] = safe_get(subcategory, 'name', '')
     
-    # Site
-    site = ticket.get('site', {})
-    fields['site'] = site.get('name', '')
+    # Site - safe handling
+    site = ticket.get('site') or {}
+    fields['site'] = safe_get(site, 'name', '')
     
-    # Dates
-    fields['created_time'] = ticket.get('created_time', {}).get('display_value', '')
-    fields['due_by_time'] = ticket.get('due_by_time', {}).get('display_value', '')
-    fields['resolved_time'] = ticket.get('resolved_time', {}).get('display_value', '')
-    fields['last_updated_time'] = ticket.get('last_updated_time', {}).get('display_value', '')
+    # Dates - safe handling with nested gets
+    created_time = ticket.get('created_time') or {}
+    fields['created_time'] = safe_get(created_time, 'display_value', '')
     
-    # Group
-    group = ticket.get('group', {})
-    fields['group'] = group.get('name', '')
+    due_by_time = ticket.get('due_by_time') or {}
+    fields['due_by_time'] = safe_get(due_by_time, 'display_value', '')
+    
+    resolved_time = ticket.get('resolved_time') or {}
+    fields['resolved_time'] = safe_get(resolved_time, 'display_value', '')
+    
+    last_updated_time = ticket.get('last_updated_time') or {}
+    fields['last_updated_time'] = safe_get(last_updated_time, 'display_value', '')
+    
+    # Group - safe handling
+    group = ticket.get('group') or {}
+    fields['group'] = safe_get(group, 'name', '')
     
     # ========================================
-    # ADVANCED FIELDS (20) - v2.8 NEW
+    # ADVANCED FIELDS (20) - v2.8
     # ========================================
     
-    # 1. Assets/CI
-    assets = ticket.get('assets', [])
+    # 1. Assets/CI - safe handling
+    assets = ticket.get('assets') or []
+    if not isinstance(assets, list):
+        assets = []
     fields['has_assets'] = len(assets) > 0
     fields['asset_count'] = len(assets)
-    fields['asset_names'] = [asset.get('name', '') for asset in assets] if assets else []
-    fields['primary_asset'] = assets[0].get('name', '') if assets else ''
+    fields['asset_names'] = [safe_get(asset, 'name', '') for asset in assets] if assets else []
+    fields['primary_asset'] = safe_get(assets[0], 'name', '') if assets else ''
     
-    # 2. Source/Mode (Channel)
-    request_type = ticket.get('request_type', {})
-    fields['source'] = request_type.get('name', 'Unknown')
+    # 2. Source/Mode (Channel) - safe handling
+    request_type = ticket.get('request_type') or {}
+    fields['source'] = safe_get(request_type, 'name', 'Unknown')
     
-    mode = ticket.get('mode', {})
-    fields['mode'] = mode.get('name', fields['source'])  # Fallback to source
-    fields['channel'] = fields['mode']  # Alias for easier querying
+    mode = ticket.get('mode') or {}
+    fields['mode'] = safe_get(mode, 'name', fields['source'])
+    fields['channel'] = fields['mode']
     
-    # 3. Impact & Urgency (Priority Matrix)
-    impact = ticket.get('impact', {})
-    fields['impact'] = impact.get('name', '')
+    # 3. Impact & Urgency - safe handling
+    impact = ticket.get('impact') or {}
+    fields['impact'] = safe_get(impact, 'name', '')
     
-    urgency = ticket.get('urgency', {})
-    fields['urgency'] = urgency.get('name', '')
+    urgency = ticket.get('urgency') or {}
+    fields['urgency'] = safe_get(urgency, 'name', '')
     
-    # 4. Level/Tier
-    level = ticket.get('level', {})
-    fields['level'] = level.get('name', '')
-    fields['tier'] = fields['level']  # Alias
+    # 4. Level/Tier - safe handling
+    level = ticket.get('level') or {}
+    fields['level'] = safe_get(level, 'name', '')
+    fields['tier'] = fields['level']
     
-    # 5. Service
-    service = ticket.get('service', {})
-    fields['service'] = service.get('name', '')
+    # 5. Service - safe handling
+    service = ticket.get('service') or {}
+    fields['service'] = safe_get(service, 'name', '')
     
-    # 6. Time Spent
-    fields['time_spent'] = ticket.get('time_spent', 0)
+    # 6. Time Spent - safe handling
+    fields['time_spent'] = ticket.get('time_spent', 0) or 0
     fields['time_spent_hours'] = round(fields['time_spent'] / 3600000, 2) if fields['time_spent'] else 0
     
-    # 7. Resolution Category
-    resolution = ticket.get('resolution', {})
-    fields['resolution_category'] = resolution.get('name', '')
+    # 7. Resolution Category - safe handling
+    resolution = ticket.get('resolution') or {}
+    fields['resolution_category'] = safe_get(resolution, 'name', '')
     
-    # 8. Closure Code
-    closure_info = ticket.get('closure_info', {})
-    fields['closure_code'] = closure_info.get('closure_code', {}).get('name', '')
+    # 8. Closure Code - safe handling
+    closure_info = ticket.get('closure_info') or {}
+    closure_code = closure_info.get('closure_code') or {} if isinstance(closure_info, dict) else {}
+    fields['closure_code'] = safe_get(closure_code, 'name', '')
     
-    # 9. Reopened Count
-    fields['reopened_count'] = ticket.get('reopened_count', 0)
+    # 9. Reopened Count - safe handling
+    fields['reopened_count'] = ticket.get('reopened_count', 0) or 0
     fields['has_been_reopened'] = fields['reopened_count'] > 0
     
-    # 10. Approvals
-    approval_status = ticket.get('approval_status', {})
-    fields['approval_status'] = approval_status.get('name', '')
+    # 10. Approvals - safe handling
+    approval_status = ticket.get('approval_status') or {}
+    fields['approval_status'] = safe_get(approval_status, 'name', '')
     fields['has_approvals'] = bool(fields['approval_status'])
     
-    # 11. Tags/Labels
-    tags = ticket.get('tags', [])
-    fields['tags'] = [tag.get('name', '') for tag in tags] if tags else []
+    # 11. Tags/Labels - safe handling
+    tags = ticket.get('tags') or []
+    if not isinstance(tags, list):
+        tags = []
+    fields['tags'] = [safe_get(tag, 'name', '') for tag in tags] if tags else []
     fields['has_tags'] = len(fields['tags']) > 0
     
-    # 12. Department
-    department = ticket.get('department', {})
-    fields['department'] = department.get('name', '')
+    # 12. Department - safe handling
+    department = ticket.get('department') or {}
+    fields['department'] = safe_get(department, 'name', '')
     
-    # 13. Linked Tickets
-    linked_requests = ticket.get('linked_requests', [])
+    # 13. Linked Tickets - safe handling
+    linked_requests = ticket.get('linked_requests') or []
+    if not isinstance(linked_requests, list):
+        linked_requests = []
     fields['linked_ticket_count'] = len(linked_requests)
     fields['has_linked_tickets'] = len(linked_requests) > 0
-    fields['linked_ticket_ids'] = [req.get('id', '') for req in linked_requests] if linked_requests else []
+    fields['linked_ticket_ids'] = [safe_get(req, 'id', '') for req in linked_requests] if linked_requests else []
     
-    # 14. Attachments
-    attachments = ticket.get('attachments', [])
+    # 14. Attachments - safe handling
+    attachments = ticket.get('attachments') or []
+    if not isinstance(attachments, list):
+        attachments = []
     fields['attachment_count'] = len(attachments)
     fields['has_attachments'] = len(attachments) > 0
     
-    # 15. Change Link
-    change = ticket.get('change', {})
-    fields['linked_change_id'] = change.get('id', '')
+    # 15. Change Link - safe handling
+    change = ticket.get('change') or {}
+    fields['linked_change_id'] = safe_get(change, 'id', '')
     fields['has_linked_change'] = bool(fields['linked_change_id'])
     
-    # 16. Problem Link
-    problem = ticket.get('problem', {})
-    fields['linked_problem_id'] = problem.get('id', '')
+    # 16. Problem Link - safe handling
+    problem = ticket.get('problem') or {}
+    fields['linked_problem_id'] = safe_get(problem, 'id', '')
     fields['has_linked_problem'] = bool(fields['linked_problem_id'])
     
-    # 17. First Call Resolution
-    fields['is_first_call_resolution'] = ticket.get('is_fcr', False)
+    # 17. First Call Resolution - safe handling
+    fields['is_first_call_resolution'] = ticket.get('is_fcr', False) or False
     
-    # 18. Created By (for proxy requests)
-    created_by = ticket.get('created_by', {})
-    fields['created_by'] = created_by.get('name', '')
+    # 18. Created By - safe handling
+    created_by = ticket.get('created_by') or {}
+    fields['created_by'] = safe_get(created_by, 'name', '')
     fields['is_proxy_request'] = bool(fields['created_by']) and fields['created_by'] != fields['requester_name']
     
-    # 19. Template
-    template = ticket.get('template', {})
-    fields['template'] = template.get('name', '')
+    # 19. Template - safe handling
+    template = ticket.get('template') or {}
+    fields['template'] = safe_get(template, 'name', '')
     fields['used_template'] = bool(fields['template'])
     
-    # 20. SLA Details
-    sla = ticket.get('sla', {})
-    fields['sla_name'] = sla.get('name', '')
-    fields['sla_violated'] = ticket.get('is_sla_violated', False)
+    # 20. SLA Details - safe handling
+    sla = ticket.get('sla') or {}
+    fields['sla_name'] = safe_get(sla, 'name', '')
+    fields['sla_violated'] = ticket.get('is_sla_violated', False) or False
     
     return fields
 
@@ -1026,7 +1067,8 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     
     # Template tags
     if comprehensive_fields.get('used_template'):
-        tags.extend(['used-template', f"template:{comprehensive_fields['template']}"])
+        template_clean = comprehensive_fields['template'].lower().replace(' ', '-')
+        tags.extend(['used-template', f"template:{template_clean}"])
     
     # SLA tags
     if comprehensive_fields.get('sla_name'):
@@ -1063,11 +1105,13 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
     conversation_text = ""
     if conversations:
         for i, conv in enumerate(conversations, 1):
-            sender = conv.get('sender', {}).get('name', 'Unknown')
+            sender_obj = conv.get('sender') or {}
+            sender = sender_obj.get('name', 'Unknown') if isinstance(sender_obj, dict) else 'Unknown'
             is_customer = conv.get('is_customer', False)
             role = "Customer" if is_customer else "Technician"
             text = conv.get('description', '')
-            time = conv.get('created_time', {}).get('display_value', '')
+            created_time_obj = conv.get('created_time') or {}
+            time = created_time_obj.get('display_value', '') if isinstance(created_time_obj, dict) else ''
             
             conversation_text += f"\n### Conversation {i} - {role}: {sender}\n"
             conversation_text += f"**Time:** {time}\n\n"
@@ -1309,7 +1353,7 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
 def print_analytics_summary():
     """Print comprehensive analytics summary - v2.8.1 FIXED"""
     logger.info("============================================================")
-    logger.info("STATS ANALYTICS SUMMARY (v2.8 COMPLETE)")
+    logger.info(f"STATS ANALYTICS SUMMARY (v{VERSION})")
     logger.info("============================================================")
     logger.info("")
     
@@ -1380,43 +1424,29 @@ def print_analytics_summary():
     logger.info("")
 
 def main():
-    """Main execution - v2.8.1 with checkpoint fix"""
+    """Main execution - v2.8.2 with all fixes"""
     
     logger.info("============================================================")
     logger.info(f"START SERVICEDESK INTELLIGENCE SUITE v{VERSION} - COMPLETE")
     logger.info(f"Starting at {datetime.now()}")
     logger.info("============================================================")
     
+    logger.info("✨ v2.8.2 COMPLETE FIXES:")
+    logger.info("   • Removed page limit - fetches ALL 4500+ tickets")
+    logger.info("   • Fixed NoneType errors with defensive null checks")
+    logger.info("   • Fixed analytics crash")
+    logger.info("   • Fixed checkpoint updating")
+    logger.info("")
     logger.info("✨ v2.8 COMPLETE FIELD COVERAGE:")
-    logger.info("   ALL 20 MISSING FIELDS INTEGRATED:")
-    logger.info("   • Assets/CI tracking")
-    logger.info("   • Source/Mode (channel analysis)")
-    logger.info("   • Impact & Urgency (priority matrix)")
-    logger.info("   • Level/Tier tracking")
-    logger.info("   • Service catalog")
-    logger.info("   • Time tracking")
-    logger.info("   • Resolution category")
-    logger.info("   • Closure code")
-    logger.info("   • Reopened count")
-    logger.info("   • Approvals")
-    logger.info("   • Tags/Labels")
-    logger.info("   • Department")
-    logger.info("   • Linked tickets")
-    logger.info("   • Attachments")
-    logger.info("   • Change/Problem links")
-    logger.info("   • First Call Resolution")
-    logger.info("   • Created by")
-    logger.info("   • Template")
-    logger.info("   • SLA details")
-    logger.info("   • Cost tracking")
+    logger.info("   ALL 48 COMPREHENSIVE FIELDS:")
+    logger.info("   • Core fields (28): Status, priority, people, timeline, conversations")
+    logger.info("   • Advanced fields (20): Assets, channels, impact/urgency, service, etc.")
     logger.info("")
     logger.info("   PERFORMANCE OPTIMIZATIONS:")
     logger.info("   • Connection pooling (20 connections)")
     logger.info("   • Parallel conversation fetching")
     logger.info("   • API-level filtering")
     logger.info("   • Cached processing")
-    logger.info("   • Pre-calculated analytics")
-    logger.info("   • Bounded memory caches")
     logger.info("")
     
     # Validate environment
@@ -1438,15 +1468,17 @@ def main():
     # Load checkpoint for incremental sync
     last_sync_time = load_checkpoint()
     
-    # Fetch tickets (incremental)
-    logger.info("Fetching updated tickets...")
+    # Fetch tickets (incremental or full)
+    logger.info("Fetching tickets...")
     try:
+        # For initial sync: no page limit
+        # For incremental sync: also no page limit (fetch all updated)
         tickets = fetch_tickets_incremental(
             access_token=access_token,
             last_sync_time=last_sync_time,
             page_limit=MAX_PAGES
         )
-        logger.info(f"OK Fetched {len(tickets)} tickets (incremental sync)")
+        logger.info(f"OK Fetched {len(tickets)} tickets ({'full' if not last_sync_time else 'incremental'} sync)")
     except Exception as e:
         logger.error(f"FATAL Failed to fetch tickets: {e}")
         sys.exit(1)
@@ -1513,7 +1545,7 @@ def main():
     
     logger.info("")
     logger.info("============================================================")
-    logger.info(f"DONE INTELLIGENCE SYNC COMPLETED (v{VERSION} COMPLETE)")
+    logger.info(f"DONE INTELLIGENCE SYNC COMPLETED (v{VERSION})")
     logger.info("============================================================")
     logger.info(f"  Total Processed: {METRICS['total_processed']}/{len(tickets)}")
     logger.info(f"  Active Tickets: {METRICS['active_tickets']}")
