@@ -30,15 +30,22 @@ jobs:
       
       - name: Calculate date to process
         id: calc-date
-        shell: bash
         run: |
           if [ -n "\${{ inputs.date }}" ]; then
             PROCESS_DATE="\${{ inputs.date }}"
           else
             PROCESS_DATE=\$(date -d "yesterday" +%Y-%m-%d)
           fi
-          echo "date=\${PROCESS_DATE}" >> \$GITHUB_OUTPUT
-          echo "📸 Creating final snapshot for \${PROCESS_DATE}"
+          echo "date=\$PROCESS_DATE" >> \$GITHUB_OUTPUT
+          echo "📸 Creating final snapshot for \$PROCESS_DATE"
+      
+      - name: Verify date was set
+        run: |
+          echo "Captured date: \${{ steps.calc-date.outputs.date }}"
+          if [ -z "\${{ steps.calc-date.outputs.date }}" ]; then
+            echo "ERROR: Date was not set properly"
+            exit 1
+          fi
       
       - name: Run performance data collection
         env:
@@ -51,12 +58,11 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        shell: bash
+          TARGET_DATE: \${{ steps.calc-date.outputs.date }}
         run: |
           echo "📸 Capturing final snapshot for yesterday..."
-          python scripts/backfill_performance.py \
-            --start-date "\${{ steps.calc-date.outputs.date }}" \
-            --end-date "\${{ steps.calc-date.outputs.date }}"
+          echo "Target date: \$TARGET_DATE"
+          python scripts/backfill_performance.py --start-date "\$TARGET_DATE" --end-date "\$TARGET_DATE"
       
       - name: Upload artifacts
         if: always()
@@ -69,6 +75,5 @@ jobs:
       
       - name: Notify on failure
         if: failure()
-        shell: bash
         run: |
           echo "❌ Daily snapshot failed for \${{ steps.calc-date.outputs.date }}"
