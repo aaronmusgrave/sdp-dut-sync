@@ -42,20 +42,26 @@ jobs:
       
       - name: Determine start date
         id: start
+        env:
+          INPUT_DATE: \${{ inputs.start_date }}
+          DEFAULT_DATE: \${{ steps.default_start.outputs.value }}
         run: |
-          if [ -n "\${{ inputs.start_date }}" ]; then
-            echo "value=\${{ inputs.start_date }}" >> \$GITHUB_OUTPUT
+          if [ -z "\$INPUT_DATE" ]; then
+            echo "value=\$DEFAULT_DATE" >> \$GITHUB_OUTPUT
           else
-            echo "value=\${{ steps.default_start.outputs.value }}" >> \$GITHUB_OUTPUT
+            echo "value=\$INPUT_DATE" >> \$GITHUB_OUTPUT
           fi
       
       - name: Determine end date
         id: end
+        env:
+          INPUT_DATE: \${{ inputs.end_date }}
+          DEFAULT_DATE: \${{ steps.default_end.outputs.value }}
         run: |
-          if [ -n "\${{ inputs.end_date }}" ]; then
-            echo "value=\${{ inputs.end_date }}" >> \$GITHUB_OUTPUT
+          if [ -z "\$INPUT_DATE" ]; then
+            echo "value=\$DEFAULT_DATE" >> \$GITHUB_OUTPUT
           else
-            echo "value=\${{ steps.default_end.outputs.value }}" >> \$GITHUB_OUTPUT
+            echo "value=\$INPUT_DATE" >> \$GITHUB_OUTPUT
           fi
       
       - name: Run performance data backfill
