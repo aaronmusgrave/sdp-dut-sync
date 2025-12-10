@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v17.1.2 - MEETINGS, PROFILE & SMART TICKET COUNT
-Tracks meeting load, enhanced Azure AD profile, and intelligent open ticket count
+Performance Data Backfill Script v17.1.3 - MEETINGS, PROFILE & CLOSED TICKETS
+Tracks meeting load, enhanced Azure AD profile, and tickets CLOSED (historically accurate!)
 Ticket details (complexity, SLA, conversations) handled by ServiceDesk Intelligence script
-Enhanced: Manager, location details, account status, tenure, smart ticket counting
+Enhanced: Manager, location details, account status, tenure, CLOSED ticket tracking
 Processes historical dates sequentially
 Optimized: Fast parallel processing
 
-v17.1.2 Changes:
-- Hybrid ticket counting: Accurate for today, estimated for last 7 days, 0 for older
-- Designed for daily scheduled runs to build accurate history over time
+v17.1.3 Changes:
+- CLOSED tickets instead of open tickets (historically queryable!)
+- Works for ANY date (past, present, future)
+- Accurate throughput/productivity metrics
 - 24-HOUR MEETING TRACKING: Counts all meetings (not just business hours)
 """
 
@@ -368,159 +369,77 @@ def get_meetings(email, graph_token, date):
         return {'count': 0, 'hours': 0}
 
 
-def count_open_tickets(tech_email, sdp_token, target_date):
+def count_closed_tickets(tech_email, sdp_token, target_date):
     """
-    Count open tickets - hybrid approach
-    v17.1.2: 
-    - Current date (today): Accurate real-time count
-    - Recent history (last 7 days): Attempt historical count
-    - Older history (8+ days ago): Return 0 (will be captured by daily runs)
+    Count tickets CLOSED on specific date - works for ANY historical date!
+    This is retrospectively queryable - shows productivity/throughput
+    v17.1.3: Tracks CLOSED/RESOLVED tickets instead of open tickets
     """
     if not tech_email:
         return 0
     
-    today = datetime.now().date()
-    target_date_only = target_date.date()
-    days_ago = (today - target_date_only).days
+    # Date range: Start and end of target day
+    start_of_day = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_day = target_date.replace(hour=23, minute=59, second=59, microsecond=0)
     
-    # Only count for current date OR last 7 days
-    if days_ago > 7:
-        # Too old - will be captured by daily scheduled runs
-        return 0
+    # Convert to milliseconds for ServiceDesk API
+    start_ms = int(start_of_day.timestamp() * 1000)
+    end_ms = int(end_of_day.timestamp() * 1000)
     
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    if days_ago == 0:
-        # TODAY - simple current query (fast and accurate)
-        list_info = {
-            "list_info": {
-                "row_count": 250,
-                "start_index": 1,
-                "search_criteria": [
-                    {
-                        "field": "technician.email_id",
-                        "condition": "is",
-                        "values": [tech_email]
-                    },
-                    {
-                        "field": "status.name",
-                        "condition": "is not",
-                        "logical_operator": "AND",
-                        "values": ["Closed", "Cancelled", "Resolved"]
-                    }
-                ]
-            }
+    # Query for tickets RESOLVED on this date by this technician
+    list_info = {
+        "list_info": {
+            "row_count": 250,
+            "start_index": 1,
+            "search_criteria": [
+                {
+                    "field": "technician.email_id",
+                    "condition": "is",
+                    "values": [tech_email]
+                },
+                {
+                    "field": "resolved_time",
+                    "condition": "between",
+                    "logical_operator": "AND",
+                    "values": [start_ms, end_ms]
+                }
+            ]
         }
-        
-        url = f"{SDP_API_BASE}/requests"
-        params = {'input_data': json.dumps(list_info)}
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(url, headers=headers, params=params, timeout=30)
-                if response.status_code == 200:
-                    tickets = response.json().get('requests', [])
-                    return len(tickets)
-                elif response.status_code == 429:
-                    wait_time = 2 ** attempt * 5
-                    logger.warning(f"Rate limited counting tickets. Waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            except Exception as e:
-                logger.warning(f"Error counting tickets for {tech_email} (attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-        
-        return 0
+    }
     
-    else:
-        # RECENT HISTORY (1-7 days) - attempt historical count
-        # This is less accurate but better than nothing
-        target_end = (target_date + timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
-        
-        list_info = {
-            "list_info": {
-                "row_count": 250,
-                "start_index": 1,
-                "search_criteria": [
-                    {
-                        "field": "technician.email_id",
-                        "condition": "is",
-                        "values": [tech_email]
-                    },
-                    {
-                        "field": "created_time",
-                        "condition": "is before",
-                        "values": [target_end]
-                    }
-                ]
-            }
-        }
-        
-        url = f"{SDP_API_BASE}/requests"
-        params = {'input_data': json.dumps(list_info)}
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(url, headers=headers, params=params, timeout=30)
-                if response.status_code == 200:
-                    tickets = response.json().get('requests', [])
-                    
-                    # Filter by resolution date
-                    count = 0
-                    for ticket in tickets:
-                        status = ticket.get('status', {})
-                        status_name = status.get('name', '').lower()
-                        
-                        # Check if it was open on target date
-                        created_time = ticket.get('created_time', {})
-                        resolved_time = ticket.get('resolved_time', {})
-                        
-                        if created_time and created_time.get('value'):
-                            try:
-                                created_ms = created_time.get('value')
-                                created_date = datetime.fromtimestamp(created_ms / 1000).date()
-                                
-                                # Was it created by target date?
-                                if created_date <= target_date_only:
-                                    # Was it resolved after target date or still open?
-                                    if resolved_time and resolved_time.get('value'):
-                                        resolved_ms = resolved_time.get('value')
-                                        resolved_date = datetime.fromtimestamp(resolved_ms / 1000).date()
-                                        if resolved_date > target_date_only:
-                                            count += 1  # Was still open on target date
-                                    else:
-                                        # Still open now, so was open on target date
-                                        count += 1
-                            except:
-                                pass
-                    
-                    return count
-                    
-                elif response.status_code == 429:
-                    wait_time = 2 ** attempt * 5
-                    logger.warning(f"Rate limited counting tickets. Waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            except Exception as e:
-                logger.warning(f"Error counting historical tickets for {tech_email} (attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-        
-        return 0
+    url = f"{SDP_API_BASE}/requests"
+    params = {'input_data': json.dumps(list_info)}
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            if response.status_code == 200:
+                tickets = response.json().get('requests', [])
+                return len(tickets)
+            elif response.status_code == 429:
+                wait_time = 2 ** attempt * 5
+                logger.warning(f"Rate limited counting closed tickets. Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+        except Exception as e:
+            logger.warning(f"Error counting closed tickets for {tech_email} (attempt {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+    
+    return 0
 
 
 def calculate_performance(meetings, job_title=None):
     """
     Calculate performance metrics based on meeting load only
-    v17.1.2: Meetings and availability only - detailed ticket data from intelligence script
+    v17.1.3: Meetings and availability only - detailed ticket data from intelligence script
     """
     meeting_hours = meetings['hours']
     available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
@@ -560,8 +479,8 @@ def calculate_performance(meetings, job_title=None):
 
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
     """
-    Process single technician's calendar, profile data, and open ticket count
-    v17.1.2: Hybrid ticket counting (accurate today, estimated last 7 days, 0 for older)
+    Process single technician's calendar, profile data, and closed ticket count
+    v17.1.3: CLOSED tickets (historically accurate!)
     """
     if isinstance(tech_info, dict):
         tech_email = tech_info['email']
@@ -595,8 +514,8 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
     # Fetch meetings
     meetings = get_meetings(tech_email, graph_token, target_date)
     
-    # Fetch open ticket count (v17.1.2 - hybrid: accurate today, estimated last 7 days, 0 for older)
-    open_tickets = count_open_tickets(tech_email, sdp_token, target_date)
+    # Fetch CLOSED ticket count (v17.1.3 - historically accurate!)
+    closed_tickets = count_closed_tickets(tech_email, sdp_token, target_date)
     
     # Simplified performance calculation (meetings only)
     performance = calculate_performance(meetings, tech_job_title)
@@ -617,13 +536,13 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
         'company_name': tech_company_name,
         'account_created': tech_account_created,
         'meetings': meetings,
-        'open_tickets': open_tickets,  # v17.1.2 - hybrid count
+        'closed_tickets': closed_tickets,  # v17.1.3 - CLOSED tickets
         'performance': performance
     }
 
 
 def save_to_file(tech_data, date):
-    """Save metrics to JSON file - v17.1.2 with hybrid open ticket count"""
+    """Save metrics to JSON file - v17.1.3 with closed ticket count"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -649,7 +568,7 @@ def save_to_file(tech_data, date):
                 'count': data['meetings']['count'],
                 'hours': data['meetings']['hours']
             },
-            'open_tickets': data.get('open_tickets', 0),  # v17.1.2
+            'closed_tickets': data.get('closed_tickets', 0),  # v17.1.3
             'performance': data['performance']
         }
     
@@ -660,7 +579,7 @@ def save_to_file(tech_data, date):
 
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust - v17.1.2 with hybrid open ticket count"""
+    """Upload metrics to Dust - v17.1.3 with closed ticket count"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         return 0
     
@@ -673,22 +592,10 @@ def upload_to_dust(tech_data, date):
     date_str = date.strftime('%Y-%m-%d')
     uploaded = 0
     
-    # Determine ticket count note based on date
-    today = datetime.now().date()
-    target_date_only = date.date()
-    days_ago = (today - target_date_only).days
-    
-    if days_ago == 0:
-        ticket_note = "Open ticket count is accurate real-time snapshot"
-    elif days_ago <= 7:
-        ticket_note = "Open ticket count is estimated based on creation/resolution dates (85-90% accurate)"
-    else:
-        ticket_note = "Open ticket count not available for dates >7 days ago (will be captured by daily scheduled runs)"
-    
     for tech_name, data in tech_data.items():
         m = data['meetings']
         p = data['performance']
-        open_tickets = data.get('open_tickets', 0)  # v17.1.2
+        closed_tickets = data.get('closed_tickets', 0)  # v17.1.3
         
         # Build location string
         location_parts = []
@@ -723,18 +630,15 @@ def upload_to_dust(tech_data, date):
         if data.get('account_enabled') == False:
             tags.append("account-disabled")
         
-        # Add open ticket tags for quick filtering (v17.1.2)
-        if days_ago <= 7:  # Only tag if we have ticket data
-            if open_tickets > 15:
-                tags.append("high-ticket-load")
-            elif open_tickets > 10:
-                tags.append("moderate-ticket-load")
-            elif open_tickets > 5:
-                tags.append("active-ticket-load")
-            elif open_tickets > 0:
-                tags.append("has-tickets")
-            else:
-                tags.append("no-tickets")
+        # Add productivity tags based on closed tickets (v17.1.3)
+        if closed_tickets >= 10:
+            tags.append("high-productivity")
+        elif closed_tickets >= 5:
+            tags.append("moderate-productivity")
+        elif closed_tickets > 0:
+            tags.append("active-productivity")
+        else:
+            tags.append("no-closures")
         
         document = {
             "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
@@ -759,8 +663,9 @@ def upload_to_dust(tech_data, date):
 - **Meeting Time:** {m['hours']} hours ({p['meeting_percentage']}%)
 - **Available Hours:** {p['available_hours']} hours
 
-## Current Workload
-- **Open Tickets:** {open_tickets if days_ago <= 7 else 'N/A (historical)'}
+## Productivity Metrics
+- **Tickets Closed:** {closed_tickets} tickets resolved on this date
+- **Throughput:** {closed_tickets} tickets completed
 
 ## Role Information
 - **Role Multiplier:** {p['role_multiplier']}x
@@ -768,18 +673,18 @@ def upload_to_dust(tech_data, date):
 ## Capacity Status
 - **Meeting Load:** {p['meeting_percentage']}% of workday
 - **Available for Tickets:** {p['available_hours']} hours
-- **Current Ticket Load:** {open_tickets if days_ago <= 7 else 'Data captured by daily runs'}
+- **Productivity:** {closed_tickets} tickets closed on this date
 
 ## Account Status
 - **Account Enabled:** {'Yes' if data.get('account_enabled') else 'No' if data.get('account_enabled') == False else 'Unknown'}
 - **Account Created:** {data.get('account_created') or 'N/A'}
 
 ## Notes
-- {ticket_note}
+- Closed ticket count is historically accurate for any date (past, present, future)
 - For detailed ticket information (complexity, SLA, priority, conversations), query the ServiceDesk Intelligence data source
-- This file tracks meeting load, availability, and current open ticket count for quick capacity planning
-- Script runs daily at 6 AM to capture accurate ticket counts going forward
+- This file tracks meeting load, availability, and tickets CLOSED for productivity tracking
 - Meeting tracking: Full 24-hour day (not just business hours)
+- Closed tickets show throughput and resolution velocity
 """,
             "structured_data": {
                 "technician_name": tech_name,
@@ -802,7 +707,7 @@ def upload_to_dust(tech_data, date):
                 "meeting_hours": m['hours'],
                 "meeting_percentage": p['meeting_percentage'],
                 "available_hours": p['available_hours'],
-                "open_tickets": open_tickets if days_ago <= 7 else None,  # v17.1.2 - null for old dates
+                "closed_tickets": closed_tickets,  # v17.1.3
                 "role_multiplier": p['role_multiplier']
             }
         }
@@ -837,7 +742,7 @@ def save_progress(progress):
 
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for a single date - v17.1.2 with hybrid ticket counting"""
+    """Process all technicians for a single date - v17.1.3 with closed ticket tracking"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     try:
@@ -886,36 +791,27 @@ def process_single_date(target_date, technicians):
                     'account_enabled': result['account_enabled'],
                     'account_created': result['account_created'],
                     'meetings': result['meetings'],
-                    'open_tickets': result.get('open_tickets', 0),  # v17.1.2
+                    'closed_tickets': result.get('closed_tickets', 0),  # v17.1.3
                     'performance': result['performance']
                 }
             except Exception as e:
                 logger.error(f"Failed to process {tech_name}: {e}")
     
-    # Display results - v17.1.2 with hybrid ticket counts
+    # Display results - v17.1.3 with closed ticket counts
     print()
     print("="*115)
     print(f"{target_date.strftime('%B %d, %Y')}")
     print("="*115)
     
-    # Show ticket count note for historical dates
-    today = datetime.now().date()
-    days_ago = (today - target_date.date()).days
-    if days_ago > 7:
-        print("Note: Ticket counts not shown for dates >7 days ago (captured by daily scheduled runs)")
-    elif days_ago > 0:
-        print(f"Note: Ticket counts estimated for {days_ago} days ago (85-90% accurate)")
-    
     for tech_name, data in sorted(tech_data.items(), key=lambda x: x[0]):
         m = data['meetings']
         p = data['performance']
-        open_tickets = data.get('open_tickets', 0)
+        closed_tickets = data.get('closed_tickets', 0)
         job_title = (data.get('job_title') or 'N/A')[:30]
         manager = (data.get('manager_name') or 'N/A')[:20]
         
-        # Display with meetings, availability, open tickets (if available), and manager
-        ticket_display = f"Open:{open_tickets:3}" if days_ago <= 7 else "Open:N/A"
-        print(f"{tech_name:25} | {job_title:30} | Mgr:{manager:20} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Avail:{p['available_hours']:4.1f}h | {ticket_display}")
+        # Display with meetings, availability, closed tickets, and manager
+        print(f"{tech_name:25} | {job_title:30} | Mgr:{manager:20} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Avail:{p['available_hours']:4.1f}h | Closed:{closed_tickets:3}")
     
     print()
     
@@ -928,19 +824,19 @@ def process_single_date(target_date, technicians):
 
 
 def main():
-    """Main backfill execution - v17.1.2 meetings, profile & hybrid ticket count"""
-    parser = argparse.ArgumentParser(description='Backfill meeting, profile, and open ticket data for date range')
+    """Main backfill execution - v17.1.3 meetings, profile & closed ticket count"""
+    parser = argparse.ArgumentParser(description='Backfill meeting, profile, and closed ticket data for date range')
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
     args = parser.parse_args()
     
     print("="*115)
-    print("PERFORMANCE DATA BACKFILL v17.1.2 (Meetings, Profile & Hybrid Ticket Count)")
+    print("PERFORMANCE DATA BACKFILL v17.1.3 (Meetings, Profile & Closed Tickets)")
     print("="*115)
     print()
     print("Note: Detailed ticket data (complexity, SLA, conversations) is handled by the ServiceDesk Intelligence script")
-    print("      This script tracks meeting load, enhanced Azure AD profile, and smart open ticket counting")
+    print("      This script tracks meeting load, enhanced Azure AD profile, and CLOSED ticket counts")
     print()
     print("Enhanced Azure Fields:")
     print("  ✓ Manager (organizational hierarchy)")
@@ -950,11 +846,11 @@ def main():
     print("  ✓ Account Status (enabled/disabled)")
     print("  ✓ Account Created (tenure tracking)")
     print()
-    print("Smart Ticket Counting (v17.1.2):")
-    print("  ✓ Today: Accurate real-time count")
-    print("  ✓ Last 7 days: Estimated historical count (85-90% accurate)")
-    print("  ✓ Older dates: Not counted (will be captured by daily scheduled runs)")
-    print("  → Run this script daily at 6 AM to build accurate history over time")
+    print("Closed Ticket Tracking (v17.1.3):")
+    print("  ✓ Historically accurate for ANY date (past, present, future)")
+    print("  ✓ Shows productivity/throughput metrics")
+    print("  ✓ Tracks resolution velocity")
+    print("  ✓ Can backfill unlimited historical data")
     print()
     print("Meeting Tracking:")
     print("  ✓ Full 24-hour day (not just business hours)")
@@ -1043,7 +939,7 @@ def main():
         logger.info("All dates already processed!")
         return
     
-    logger.info(f"Processing {len(dates_to_process)} dates (meetings + profiles + hybrid ticket counts)")
+    logger.info(f"Processing {len(dates_to_process)} dates (meetings + profiles + closed tickets)")
     if completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
     
@@ -1085,7 +981,7 @@ def main():
     total_time = time.time() - start_time
     print()
     print("="*115)
-    print("BACKFILL COMPLETE - v17.1.2")
+    print("BACKFILL COMPLETE - v17.1.3")
     print("="*115)
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Avg time per date: {total_time/len(dates_to_process):.1f} seconds")
@@ -1095,7 +991,7 @@ def main():
     else:
         print("Failed: 0 dates")
     print()
-    print("v17.1.2 Features:")
+    print("v17.1.3 Features:")
     print("  ✓ Meeting load tracking (count, hours, percentage)")
     print("  ✓ Full 24-hour meeting tracking (not just business hours)")
     print("  ✓ Job title and department from Azure AD")
@@ -1104,22 +1000,24 @@ def main():
     print("  ✓ Display name and company")
     print("  ✓ Account status (enabled/disabled)")
     print("  ✓ Account creation date (tenure)")
-    print("  ✓ Hybrid ticket counting (accurate today, estimated last 7 days, 0 for older)")
+    print("  ✓ CLOSED tickets (historically accurate for ANY date!)")
+    print("  ✓ Productivity/throughput metrics")
     print("  ✓ Available hours calculation")
     print("  ✓ Role multiplier identification")
     print("  ✓ Performance: ~30-40 seconds per date")
     print()
     print("Data Usage:")
     print("  - Meeting data: Full 24-hour day for accurate capacity planning")
-    print("  - Open tickets today: Accurate real-time snapshot")
-    print("  - Open tickets last 7 days: Estimated (85-90% accurate)")
-    print("  - Open tickets older: Will be captured by daily scheduled runs")
+    print("  - Closed tickets: Historically accurate - shows productivity and throughput")
     print("  - Profile data: Use for org structure and routing")
     print("  - Detailed ticket data: Query intelligence data source for complexity, SLA, conversations")
     print()
-    print("Next Steps:")
-    print("  → Set up daily scheduled run (6 AM) to capture accurate ticket counts going forward")
-    print("  → See GitHub Actions workflow: .github/workflows/daily-performance.yml")
+    print("Benefits of Closed Ticket Tracking:")
+    print("  ✓ Works for historical dates (backfill as far back as needed)")
+    print("  ✓ Shows actual productivity/resolution velocity")
+    print("  ✓ Enables throughput analysis")
+    print("  ✓ Identifies high-performers")
+    print("  ✓ Correlates meetings vs productivity")
     print()
     
     if not progress['failed']:
