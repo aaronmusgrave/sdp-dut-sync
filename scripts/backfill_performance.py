@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v17.0.0 - MEETINGS & PROFILE ONLY
-Simplified: Only tracks meeting load and job titles
+Performance Data Backfill Script v17.1.0 - MEETINGS & PROFILE (Enhanced Azure Fields)
+Simplified: Only tracks meeting load and enhanced Azure AD profile
 Ticket data handled by ServiceDesk Intelligence script
+Enhanced: Manager, location details, account status, tenure
 Processes historical dates sequentially
-Azure AD profile integration (job title, department, location)
 Optimized: Fast parallel processing of meetings
 """
 
@@ -168,7 +168,10 @@ def get_sdp_token():
     raise Exception("Failed to get SDP token after max retries.")
 
 def get_azure_profile(email, graph_token):
-    """Fetch user profile from Azure AD including job title"""
+    """
+    Fetch enhanced user profile from Azure AD
+    v17.1.0: Added manager, city/state/country, display name, company, account status, tenure
+    """
     if not email:
         return None
     
@@ -182,10 +185,47 @@ def get_azure_profile(email, graph_token):
         response = requests.get(url, headers=headers, timeout=30)
         if response.status_code == 200:
             profile = response.json()
+            
+            # Fetch manager separately (requires additional API call)
+            manager_name = None
+            manager_email = None
+            try:
+                manager_url = f"https://graph.microsoft.com/v1.0/users/{email}/manager"
+                manager_response = requests.get(manager_url, headers=headers, timeout=30)
+                if manager_response.status_code == 200:
+                    manager_data = manager_response.json()
+                    manager_name = manager_data.get('displayName')
+                    manager_email = manager_data.get('mail')
+            except:
+                # Manager not found or not set - this is OK
+                pass
+            
             return {
+                # Core fields
                 'job_title': profile.get('jobTitle'),
                 'department': profile.get('department'),
                 'office_location': profile.get('officeLocation'),
+                
+                # Enhanced location (Phase 1)
+                'city': profile.get('city'),
+                'state': profile.get('state'),
+                'country': profile.get('country'),
+                
+                # Organizational hierarchy (Phase 1)
+                'manager_name': manager_name,
+                'manager_email': manager_email,
+                
+                # Account status (Phase 1)
+                'account_enabled': profile.get('accountEnabled'),
+                
+                # Identity (Phase 2)
+                'display_name': profile.get('displayName'),
+                'company_name': profile.get('companyName'),
+                
+                # Tenure (Phase 2)
+                'account_created': profile.get('createdDateTime'),
+                
+                # Contact info
                 'mobile_phone': profile.get('mobilePhone'),
                 'business_phones': profile.get('businessPhones', [])
             }
@@ -195,7 +235,7 @@ def get_azure_profile(email, graph_token):
     return None
 
 def discover_technicians(sdp_token, graph_token):
-    """Find active technicians and enrich with Azure AD profiles"""
+    """Find active technicians and enrich with enhanced Azure AD profiles"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -227,12 +267,39 @@ def discover_technicians(sdp_token, graph_token):
                 if name and name != 'Unassigned' and name not in technicians:
                     azure_profile = get_azure_profile(email, graph_token)
                     
-                    technicians[name] = {
-                        'email': email,
-                        'job_title': azure_profile.get('job_title') if azure_profile else None,
-                        'department': azure_profile.get('department') if azure_profile else None,
-                        'office_location': azure_profile.get('office_location') if azure_profile else None
-                    }
+                    if azure_profile:
+                        technicians[name] = {
+                            'email': email,
+                            'job_title': azure_profile.get('job_title'),
+                            'department': azure_profile.get('department'),
+                            'office_location': azure_profile.get('office_location'),
+                            'city': azure_profile.get('city'),
+                            'state': azure_profile.get('state'),
+                            'country': azure_profile.get('country'),
+                            'manager_name': azure_profile.get('manager_name'),
+                            'manager_email': azure_profile.get('manager_email'),
+                            'account_enabled': azure_profile.get('account_enabled'),
+                            'display_name': azure_profile.get('display_name'),
+                            'company_name': azure_profile.get('company_name'),
+                            'account_created': azure_profile.get('account_created')
+                        }
+                    else:
+                        # Fallback if Azure profile fetch fails
+                        technicians[name] = {
+                            'email': email,
+                            'job_title': None,
+                            'department': None,
+                            'office_location': None,
+                            'city': None,
+                            'state': None,
+                            'country': None,
+                            'manager_name': None,
+                            'manager_email': None,
+                            'account_enabled': None,
+                            'display_name': None,
+                            'company_name': None,
+                            'account_created': None
+                        }
     
     return technicians
 
@@ -337,18 +404,36 @@ def calculate_performance(meetings, job_title=None):
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
     """
     Process single technician's calendar and profile data only
-    v17.0.0: NO ticket data - handled by intelligence script
+    v17.1.0: Enhanced with additional Azure AD fields
     """
     if isinstance(tech_info, dict):
         tech_email = tech_info['email']
         tech_job_title = tech_info.get('job_title')
         tech_department = tech_info.get('department')
         tech_office = tech_info.get('office_location')
+        tech_city = tech_info.get('city')
+        tech_state = tech_info.get('state')
+        tech_country = tech_info.get('country')
+        tech_manager_name = tech_info.get('manager_name')
+        tech_manager_email = tech_info.get('manager_email')
+        tech_account_enabled = tech_info.get('account_enabled')
+        tech_display_name = tech_info.get('display_name')
+        tech_company_name = tech_info.get('company_name')
+        tech_account_created = tech_info.get('account_created')
     else:
         tech_email = tech_info
         tech_job_title = None
         tech_department = None
         tech_office = None
+        tech_city = None
+        tech_state = None
+        tech_country = None
+        tech_manager_name = None
+        tech_manager_email = None
+        tech_account_enabled = None
+        tech_display_name = None
+        tech_company_name = None
+        tech_account_created = None
     
     # Only fetch meetings - no ticket data
     meetings = get_meetings(tech_email, graph_token, target_date)
@@ -362,13 +447,22 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
         'job_title': tech_job_title,
         'department': tech_department,
         'office_location': tech_office,
+        'city': tech_city,
+        'state': tech_state,
+        'country': tech_country,
+        'manager_name': tech_manager_name,
+        'manager_email': tech_manager_email,
+        'account_enabled': tech_account_enabled,
+        'display_name': tech_display_name,
+        'company_name': tech_company_name,
+        'account_created': tech_account_created,
         'meetings': meetings,
         'performance': performance
     }
 
 
 def save_to_file(tech_data, date):
-    """Save metrics to JSON file - v17.0.0 meetings & profile only"""
+    """Save metrics to JSON file - v17.1.0 with enhanced Azure fields"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -377,9 +471,18 @@ def save_to_file(tech_data, date):
             'date': date.isoformat(),
             'profile': {
                 'email': data.get('email'),
+                'display_name': data.get('display_name'),
                 'job_title': data.get('job_title'),
                 'department': data.get('department'),
-                'office_location': data.get('office_location')
+                'office_location': data.get('office_location'),
+                'city': data.get('city'),
+                'state': data.get('state'),
+                'country': data.get('country'),
+                'manager_name': data.get('manager_name'),
+                'manager_email': data.get('manager_email'),
+                'company_name': data.get('company_name'),
+                'account_enabled': data.get('account_enabled'),
+                'account_created': data.get('account_created')
             },
             'meetings': {
                 'count': data['meetings']['count'],
@@ -395,7 +498,7 @@ def save_to_file(tech_data, date):
 
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust - v17.0.0 meetings & profile only"""
+    """Upload metrics to Dust - v17.1.0 with enhanced Azure fields"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         return 0
     
@@ -412,6 +515,16 @@ def upload_to_dust(tech_data, date):
         m = data['meetings']
         p = data['performance']
         
+        # Build location string
+        location_parts = []
+        if data.get('city'):
+            location_parts.append(data.get('city'))
+        if data.get('state'):
+            location_parts.append(data.get('state'))
+        if data.get('country'):
+            location_parts.append(data.get('country'))
+        location_string = ', '.join(location_parts) if location_parts else (data.get('office_location') or 'N/A')
+        
         # Build tags - safely handle None values
         tags = [
             "performance-metrics",
@@ -426,6 +539,15 @@ def upload_to_dust(tech_data, date):
         if data.get('department'):
             tags.append(f"department:{data.get('department').lower().replace(' ', '-')}")
         
+        if data.get('manager_name'):
+            tags.append(f"manager:{data.get('manager_name').lower().replace(' ', '-')}")
+        
+        if data.get('city'):
+            tags.append(f"city:{data.get('city').lower().replace(' ', '-')}")
+        
+        if data.get('account_enabled') == False:
+            tags.append("account-disabled")
+        
         document = {
             "document_id": f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
             "timestamp": int(date.timestamp() * 1000),
@@ -433,11 +555,16 @@ def upload_to_dust(tech_data, date):
             "text": f"""# {tech_name} - {date.strftime('%B %d, %Y')}
 
 ## Profile
-- **Name:** {tech_name}
+- **Name:** {data.get('display_name') or tech_name}
 - **Job Title:** {data.get('job_title') or 'N/A'}
 - **Department:** {data.get('department') or 'N/A'}
-- **Location:** {data.get('office_location') or 'N/A'}
+- **Location:** {location_string}
+- **Company:** {data.get('company_name') or 'N/A'}
 - **Email:** {data.get('email') or 'N/A'}
+
+## Organizational Structure
+- **Reports To:** {data.get('manager_name') or 'N/A'}
+- **Manager Email:** {data.get('manager_email') or 'N/A'}
 
 ## Calendar & Availability
 - **Meetings:** {m['count']} meetings
@@ -451,6 +578,10 @@ def upload_to_dust(tech_data, date):
 - **Meeting Load:** {p['meeting_percentage']}% of workday
 - **Available for Tickets:** {p['available_hours']} hours
 
+## Account Status
+- **Account Enabled:** {'Yes' if data.get('account_enabled') else 'No' if data.get('account_enabled') == False else 'Unknown'}
+- **Account Created:** {data.get('account_created') or 'N/A'}
+
 ## Notes
 - Ticket statistics are tracked in the ServiceDesk Intelligence data source
 - This file tracks meeting load and availability for capacity planning
@@ -459,9 +590,19 @@ def upload_to_dust(tech_data, date):
 """,
             "structured_data": {
                 "technician_name": tech_name,
+                "display_name": data.get('display_name'),
                 "job_title": data.get('job_title'),
                 "department": data.get('department'),
                 "office_location": data.get('office_location'),
+                "city": data.get('city'),
+                "state": data.get('state'),
+                "country": data.get('country'),
+                "location_string": location_string,
+                "manager_name": data.get('manager_name'),
+                "manager_email": data.get('manager_email'),
+                "company_name": data.get('company_name'),
+                "account_enabled": data.get('account_enabled'),
+                "account_created": data.get('account_created'),
                 "email": data.get('email'),
                 "date": date_str,
                 "meeting_count": m['count'],
@@ -502,7 +643,7 @@ def save_progress(progress):
 
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for a single date - v17.0.0 meetings only"""
+    """Process all technicians for a single date - v17.1.0 meetings only"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     try:
@@ -538,28 +679,38 @@ def process_single_date(target_date, technicians):
                 result = future.result()
                 tech_data[result['name']] = {
                     'email': result['email'],
+                    'display_name': result['display_name'],
                     'job_title': result['job_title'],
                     'department': result['department'],
                     'office_location': result['office_location'],
+                    'city': result['city'],
+                    'state': result['state'],
+                    'country': result['country'],
+                    'manager_name': result['manager_name'],
+                    'manager_email': result['manager_email'],
+                    'company_name': result['company_name'],
+                    'account_enabled': result['account_enabled'],
+                    'account_created': result['account_created'],
                     'meetings': result['meetings'],
                     'performance': result['performance']
                 }
             except Exception as e:
                 logger.error(f"Failed to process {tech_name}: {e}")
     
-    # Display results - v17.0.0 simplified (meetings only)
+    # Display results - v17.1.0 simplified (meetings only)
     print()
-    print("="*90)
+    print("="*100)
     print(f"{target_date.strftime('%B %d, %Y')}")
-    print("="*90)
+    print("="*100)
     
     for tech_name, data in sorted(tech_data.items(), key=lambda x: x[0]):
         m = data['meetings']
         p = data['performance']
         job_title = (data.get('job_title') or 'N/A')[:30]
+        manager = (data.get('manager_name') or 'N/A')[:20]
         
-        # Simple display with meetings and availability
-        print(f"{tech_name:25} | {job_title:30} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Avail:{p['available_hours']:4.1f}h")
+        # Simple display with meetings, availability, and manager
+        print(f"{tech_name:25} | {job_title:30} | Mgr:{manager:20} | Mtgs:{m['count']:2} ({m['hours']:4.1f}h) | Avail:{p['available_hours']:4.1f}h")
     
     print()
     
@@ -570,19 +721,27 @@ def process_single_date(target_date, technicians):
     
     return filename
 def main():
-    """Main backfill execution - v17.0.0 meetings & profile only"""
-    parser = argparse.ArgumentParser(description='Backfill meeting and profile data for date range')
+    """Main backfill execution - v17.1.0 meetings & enhanced profile"""
+    parser = argparse.ArgumentParser(description='Backfill meeting and enhanced profile data for date range')
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
     args = parser.parse_args()
     
-    print("="*90)
-    print("PERFORMANCE DATA BACKFILL v17.0.0 (Meetings & Profile Only - NO TICKETS)")
-    print("="*90)
+    print("="*100)
+    print("PERFORMANCE DATA BACKFILL v17.1.0 (Meetings & Enhanced Profile - NO TICKETS)")
+    print("="*100)
     print()
     print("Note: Ticket data is handled by the ServiceDesk Intelligence script")
-    print("      This script only tracks meeting load and job titles")
+    print("      This script tracks meeting load and enhanced Azure AD profile")
+    print()
+    print("Enhanced Azure Fields:")
+    print("  ✓ Manager (organizational hierarchy)")
+    print("  ✓ City, State, Country (detailed location)")
+    print("  ✓ Display Name (full proper name)")
+    print("  ✓ Company Name")
+    print("  ✓ Account Status (enabled/disabled)")
+    print("  ✓ Account Created (tenure tracking)")
     print()
     
     if not args.days and not args.start_date:
@@ -616,9 +775,16 @@ def main():
         sys.exit(1)
     
     try:
-        logger.info("Discovering technicians and fetching Azure profiles...")
+        logger.info("Discovering technicians and fetching enhanced Azure profiles...")
+        logger.info("(This includes manager lookup - may take slightly longer)")
         technicians = discover_technicians(sdp_token, graph_token)
-        logger.info(f"✓ Found {len(technicians)} technicians")
+        logger.info(f"✓ Found {len(technicians)} technicians with enhanced profiles")
+        
+        # Display profile summary
+        with_managers = sum(1 for t in technicians.values() if t.get('manager_name'))
+        with_location = sum(1 for t in technicians.values() if t.get('city'))
+        print()
+        print(f"Profile enrichment: {with_managers}/{len(technicians)} with managers, {with_location}/{len(technicians)} with detailed location")
         print()
     except Exception as e:
         logger.error(f"Failed to discover technicians: {e}")
@@ -659,7 +825,7 @@ def main():
         logger.info("All dates already processed!")
         return
     
-    logger.info(f"Processing {len(dates_to_process)} dates (meetings only - FAST!)")
+    logger.info(f"Processing {len(dates_to_process)} dates (meetings + enhanced profiles - FAST!)")
     if completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
     
@@ -700,9 +866,9 @@ def main():
     
     total_time = time.time() - start_time
     print()
-    print("="*90)
-    print("BACKFILL COMPLETE - v17.0.0")
-    print("="*90)
+    print("="*100)
+    print("BACKFILL COMPLETE - v17.1.0")
+    print("="*100)
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Avg time per date: {total_time/len(dates_to_process):.1f} seconds")
     print(f"Processed: {len(dates_to_process)} dates")
@@ -711,16 +877,22 @@ def main():
     else:
         print("Failed: 0 dates")
     print()
-    print("v17.0.0 Features:")
+    print("v17.1.0 Features:")
     print("  ✓ Meeting load tracking (count, hours, percentage)")
     print("  ✓ Job title and department from Azure AD")
+    print("  ✓ Manager information (organizational hierarchy)")
+    print("  ✓ Detailed location (city, state, country)")
+    print("  ✓ Display name and company")
+    print("  ✓ Account status (enabled/disabled)")
+    print("  ✓ Account creation date (tenure)")
     print("  ✓ Available hours calculation")
     print("  ✓ Role multiplier identification")
     print("  ✓ NO ticket data (handled by intelligence script)")
-    print("  ✓ 3-4x faster than v16.0.1!")
+    print("  ✓ 3-4x faster than previous versions!")
     print()
     print("Data Usage:")
     print("  - Meeting data: Use for capacity planning")
+    print("  - Profile data: Use for org structure and routing")
     print("  - Ticket data: Query intelligence data source")
     print("  - Combined view: Cross-reference both sources")
     print()
@@ -744,4 +916,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
