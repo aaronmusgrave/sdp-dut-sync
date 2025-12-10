@@ -29,27 +29,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
-      - name: Calculate date range
-        id: calc-range
+      - name: Calculate start date
+        id: start
         run: |
-          DAYS="\${{ inputs.days }}"
+          DAYS=\${{ inputs.days }}
           if [ -z "\$DAYS" ]; then
             DAYS=7
           fi
-          END_DATE=\$(date -d "yesterday" +%Y-%m-%d)
-          START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
-          echo "start=\$START_DATE" >> \$GITHUB_OUTPUT
-          echo "end=\$END_DATE" >> \$GITHUB_OUTPUT
-          echo "Backfilling from \$START_DATE to \$END_DATE"
+          echo "value=$(date -d "\$DAYS days ago" +%Y-%m-%d)" >> \$GITHUB_OUTPUT
       
-      - name: Verify dates were set
-        run: |
-          echo "Start date: \${{ steps.calc-range.outputs.start }}"
-          echo "End date: \${{ steps.calc-range.outputs.end }}"
-          if [ -z "\${{ steps.calc-range.outputs.start }}" ] || [ -z "\${{ steps.calc-range.outputs.end }}" ]; then
-            echo "ERROR: Dates were not set properly"
-            exit 1
-          fi
+      - name: Calculate end date
+        id: end
+        run: echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+      
+      - name: Display date range
+        run: echo "Backfilling from \${{ steps.start.outputs.value }} to \${{ steps.end.outputs.value }}"
       
       - name: Run performance data backfill
         env:
@@ -62,17 +56,13 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          START_DATE: \${{ steps.calc-range.outputs.start }}
-          END_DATE: \${{ steps.calc-range.outputs.end }}
-        run: |
-          echo "Backfilling from \$START_DATE to \$END_DATE"
-          python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
+        run: python scripts/backfill_performance.py --start-date "\${{ steps.start.outputs.value }}" --end-date "\${{ steps.end.outputs.value }}"
       
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-backfill-\${{ steps.calc-range.outputs.end }}
+          name: performance-backfill-\${{ steps.end.outputs.value }}
           path: tech_performance_*.json
           retention-days: 7
           if-no-files-found: warn
