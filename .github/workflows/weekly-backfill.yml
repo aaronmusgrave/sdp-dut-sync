@@ -49,12 +49,3 @@ jobs:
           START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
           END_DATE=\$(date -d yesterday +%Y-%m-%d)
           python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
-      
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: performance-backfill-\${{ github.run_number }}
-          path: tech_performance_*.json
-          retention-days: 7
-          if-no-files-found: warn
