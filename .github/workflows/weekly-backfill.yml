@@ -46,10 +46,14 @@ jobs:
           INPUT_DATE: \${{ inputs.start_date }}
           DEFAULT_DATE: \${{ steps.default_start.outputs.value }}
         run: |
+          echo "Input date: '\$INPUT_DATE'"
+          echo "Default date: '\$DEFAULT_DATE'"
           if [ -z "\$INPUT_DATE" ]; then
             echo "value=\$DEFAULT_DATE" >> \$GITHUB_OUTPUT
+            echo "Using default: \$DEFAULT_DATE"
           else
             echo "value=\$INPUT_DATE" >> \$GITHUB_OUTPUT
+            echo "Using input: \$INPUT_DATE"
           fi
       
       - name: Determine end date
@@ -58,11 +62,20 @@ jobs:
           INPUT_DATE: \${{ inputs.end_date }}
           DEFAULT_DATE: \${{ steps.default_end.outputs.value }}
         run: |
+          echo "Input date: '\$INPUT_DATE'"
+          echo "Default date: '\$DEFAULT_DATE'"
           if [ -z "\$INPUT_DATE" ]; then
             echo "value=\$DEFAULT_DATE" >> \$GITHUB_OUTPUT
+            echo "Using default: \$DEFAULT_DATE"
           else
             echo "value=\$INPUT_DATE" >> \$GITHUB_OUTPUT
+            echo "Using input: \$INPUT_DATE"
           fi
+      
+      - name: Verify dates
+        run: |
+          echo "Start date from step output: \${{ steps.start.outputs.value }}"
+          echo "End date from step output: \${{ steps.end.outputs.value }}"
       
       - name: Run performance data backfill
         env:
@@ -75,6 +88,8 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          START_DATE: \${{ steps.start.outputs.value }}
-          END_DATE: \${{ steps.end.outputs.value }}
-        run: python scripts/backfill_performance.py --start-date \$START_DATE --end-date \$END_DATE
+        run: |
+          START_DATE="\${{ steps.start.outputs.value }}"
+          END_DATE="\${{ steps.end.outputs.value }}"
+          echo "About to run with START_DATE='\$START_DATE' END_DATE='\$END_DATE'"
+          python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
