@@ -2,13 +2,17 @@ name: Weekly Performance Data Backfill
 
 on:
   schedule:
-    - cron: '0 13 * * 0'
+    - cron: '0 13 * * 0'  # 7 AM CST Sundays
   workflow_dispatch:
     inputs:
-      days:
-        description: 'Number of days to backfill'
+      start_date:
+        description: 'Start date (YYYY-MM-DD, leave empty for 7 days ago)'
         required: false
-        default: '7'
+        default: ''
+      end_date:
+        description: 'End date (YYYY-MM-DD, leave empty for yesterday)'
+        required: false
+        default: ''
 
 jobs:
   backfill-performance-data:
@@ -28,6 +32,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
       
+      - name: Calculate start date
+        id: start
+        run: |
+          if [ -n "\${{ inputs.start_date }}" ]; then
+            echo "value=\${{ inputs.start_date }}" >> \$GITHUB_OUTPUT
+          else
+            echo "value=$(date -d '7 days ago' +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          fi
+      
+      - name: Calculate end date
+        id: end
+        run: |
+          if [ -n "\${{ inputs.end_date }}" ]; then
+            echo "value=\${{ inputs.end_date }}" >> \$GITHUB_OUTPUT
+          else
+            echo "value=$(date -d yesterday +%Y-%m-%d)" >> \$GITHUB_OUTPUT
+          fi
+      
       - name: Run performance data backfill
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
@@ -39,13 +61,6 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          DAYS_INPUT: \${{ inputs.days }}
-        run: |
-          if [ -z "\$DAYS_INPUT" ]; then
-            DAYS=7
-          else
-            DAYS="\$DAYS_INPUT"
-          fi
-          START_DATE=$(date -d "\$DAYS days ago" +%Y-%m-%d)
-          END_DATE=\$(date -d yesterday +%Y-%m-%d)
-          python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
+          START_DATE: \${{ steps.start.outputs.value }}
+          END_DATE: \${{ steps.end.outputs.value }}
+        run: python scripts/backfill_performance.py --start-date "\$START_DATE" --end-date "\$END_DATE"
