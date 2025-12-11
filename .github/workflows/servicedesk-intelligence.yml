@@ -1,4 +1,62 @@
+cat > .github/workflows/sync-servicedesk.yml << 'ENDOFFILE'
 name: ServiceDesk Sync
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Read last sync time
+        run: |
+          if [ -f last_sync_time.txt ]; then
+            LAST_SYNC=\$(cat last_sync_time.txt)
+            echo "LAST_SYNC_TIME=\$LAST_SYNC" >> \$GITHUB_ENV
+            echo "Last sync: \$LAST_SYNC"
+          else
+            echo "No previous sync time found"
+          fi
+
+      - name: Run sync
+        env:
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+        run: python scripts/sync_servicedesk_intelligence.py
+
+      - name: Commit timestamp
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add last_sync_time.txt 2>/dev/null || true
+          git add checkpoint.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update timestamp"
+          git push || true
+ENDOFFILEname: ServiceDesk Sync
 
 on:
   schedule:
