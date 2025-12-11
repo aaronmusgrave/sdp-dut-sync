@@ -11,70 +11,88 @@ on:
         type: boolean
         default: false
 
+# ⭐ NEW: Add permissions to allow pushing
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v3
-      
+        with:
+          # ⭐ NEW: Persist credentials for pushing
+          persist-credentials: true
+          token: \${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           pip install requests
-      
+
       - name: Read last sync time
         id: read_sync_time
         run: |
-          if [ "${{ github.event.inputs.force_full_sync }}" == "true" ]; then
+          if [ "\${{ github.event.inputs.force_full_sync }}" == "true" ]; then
             echo "🔄 Force full sync requested - ignoring last sync time"
-            # Don't set LAST_SYNC_TIME, triggering full sync
           elif [ -f last_sync_time.txt ]; then
-            LAST_SYNC=$(cat last_sync_time.txt)
-            echo "LAST_SYNC_TIME=$LAST_SYNC" >> $GITHUB_ENV
-            echo "📊 Last sync time: $LAST_SYNC"
+            LAST_SYNC=\$(cat last_sync_time.txt)
+            echo "LAST_SYNC_TIME=\$LAST_SYNC" >> \$GITHUB_ENV
+            echo "📊 Last sync time: \$LAST_SYNC"
             
-            # Calculate time since last sync
-            CURRENT_TIME=$(date +%s)000
-            TIME_DIFF=$((($CURRENT_TIME - $LAST_SYNC) / 1000 / 60))
-            echo "⏱️  Minutes since last sync: $TIME_DIFF"
+            CURRENT_TIME=\$(date +%s)000
+            TIME_DIFF=$(((\$CURRENT_TIME - \$LAST_SYNC) / 1000 / 60))
+            echo "⏱️  Minutes since last sync: \$TIME_DIFF"
           else
             echo "🆕 No previous sync time found - performing initial full sync"
           fi
-      
+
       - name: Run ServiceDesk sync
         env:
-          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
           DUST_FOLDER_NAME: servicedesk
-          LAST_SYNC_TIME: ${{ env.LAST_SYNC_TIME }}
+          LAST_SYNC_TIME: \${{ env.LAST_SYNC_TIME }}
         run: |
           python scripts/sync_servicedesk_intelligence.py
-      
+
+      # ⭐ IMPROVED: Better commit logic
       - name: Save sync timestamp
         if: always()
         run: |
           if [ -f last_sync_time.txt ]; then
             echo "📝 Saving updated sync timestamp to repository..."
             
-            TIMESTAMP=$(cat last_sync_time.txt)
+            TIMESTAMP=\$(cat last_sync_time.txt)
             
-            git config user.name "GitHub Actions"
-            git config user.email "actions@github.com"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            
+            # Add both timestamp files
             git add last_sync_time.txt
-            git commit -m "Update sync timestamp: $TIMESTAMP [skip ci]" || echo "No changes to commit"
-            git push || echo "Nothing to push"
+            git add checkpoint.json 2>/dev/null || true
             
-            echo "✅ Timestamp committed and pushed to repository"
+            # Only commit if there are changes
+            if git diff --staged --quiet; then
+              echo "ℹ️  No changes to commit"
+            else
+              git commit -m "Update sync timestamp: \$TIMESTAMP [skip ci]"
+              git push origin main
+              echo "✅ Timestamp committed and pushed to repository"
+            fi
+          else
+            echo "⚠️  No last_sync_time.txt file found"
           fi
-      
+
       - name: Upload analytics report
         if: always()
         uses: actions/upload-artifact@v4
