@@ -1,4 +1,3 @@
-cat > .github/workflows/sync-servicedesk.yml << 'ENDOFFILE'
 name: ServiceDesk Sync
 
 on:
@@ -12,7 +11,6 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,18 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests
-
-      - name: Read last sync time
-        run: |
-          if [ -f last_sync_time.txt ]; then
-            LAST_SYNC=\$(cat last_sync_time.txt)
-            echo "LAST_SYNC_TIME=\$LAST_SYNC" >> \$GITHUB_ENV
-            echo "Last sync: \$LAST_SYNC"
-          else
-            echo "No previous sync time found"
-          fi
+        run: pip install requests
 
       - name: Run sync
         env:
@@ -47,90 +34,12 @@ jobs:
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
         run: python scripts/sync_servicedesk_intelligence.py
 
-      - name: Commit timestamp
+      - name: Commit changes
         if: always()
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add last_sync_time.txt 2>/dev/null || true
-          git add checkpoint.json 2>/dev/null || true
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add -A
           git diff --staged --quiet || git commit -m "Update timestamp"
           git push || true
-ENDOFFILEname: ServiceDesk Sync
-
-on:
-  schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install requests
-
-      - name: Read last sync time
-        id: read_sync_time
-        run: |
-          if [ -f last_sync_time.txt ]; then
-            LAST_SYNC=\$(cat last_sync_time.txt)
-            echo "LAST_SYNC_TIME=\$LAST_SYNC" >> \$GITHUB_ENV
-            echo "Last sync: \$LAST_SYNC"
-          else
-            echo "No previous sync time found - performing initial full sync"
-          fi
-
-      - name: Run ServiceDesk sync
-        env:
-          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: |
-          python scripts/sync_servicedesk_intelligence.py
-
-      - name: Save sync timestamp
-        if: always()
-        run: |
-          if [ -f last_sync_time.txt ]; then
-            echo "Saving updated sync timestamp..."
-            
-            git config user.name "github-actions"
-            git config user.email "github-actions@users.noreply.github.com"
-            
-            git add last_sync_time.txt
-            git add checkpoint.json 2>/dev/null || true
-            
-            if git diff --staged --quiet; then
-              echo "No changes to commit"
-            else
-              git commit -m "Update sync timestamp [skip ci]"
-              git push
-              echo "Timestamp saved to repository"
-            fi
-          fi
-
-      - name: Upload analytics report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: analytics-report
-          path: analytics_report_*.json
-          retention-days: 30
+          
