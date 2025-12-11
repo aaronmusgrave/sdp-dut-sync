@@ -11,7 +11,6 @@ on:
         type: boolean
         default: false
 
-# ⭐ ADD THIS
 permissions:
   contents: write
 
@@ -20,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ⭐ CHANGE THIS - Use v4, remove token parameter
       - uses: actions/checkout@v4
         with:
           persist-credentials: true
@@ -37,7 +35,8 @@ jobs:
       - name: Read last sync time
         id: read_sync_time
         run: |
-          if [ "\${{ github.event.inputs.force_full_sync }}" == "true" ]; then
+          # Safely check force_full_sync input
+          if [ "\${{ github.event.inputs.force_full_sync || 'false' }}" = "true" ]; then
             echo "🔄 Force full sync requested - ignoring last sync time"
           elif [ -f last_sync_time.txt ]; then
             LAST_SYNC=\$(cat last_sync_time.txt)
@@ -64,7 +63,6 @@ jobs:
         run: |
           python scripts/sync_servicedesk_intelligence.py
 
-      # ⭐ IMPROVED COMMIT LOGIC
       - name: Save sync timestamp
         if: always()
         run: |
