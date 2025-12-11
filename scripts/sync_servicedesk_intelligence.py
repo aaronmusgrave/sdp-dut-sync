@@ -5,6 +5,7 @@ Full 48-field comprehensive ticket intelligence with incremental sync
 
 Changes in v3.0.1:
 - Fixed checkpoint.json path to always save to project root
+- Fixed syntax errors in analytics function
 - Checkpoint now saves to: ~/sdp-dust-sync/checkpoint.json
 
 Changes in v3.0:
@@ -12,11 +13,6 @@ Changes in v3.0:
 - Reduced upload delay: 500ms → 100ms  
 - Expected speedup: 5-10x faster uploads
 - Estimated time: 80 min → 8-15 min for 4500+ tickets
-
-Previous features:
-- 48 comprehensive fields
-- All tickets (no page limit)
-- Connection pooling and parallel conversation fetching
 """
 
 import os
@@ -255,19 +251,15 @@ def get_access_token() -> str:
 # ============================================================
 
 def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
-    """
-    Fetch tickets updated since last sync (incremental)
-    """
+    """Fetch tickets updated since last sync (incremental)"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Build search criteria
     search_criteria = []
     
     if last_sync_time:
-        # Convert to milliseconds for API
         last_sync_ms = int(last_sync_time.timestamp() * 1000)
         search_criteria.append({
             "field": "last_updated_time",
@@ -301,7 +293,6 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
         logger.info(f"  STATS No page limit - fetching ALL tickets")
     
     while True:
-        # Check page limit if set
         if page_limit and page > page_limit:
             logger.warning(f"  Reached page limit of {page_limit}. Stopping.")
             break
@@ -322,7 +313,6 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
                 all_tickets.extend(tickets)
                 logger.info(f"  Page {page}: Found {len(tickets)} tickets (Total: {len(all_tickets)})")
                 
-                # Check if there are more pages
                 list_info_response = data.get('list_info', {})
                 has_more = list_info_response.get('has_more_rows', False)
                 
@@ -331,7 +321,7 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
                     break
                 
                 page += 1
-                time.sleep(0.1)  # v3.0: Reduced from 0.5s
+                time.sleep(0.1)
                 
             elif response.status_code == 429:
                 logger.warning(f"Rate limited on page {page}. Waiting 30s...")
@@ -397,9 +387,8 @@ def fetch_conversations_parallel(ticket_ids: List[str], access_token: str, max_w
 
 def calculate_complexity_score(ticket: Dict, conversations: List[Dict]) -> int:
     """Calculate ticket complexity (0-10)"""
-    score = 3  # Base score
+    score = 3
     
-    # Conversation complexity
     if len(conversations) > 10:
         score += 3
     elif len(conversations) > 5:
@@ -407,13 +396,11 @@ def calculate_complexity_score(ticket: Dict, conversations: List[Dict]) -> int:
     elif len(conversations) > 2:
         score += 1
     
-    # Technical indicators
     description = ticket.get('description', '').lower()
     technical_keywords = ['error', 'crash', 'bug', 'failure', 'corrupt', 'network', 'server', 'database']
     tech_count = sum(1 for keyword in technical_keywords if keyword in description)
     score += min(tech_count, 3)
     
-    # Priority
     priority = ticket.get('priority', {})
     priority_name = priority.get('name', '').lower() if priority else ''
     if 'urgent' in priority_name or 'critical' in priority_name:
@@ -478,7 +465,6 @@ def estimate_resolution_time(ticket: Dict, conversations: List[Dict], complexity
     """Estimate resolution time in hours"""
     base_hours = complexity * 2
     
-    # Adjust for priority
     priority = ticket.get('priority', {})
     priority_name = priority.get('name', '').lower() if priority else ''
     if 'urgent' in priority_name:
@@ -486,7 +472,6 @@ def estimate_resolution_time(ticket: Dict, conversations: List[Dict], complexity
     elif 'low' in priority_name:
         base_hours *= 1.5
     
-    # Adjust for conversation volume
     if len(conversations) > 5:
         base_hours *= 1.3
     
@@ -524,7 +509,6 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
             'has_unanswered_questions': False
         }
     
-    # Sort by time
     sorted_convs = sorted(conversations, key=lambda x: x.get('created_time', {}).get('value', 0))
     
     if not sorted_convs:
@@ -540,17 +524,15 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
     
     awaiting = 'technician' if last_responder_type == 'customer' else 'customer'
     
-    # Check for unanswered questions
     last_text = last_conv.get('description', '')
     has_unanswered_questions = '?' in last_text and last_responder_type == 'customer'
     
-    # Calculate response time
     response_time = 0
     if len(sorted_convs) > 1:
         try:
             first_time = sorted_convs[0].get('created_time', {}).get('value', 0)
             last_time = sorted_convs[-1].get('created_time', {}).get('value', 0)
-            response_time = (last_time - first_time) / (1000 * 3600)  # Convert ms to hours
+            response_time = (last_time - first_time) / (1000 * 3600)
         except:
             pass
     
@@ -562,40 +544,31 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
     }
 
 # ============================================================
-# FIELD EXTRACTION - v2.8.2 WITH DEFENSIVE NULL CHECKS
+# FIELD EXTRACTION
 # ============================================================
 
 def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
-    """
-    Extract all 48 comprehensive fields from ticket
-    v2.8.2: Added defensive null checks for tickets with missing data
-    """
+    """Extract all 48 comprehensive fields from ticket"""
     fields = {}
     
-    # Helper function for safe nested gets
     def safe_get(obj, key, default=''):
-        """Safely get value from dict, handling None"""
         if obj is None:
             return default
         if isinstance(obj, dict):
             return obj.get(key, default)
         return default
     
-    # Basic info
     fields['ticket_id'] = ticket.get('id', 'unknown')
     fields['subject'] = ticket.get('subject', 'No subject')
     fields['description'] = ticket.get('description', 'No description')
     
-    # Status - safe handling
     status = ticket.get('status') or {}
     fields['status'] = safe_get(status, 'name', 'Unknown')
     fields['status_category'] = 'active' if fields['status'].lower() in ['open', 'in progress', 'pending'] else 'closed'
     
-    # Priority - safe handling
     priority = ticket.get('priority') or {}
     fields['priority'] = safe_get(priority, 'name', 'Normal')
     
-    # People - safe handling
     requester = ticket.get('requester') or {}
     fields['requester_name'] = safe_get(requester, 'name', 'Unknown')
     fields['requester_email'] = safe_get(requester, 'email_id', '')
@@ -604,18 +577,15 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
     fields['technician_email'] = safe_get(technician, 'email_id', '')
     
-    # Category - safe handling
     category = ticket.get('category') or {}
     fields['category'] = safe_get(category, 'name', 'Uncategorized')
     
     subcategory = ticket.get('subcategory') or {}
     fields['subcategory'] = safe_get(subcategory, 'name', '')
     
-    # Site - safe handling
     site = ticket.get('site') or {}
     fields['site'] = safe_get(site, 'name', '')
     
-    # Dates - safe handling with nested gets
     created_time = ticket.get('created_time') or {}
     fields['created_time'] = safe_get(created_time, 'display_value', '')
     
@@ -628,11 +598,9 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     last_updated_time = ticket.get('last_updated_time') or {}
     fields['last_updated_time'] = safe_get(last_updated_time, 'display_value', '')
     
-    # Group - safe handling
     group = ticket.get('group') or {}
     fields['group'] = safe_get(group, 'name', '')
     
-    # Advanced fields (20)
     assets = ticket.get('assets') or []
     if not isinstance(assets, list):
         assets = []
@@ -731,7 +699,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
 def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
     """Track analytics for reporting"""
     
-    # Category stats
     category = comprehensive_fields['category']
     resolution_days = 0
     if comprehensive_fields['resolved_time']:
@@ -744,7 +711,6 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
     
     analytics_cache.update_category_stats(category, resolution_days)
     
-    # Technician workload
     tech = comprehensive_fields['technician_name']
     is_active = comprehensive_fields['status_category'] == 'active'
     response_hours = 0
@@ -758,7 +724,6 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
     
     analytics_cache.update_technician_workload(tech, is_active, response_hours)
     
-    # Peak hours
     if comprehensive_fields['created_time']:
         try:
             created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
@@ -766,14 +731,12 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
         except:
             pass
     
-    # Issue types
     description = ticket.get('description', '').lower()
     issue_keywords = ['hardware', 'email', 'network', 'error', 'access']
     for keyword in issue_keywords:
         if keyword in description:
             analytics_cache.update_issue_types(keyword)
     
-    # v2.8: New analytics
     if comprehensive_fields.get('channel'):
         analytics_cache.update_channel(comprehensive_fields['channel'])
     
@@ -821,7 +784,6 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
     elif response_status['awaiting_response'] == 'technician':
         METRICS['awaiting_technician'] += 1
     
-    # v2.8 metrics
     if comprehensive_fields.get('has_assets'):
         METRICS['with_assets'] += 1
     
@@ -844,10 +806,9 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
 def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict], 
                                 comprehensive_fields: Dict, complexity: int,
                                 sentiment: str, sla_risk: str, response_status: Dict) -> List[str]:
-    """Generate comprehensive searchable tags - 200+ possible tags"""
+    """Generate comprehensive searchable tags"""
     tags = []
     
-    # Status tags
     status = comprehensive_fields['status'].lower().replace(' ', '-')
     tags.extend([
         f"status:{status}",
@@ -857,15 +818,12 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if comprehensive_fields['status_category'] == 'active':
         tags.extend(['active', 'open-status', 'needs-attention'])
     
-    # Priority tags
     priority = comprehensive_fields['priority'].lower()
-    tags.appen
     tags.append(f"priority:{priority}")
     
     if 'urgent' in priority:
         tags.extend(['urgent-attention', 'critical-action-required'])
     
-    # People tags
     tech = comprehensive_fields['technician_name'].lower().replace(' ', '-')
     req = comprehensive_fields['requester_name'].lower().replace(' ', '-')
     
@@ -874,7 +832,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if tech == 'unassigned':
         tags.extend(['unassigned', 'needs-assignment'])
     
-    # Category tags
     category = comprehensive_fields['category'].lower().replace(' ', '-')
     tags.append(f"category:{category}")
     
@@ -882,24 +839,20 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
         subcategory = comprehensive_fields['subcategory'].lower().replace(' ', '-')
         tags.append(f"subcategory:{subcategory}")
     
-    # Complexity tags
     tags.append(f"complexity:{complexity}")
     if complexity >= 7:
         tags.extend(['high-complexity', 'complex-issue'])
     elif complexity <= 3:
         tags.extend(['low-complexity', 'simple-issue'])
     
-    # Sentiment tags
     tags.append(f"sentiment:{sentiment}")
     if sentiment == 'at-risk':
         tags.extend(['satisfaction-at-risk', 'customer-frustration'])
     
-    # SLA tags
     tags.append(f"sla-risk:{sla_risk}")
     if sla_risk in ['critical', 'high']:
         tags.extend(['high-breach-risk', 'sla-attention-needed'])
     
-    # Conversation tags
     conv_count = len(conversations)
     tags.append(f"conversations:{conv_count}")
     
@@ -908,7 +861,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     elif conv_count > 10:
         tags.extend(['high-conversation-volume', 'extensive-discussion'])
     
-    # Response status tags
     tags.append(f"awaiting:{response_status['awaiting_response']}")
     
     if response_status['awaiting_response'] == 'customer':
@@ -919,7 +871,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if response_status['has_unanswered_questions']:
         tags.extend(['has-unanswered-questions', 'needs-clarification'])
     
-    # Time-based tags
     if comprehensive_fields['created_time']:
         try:
             created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
@@ -937,7 +888,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
             else:
                 tags.extend(['age:stale', 'very-old'])
             
-            # Business hours tag
             if 8 <= created.hour <= 17:
                 tags.append('created:business-hours')
             else:
@@ -945,7 +895,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
         except:
             pass
     
-    # v2.8: Additional field tags
     if comprehensive_fields.get('has_assets'):
         tags.extend(['has-asset', f"asset-count:{comprehensive_fields['asset_count']}"])
     
@@ -974,7 +923,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if comprehensive_fields.get('has_linked_tickets'):
         tags.extend(['has-linked-tickets', f"linked-count:{comprehensive_fields['linked_ticket_count']}"])
     
-    # Combined actionable tags
     if comprehensive_fields['status_category'] == 'active' and sla_risk == 'critical':
         tags.append('critical-open-ticket')
     
@@ -984,7 +932,7 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if sla_risk in ['critical', 'high'] and comprehensive_fields['status_category'] == 'active':
         tags.extend(['actionable:overdue-and-open', 'urgent-action'])
     
-    return list(set(tags))  # Remove duplicates
+    return list(set(tags))
 
 # ============================================================
 # DOCUMENT CREATION
@@ -997,7 +945,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
                         response_status: Dict) -> Dict:
     """Create comprehensive Dust document"""
     
-    # Build conversation text
     conversation_text = ""
     if conversations:
         for i, conv in enumerate(conversations, 1):
@@ -1015,13 +962,11 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
     else:
         conversation_text = "\n*No conversations yet*\n"
     
-    # Generate tags
     tags = generate_comprehensive_tags(
         ticket, conversations, comprehensive_fields,
         complexity, sentiment, sla_risk, response_status
     )
     
-    # Build structured text document
     document_text = f"""# Ticket #{comprehensive_fields['ticket_id']}: {comprehensive_fields['subject']}
 
 ## Overview
@@ -1058,13 +1003,12 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 - **Total Response Time:** {response_status['response_time_hours']} hours
 - **Has Unanswered Questions:** {'Yes' if response_status['has_unanswered_questions'] else 'No'}
 
-## Advanced Fields (v2.8)
+## Advanced Fields
 
 ### Assets & Resources
 - **Has Assets:** {'Yes' if comprehensive_fields.get('has_assets') else 'No'}
 - **Asset Count:** {comprehensive_fields.get('asset_count', 0)}
 - **Primary Asset:** {comprehensive_fields.get('primary_asset') or 'N/A'}
-- **All Assets:** {', '.join(comprehensive_fields.get('asset_names', [])) or 'None'}
 
 ### Channel & Source
 - **Channel/Mode:** {comprehensive_fields.get('channel') or 'Unknown'}
@@ -1092,7 +1036,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 ### Organization
 - **Department:** {comprehensive_fields.get('department') or 'N/A'}
 - **Created By:** {comprehensive_fields.get('created_by') or comprehensive_fields['requester_name']}
-- **Is Proxy Request:** {'Yes' if comprehensive_fields.get('is_proxy_request') else 'No'}
 
 ### Relationships
 - **Linked Tickets:** {comprehensive_fields.get('linked_ticket_count', 0)}
@@ -1102,7 +1045,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 ### Documentation
 - **Attachments:** {comprehensive_fields.get('attachment_count', 0)}
 - **Template Used:** {comprehensive_fields.get('template') or 'None'}
-- **Custom Tags:** {', '.join(comprehensive_fields.get('tags', [])) or 'None'}
 
 ### SLA Details
 - **SLA Name:** {comprehensive_fields.get('sla_name') or 'N/A'}
@@ -1112,14 +1054,13 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 {conversation_text}
 
 ## Searchable Tags
-{', '.join(tags[:50])}  {'...' if len(tags) > 50 else ''}
+{', '.join(tags[:50])}
 
 ---
 *Last synced: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*
-*Intelligence Suite v{VERSION} - 48 Comprehensive Fields*
+*Intelligence Suite v{VERSION}*
 """
     
-    # Create document
     document = {
         "document_id": f"ticket-{comprehensive_fields['ticket_id']}",
         "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -1142,14 +1083,11 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
     return document
 
 # ============================================================
-# DUST UPLOAD - v3.0 WITH PARALLEL UPLOADS
+# DUST UPLOAD
 # ============================================================
 
 def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
-    """
-    v3.0: Upload documents to Dust in parallel for massive speed improvement
-    5 concurrent uploads with rate limiting and retry logic
-    """
+    """Upload documents to Dust in parallel"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         logger.warning("Dust credentials not configured. Skipping upload.")
         return 0, 0
@@ -1166,13 +1104,11 @@ def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
     rate_limiter = Semaphore(MAX_CONCURRENT_UPLOADS)
     
     def upload_single_document(doc: Dict) -> bool:
-        """Upload a single document with retry logic"""
         nonlocal uploaded, errors
         
-        with rate_limiter:  # Limit concurrent uploads
+        with rate_limiter:
             url = f"{base_url}/{doc['document_id']}"
             
-            # Retry logic for rate limiting
             for attempt in range(3):
                 try:
                     response = SESSION.post(url, headers=headers, json=doc, timeout=UPLOAD_TIMEOUT)
@@ -1180,67 +1116,52 @@ def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
                     if response.status_code in [200, 201]:
                         with upload_lock:
                             uploaded += 1
-                            if uploaded % 100 == 0:  # Progress logging
+                            if uploaded % 100 == 0:
                                 logger.info(f"  Progress: {uploaded}/{len(documents)} documents uploaded...")
                         return True
                     
                     elif response.status_code == 429:
-                        # Rate limited - wait longer
-                        wait_time = (attempt + 1) * 2  # 2s, 4s, 6s
-                        logger.debug(f"Rate limited, waiting {wait_time}s (attempt {attempt + 1}/3)")
+                        wait_time = (attempt + 1) * 2
                         time.sleep(wait_time)
                         continue
                     
                     elif response.status_code in [502, 503, 504]:
-                        # Server errors - retry with shorter wait
                         wait_time = (attempt + 1) * 1
-                        logger.debug(f"Server error {response.status_code}, retrying in {wait_time}s...")
                         time.sleep(wait_time)
                         continue
                     
                     else:
-                        # Other errors - don't retry
                         with upload_lock:
                             errors += 1
-                        logger.warning(f"Upload failed for {doc['document_id']}: HTTP {response.status_code}")
                         return False
                         
                 except requests.exceptions.Timeout:
-                    if attempt == 2:  # Last attempt
+                    if attempt == 2:
                         with upload_lock:
                             errors += 1
-                        logger.warning(f"Timeout uploading {doc['document_id']}")
                         return False
                     time.sleep(1)
                 
                 except Exception as e:
-                    if attempt == 2:  # Last attempt
+                    if attempt == 2:
                         with upload_lock:
                             errors += 1
-                        logger.warning(f"Error uploading {doc['document_id']}: {str(e)}")
                         return False
                     time.sleep(1)
             
-            # Small delay to be nice to the API
-            time.sleep(0.1)  # v3.0: Reduced from 0.5s
+            time.sleep(0.1)
             return False
     
-    # Upload documents in parallel using ThreadPoolExecutor
     logger.info(f"  Uploading {len(documents)} documents with {MAX_CONCURRENT_UPLOADS} concurrent workers...")
     start_time = time.time()
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-        # Submit all upload tasks
         futures = [executor.submit(upload_single_document, doc) for doc in documents]
-        
-        # Wait for all to complete
         for future in as_completed(futures):
-            pass  # Results are handled in the function itself
+            pass
     
     elapsed = time.time() - start_time
     logger.info(f"  Upload complete in {elapsed:.1f}s: {uploaded} succeeded, {errors} failed")
-    if len(documents) > 0:
-        logger.info(f"  Average: {elapsed/len(documents):.2f}s per document")
     
     return uploaded, errors
 
@@ -1249,18 +1170,16 @@ def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
 # ============================================================
 
 def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int, total_tickets: int) -> Tuple[List[Dict], int]:
-    """Process a batch of tickets - v3.0 with parallel uploads"""
+    """Process a batch of tickets"""
     
     logger.info(f"\n[Batch {batch_num}] Processing tickets {(batch_num-1)*BATCH_SIZE + 1}-{min(batch_num*BATCH_SIZE, total_tickets)}...")
     
     documents = []
     errors = 0
     
-    # Fetch conversations in parallel for entire batch
     ticket_ids = [t['id'] for t in tickets]
     conversations_map = fetch_conversations_parallel(ticket_ids, access_token)
     
-    # Process each ticket
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket['id']
         global_index = (batch_num - 1) * BATCH_SIZE + i
@@ -1268,13 +1187,9 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
         try:
             logger.info(f"  [{global_index}/{total_tickets}] Processing ticket {ticket_id}...")
             
-            # Get conversations
             conversations = conversations_map.get(ticket_id, [])
-            
-            # Extract comprehensive fields (48 fields)
             comprehensive_fields = extract_comprehensive_fields(ticket)
             
-            # AI analysis
             complexity = calculate_complexity_score(ticket, conversations)
             sentiment = analyze_sentiment(conversations)
             sla_risk, sla_breach_likelihood = predict_sla_breach(ticket, conversations)
@@ -1282,13 +1197,9 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
             issue_types = identify_issue_type(ticket)
             response_status = analyze_response_status(conversations)
             
-            # Track analytics
             track_analytics(ticket, conversations, complexity, comprehensive_fields)
-            
-            # Track metrics
             track_metrics(comprehensive_fields, conversations, complexity, sentiment, sla_risk, response_status)
             
-            # Create document
             document = create_dust_document(
                 ticket, conversations, comprehensive_fields,
                 complexity, sentiment, sla_risk, sla_breach_likelihood,
@@ -1301,7 +1212,6 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
             logger.error(f"  ERROR processing ticket {ticket_id}: {e}")
             errors += 1
     
-    # Upload batch to Dust - v3.0: PARALLEL UPLOAD
     uploaded, upload_errors = upload_to_dust_parallel(documents)
     errors += upload_errors
     
@@ -1312,62 +1222,81 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
     return documents, errors
 
 def print_analytics_summary():
-    """Print comprehensive analytics summary"""
+    """Print comprehensive analytics summary - FIXED v3.0.1"""
     logger.info("============================================================")
     logger.info(f"STATS ANALYTICS SUMMARY (v{VERSION})")
     logger.info("============================================================")
     logger.info("")
     
-    # Top categories
     logger.info("🏆 Top Categories:")
-    for cat,'], reverse=True)[:5]:
-        logger.info(f"  {tech}: {data['active']} active / {data['total']} total")
-        if data['total'] > 0:
-            logger.info(f"    Avg response: {data['total_response_hours'] / data['total']:.1f} hours")
+    category_stats = analytics_cache.raw_data['category_stats']
+    if category_stats:
+        sorted_categories = sorted(category_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:5]
+        for cat, data in sorted_categories:
+            logger.info(f"  {cat}: {data['count']} tickets")
+            if data['count'] > 0:
+                avg_resolution = data['total_resolution_days'] / data['count']
+                logger.info(f"    Avg resolution: {avg_resolution:.1f} days")
     
     logger.info("")
     
-    # Peak hours
+    logger.info("👥 Technician Workload:")
+    tech_workload = analytics_cache.raw_data['technician_workload']
+    if tech_workload:
+        sorted_techs = sorted(tech_workload.items(), key=lambda x: x[1]['active'], reverse=True)[:5]
+        for tech, data in sorted_techs:
+            logger.info(f"  {tech}: {data['active']} active / {data['total']} total")
+            if data['total'] > 0:
+                avg_response = data['total_response_hours'] / data['total']
+                logger.info(f"    Avg response: {avg_response:.1f} hours")
+    
+    logger.info("")
+    
     logger.info("⏰ Peak Hours:")
-    for hour, count in Counter(analytics_cache.raw_data['peak_hours']).most_common(5):
-        logger.info(f"  {hour}:00 - {count} tickets")
+    peak_hours = analytics_cache.raw_data['peak_hours']
+    if peak_hours:
+        sorted_hours = sorted(peak_hours.items(), key=lambda x: x[1], reverse=True)[:5]
+        for hour, count in sorted_hours:
+            logger.info(f"  {hour}:00 - {count} tickets")
     
     logger.info("")
     
-    # Top issue types
     logger.info("🔍 Top Issue Types:")
-    for issue, count in Counter(analytics_cache.raw_data['issue_types']).most_common(5):
-        logger.info(f"  {issue}: {count} tickets")
+    issue_types = analytics_cache.raw_data['issue_types']
+    if issue_types:
+        sorted_issues = sorted(issue_types.items(), key=lambda x: x[1], reverse=True)[:5]
+        for issue, count in sorted_issues:
+            logger.info(f"  {issue}: {count} tickets")
     
     logger.info("")
     
-    # Top channels
     logger.info("📱 Top Channels:")
-    channel_counts = Counter(analytics_cache.raw_data['channel_distribution'])
-    if channel_counts:
-        for channel, count in channel_counts.most_common(5):
+    channels = analytics_cache.raw_data['channel_distribution']
+    if channels:
+        sorted_channels = sorted(channels.items(), key=lambda x: x[1], reverse=True)[:5]
+        for channel, count in sorted_channels:
             logger.info(f"  {channel}: {count} tickets")
     else:
         logger.info("  No channel data available")
     
     logger.info("")
     
-    # Top departments
     logger.info("🏢 Top Departments:")
-    dept_counts = Counter(analytics_cache.raw_data['department_distribution'])
-    if dept_counts:
-        for dept, count in dept_counts.most_common(5):
+    departments = analytics_cache.raw_data['department_distribution']
+    if departments:
+        sorted_depts = sorted(departments.items(), key=lambda x: x[1], reverse=True)[:5]
+        for dept, count in sorted_depts:
             logger.info(f"  {dept}: {count} tickets")
     else:
         logger.info("  No department data available")
     
     logger.info("")
     
-    # Top asset failures
     logger.info("💻 Top Asset Failures:")
-    asset_failures = Counter(analytics_cache.raw_data['asset_failure_rates'])
-    if asset_failures:
-        for asset, count in asset_failures.most_common(5):
+    assets = analytics_cache.raw_data['asset_failure_rates']
+    if assets:
+        sorted_assets = sorted(assets.items(), key=lambda x: x[1], reverse=True)[:5]
+        for asset, count in sorted_assets:
             logger.info(f"  {asset}: {count} failures")
     else:
         logger.info("  No asset data available")
@@ -1375,7 +1304,7 @@ def print_analytics_summary():
     logger.info("")
 
 def main():
-    """Main execution - v3.0.1 with fixed checkpoint path"""
+    """Main execution"""
     
     logger.info("============================================================")
     logger.info(f"START SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
@@ -1383,24 +1312,22 @@ def main():
     logger.info(f"Checkpoint file: {CHECKPOINT_FILE}")
     logger.info("============================================================")
     
-    logger.info("✨ v3.0.1 FIX:")
+    logger.info("✨ v3.0.1 FIXES:")
     logger.info("   • Fixed checkpoint.json path - always saves to project root")
+    logger.info("   • Fixed analytics syntax errors")
     logger.info("")
     logger.info("✨ v3.0 SPEED OPTIMIZATIONS:")
     logger.info("   • Parallel document uploads (5 concurrent workers)")
     logger.info("   • Reduced upload delay: 500ms → 100ms")
     logger.info("   • Expected speedup: 5-10x faster")
-    logger.info("   • Estimated time: 80 min → 8-15 min for 4500+ tickets")
     logger.info("")
     
-    # Validate environment
     if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
         logger.error("ERROR Missing ServiceDesk Plus credentials")
         sys.exit(1)
     
     logger.info("OK Environment validation passed")
     
-    # Get access token
     logger.info("Getting access token...")
     try:
         access_token = get_access_token()
@@ -1409,10 +1336,8 @@ def main():
         logger.error(f"FATAL Failed to get access token: {e}")
         sys.exit(1)
     
-    # Load checkpoint for incremental sync
     last_sync_time = load_checkpoint()
     
-    # Fetch tickets (incremental or full)
     logger.info("Fetching tickets...")
     try:
         tickets = fetch_tickets_incremental(
@@ -1429,7 +1354,6 @@ def main():
         logger.info("No new tickets to process. Exiting.")
         return
     
-    # Process in batches
     logger.info(f"\nTotal tickets to process: {len(tickets)}")
     
     total_processed = 0
@@ -1452,14 +1376,12 @@ def main():
             total_processed += len(documents)
             total_errors += errors
             
-            # Save checkpoint after each batch
             save_checkpoint(last_sync_time, total_processed, total_errors)
             
         except Exception as e:
             logger.error(f"FATAL Error processing batch {batch_num}: {e}")
             total_errors += len(batch_tickets)
     
-    # Update checkpoint with latest ticket timestamp
     if tickets:
         try:
             latest_modified = max(
@@ -1472,11 +1394,7 @@ def main():
         except Exception as e:
             logger.warning(f"Could not update checkpoint with latest time: {e}")
             save_checkpoint(datetime.now(timezone.utc), total_processed, total_errors)
-    else:
-        logger.info("CHECKPOINT No new tickets, keeping existing timestamp")
-        save_checkpoint(last_sync_time, total_processed, total_errors)
     
-    # Final summary
     logger.info("")
     logger.info("============================================================")
     logger.info(f"DONE INTELLIGENCE SYNC COMPLETED (v{VERSION})")
@@ -1503,7 +1421,6 @@ def main():
     logger.info(f"  Finished: {datetime.now()}")
     logger.info("============================================================")
     
-    # Print analytics
     logger.info("")
     print_analytics_summary()
 
