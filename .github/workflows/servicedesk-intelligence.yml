@@ -35,17 +35,15 @@ jobs:
       - name: Read last sync time
         id: read_sync_time
         run: |
-          # Safely check force_full_sync input
-          if [ "\${{ github.event.inputs.force_full_sync || 'false' }}" = "true" ]; then
+          # Safely handle force_full_sync input (may not exist for scheduled runs)
+          FORCE_FULL="\${{ github.event.inputs.force_full_sync || 'false' }}"
+          
+          if [ "\$FORCE_FULL" = "true" ]; then
             echo "🔄 Force full sync requested - ignoring last sync time"
           elif [ -f last_sync_time.txt ]; then
             LAST_SYNC=\$(cat last_sync_time.txt)
             echo "LAST_SYNC_TIME=\$LAST_SYNC" >> \$GITHUB_ENV
-            echo "📊 Last sync time: \$LAST_SYNC"
-            
-            CURRENT_TIME=\$(date +%s)000
-            TIME_DIFF=$(((\$CURRENT_TIME - \$LAST_SYNC) / 1000 / 60))
-            echo "⏱️  Minutes since last sync: \$TIME_DIFF"
+            echo "📊 Last sync: \$LAST_SYNC"
           else
             echo "🆕 No previous sync time found - performing initial full sync"
           fi
