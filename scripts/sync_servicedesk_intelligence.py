@@ -379,7 +379,7 @@ def fetch_conversations_parallel(ticket_ids: List[str], access_token: str, max_w
     return conversations_map
 
 # ============================================================
-# AI ANALYSIS (keeping all existing functions)
+# AI ANALYSIS
 # ============================================================
 
 def calculate_complexity_score(ticket: Dict, conversations: List[Dict]) -> int:
@@ -550,35 +550,39 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
 
 # ============================================================
 # FIELD EXTRACTION - v2.8.2 WITH DEFENSIVE NULL CHECKS
-# (Keeping entire function as-is - too long to paste here)
 # ============================================================
 
 def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
-    """Extract all 48 comprehensive fields from ticket"""
+    """
+    Extract all 48 comprehensive fields from ticket
+    v2.8.2: Added defensive null checks for tickets with missing data
+    """
     fields = {}
     
+    # Helper function for safe nested gets
     def safe_get(obj, key, default=''):
+        """Safely get value from dict, handling None"""
         if obj is None:
             return default
         if isinstance(obj, dict):
             return obj.get(key, default)
         return default
     
-    # All existing field extraction code remains the same...
-    # (I'm keeping your exact implementation - just paste it from your file)
-    
     # Basic info
     fields['ticket_id'] = ticket.get('id', 'unknown')
     fields['subject'] = ticket.get('subject', 'No subject')
     fields['description'] = ticket.get('description', 'No description')
     
+    # Status - safe handling
     status = ticket.get('status') or {}
     fields['status'] = safe_get(status, 'name', 'Unknown')
     fields['status_category'] = 'active' if fields['status'].lower() in ['open', 'in progress', 'pending'] else 'closed'
     
+    # Priority - safe handling
     priority = ticket.get('priority') or {}
     fields['priority'] = safe_get(priority, 'name', 'Normal')
     
+    # People - safe handling
     requester = ticket.get('requester') or {}
     fields['requester_name'] = safe_get(requester, 'name', 'Unknown')
     fields['requester_email'] = safe_get(requester, 'email_id', '')
@@ -587,15 +591,18 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
     fields['technician_email'] = safe_get(technician, 'email_id', '')
     
+    # Category - safe handling
     category = ticket.get('category') or {}
     fields['category'] = safe_get(category, 'name', 'Uncategorized')
     
     subcategory = ticket.get('subcategory') or {}
     fields['subcategory'] = safe_get(subcategory, 'name', '')
     
+    # Site - safe handling
     site = ticket.get('site') or {}
     fields['site'] = safe_get(site, 'name', '')
     
+    # Dates - safe handling with nested gets
     created_time = ticket.get('created_time') or {}
     fields['created_time'] = safe_get(created_time, 'display_value', '')
     
@@ -608,6 +615,7 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     last_updated_time = ticket.get('last_updated_time') or {}
     fields['last_updated_time'] = safe_get(last_updated_time, 'display_value', '')
     
+    # Group - safe handling
     group = ticket.get('group') or {}
     fields['group'] = safe_get(group, 'name', '')
     
@@ -703,18 +711,421 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     
     return fields
 
-# (Continue with all your existing analytics and tag generation functions...)
-
 # ============================================================
-# Keep all existing functions for:
-# - track_analytics
-# - track_metrics  
-# - generate_comprehensive_tags
-# - create_dust_document
-# (All unchanged - just copying from your file)
+# ANALYTICS TRACKING
 # ============================================================
 
-# [Paste all your existing helper functions here - they remain unchanged]
+def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
+    """Track analytics for reporting"""
+    
+    # Category stats
+    category = comprehensive_fields['category']
+    resolution_days = 0
+    if comprehensive_fields['resolved_time']:
+        try:
+            created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
+            resolved = datetime.fromisoformat(comprehensive_fields['resolved_time'].replace('Z', '+00:00'))
+            resolution_days = (resolved - created).total_seconds() / 86400
+        except:
+            pass
+    
+    analytics_cache.update_category_stats(category, resolution_days)
+    
+    # Technician workload
+    tech = comprehensive_fields['technician_name']
+    is_active = comprehensive_fields['status_category'] == 'active'
+    response_hours = 0
+    if conversations:
+        try:
+            first_time = conversations[0].get('created_time', {}).get('value', 0)
+            last_time = conversations[-1].get('created_time', {}).get('value', 0)
+            response_hours = (last_time - first_time) / (1000 * 3600)
+        except:
+            pass
+    
+    analytics_cache.update_technician_workload(tech, is_active, response_hours)
+    
+    # Peak hours
+    if comprehensive_fields['created_time']:
+        try:
+            created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
+            analytics_cache.update_peak_hours(created.hour)
+        except:
+            pass
+    
+    # Issue types
+    description = ticket.get('description', '').lower()
+    issue_keywords = ['hardware', 'email', 'network', 'error', 'access']
+    for keyword in issue_keywords:
+        if keyword in description:
+            analytics_cache.update_issue_types(keyword)
+    
+    # v2.8: New analytics
+    if comprehensive_fields.get('channel'):
+        analytics_cache.update_channel(comprehensive_fields['channel'])
+    
+    if comprehensive_fields.get('department'):
+        analytics_cache.update_department(comprehensive_fields['department'])
+    
+    if comprehensive_fields.get('primary_asset'):
+        analytics_cache.update_asset_failure(comprehensive_fields['primary_asset'])
+    
+    if comprehensive_fields.get('service'):
+        analytics_cache.update_service_usage(comprehensive_fields['service'])
+    
+    if comprehensive_fields.get('resolution_category'):
+        analytics_cache.update_resolution_category(comprehensive_fields['resolution_category'])
+
+# ============================================================
+# METRICS TRACKING
+# ============================================================
+
+def track_metrics(comprehensive_fields: Dict, conversations: List[Dict], 
+                 complexity: int, sentiment: str, sla_risk: str, response_status: Dict):
+    """Track comprehensive metrics"""
+    
+    METRICS['total_processed'] += 1
+    
+    if comprehensive_fields['status_category'] == 'active':
+        METRICS['active_tickets'] += 1
+    else:
+        METRICS['closed_tickets'] += 1
+    
+    if conversations:
+        METRICS['with_conversations'] += 1
+    
+    if complexity >= 7:
+        METRICS['high_complexity'] += 1
+    
+    if sentiment == 'at-risk':
+        METRICS['satisfaction_at_risk'] += 1
+    
+    if sla_risk in ['critical', 'high']:
+        METRICS['high_sla_breach_risk'] += 1
+    
+    if response_status['awaiting_response'] == 'customer':
+        METRICS['awaiting_customer'] += 1
+    elif response_status['awaiting_response'] == 'technician':
+        METRICS['awaiting_technician'] += 1
+    
+    # v2.8 metrics
+    if comprehensive_fields.get('has_assets'):
+        METRICS['with_assets'] += 1
+    
+    if comprehensive_fields.get('has_been_reopened'):
+        METRICS['reopened'] += 1
+    
+    if comprehensive_fields.get('is_first_call_resolution'):
+        METRICS['fcr'] += 1
+    
+    if comprehensive_fields.get('has_approvals'):
+        METRICS['with_approvals'] += 1
+    
+    if comprehensive_fields.get('has_linked_tickets'):
+        METRICS['linked_tickets'] += 1
+
+# ============================================================
+# TAG GENERATION
+# ============================================================
+
+def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict], 
+                                comprehensive_fields: Dict, complexity: int,
+                                sentiment: str, sla_risk: str, response_status: Dict) -> List[str]:
+    """Generate comprehensive searchable tags - 200+ possible tags"""
+    tags = []
+    
+    # Status tags
+    status = comprehensive_fields['status'].lower().replace(' ', '-')
+    tags.extend([
+        f"status:{status}",
+        f"status-category:{comprehensive_fields['status_category']}"
+    ])
+    
+    if comprehensive_fields['status_category'] == 'active':
+        tags.extend(['active', 'open-status', 'needs-attention'])
+    
+    # Priority tags
+    priority = comprehensive_fields['priority'].lower()
+    tags.append(f"priority:{priority}")
+    
+    if 'urgent' in priority:
+        tags.extend(['urgent-attention', 'critical-action-required'])
+    
+    # People tags
+    tech = comprehensive_fields['technician_name'].lower().replace(' ', '-')
+    req = comprehensive_fields['requester_name'].lower().replace(' ', '-')
+    
+    tags.extend([f"technician:{tech}", f"requester:{req}"])
+    
+    if tech == 'unassigned':
+        tags.extend(['unassigned', 'needs-assignment'])
+    
+    # Category tags
+    category = comprehensive_fields['category'].lower().replace(' ', '-')
+    tags.append(f"category:{category}")
+    
+    if comprehensive_fields['subcategory']:
+        subcategory = comprehensive_fields['subcategory'].lower().replace(' ', '-')
+        tags.append(f"subcategory:{subcategory}")
+    
+    # Complexity tags
+    tags.append(f"complexity:{complexity}")
+    if complexity >= 7:
+        tags.extend(['high-complexity', 'complex-issue'])
+    elif complexity <= 3:
+        tags.extend(['low-complexity', 'simple-issue'])
+    
+    # Sentiment tags
+    tags.append(f"sentiment:{sentiment}")
+    if sentiment == 'at-risk':
+        tags.extend(['satisfaction-at-risk', 'customer-frustration'])
+    
+    # SLA tags
+    tags.append(f"sla-risk:{sla_risk}")
+    if sla_risk in ['critical', 'high']:
+        tags.extend(['high-breach-risk', 'sla-attention-needed'])
+    
+    # Conversation tags
+    conv_count = len(conversations)
+    tags.append(f"conversations:{conv_count}")
+    
+    if conv_count == 0:
+        tags.append('no-conversation')
+    elif conv_count > 10:
+        tags.extend(['high-conversation-volume', 'extensive-discussion'])
+    
+    # Response status tags
+    tags.append(f"awaiting:{response_status['awaiting_response']}")
+    
+    if response_status['awaiting_response'] == 'customer':
+        tags.append('awaiting-customer-response')
+    elif response_status['awaiting_response'] == 'technician':
+        tags.extend(['awaiting-technician-response', 'actionable'])
+    
+    if response_status['has_unanswered_questions']:
+        tags.extend(['has-unanswered-questions', 'needs-clarification'])
+    
+    # Time-based tags
+    if comprehensive_fields['created_time']:
+        try:
+            created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            age_days = (now - created).days
+            
+            if age_days < 1:
+                tags.extend(['age:new', 'created-today'])
+            elif age_days < 7:
+                tags.extend(['age:this-week', 'recent'])
+            elif age_days < 30:
+                tags.extend(['age:this-month'])
+            elif age_days < 90:
+                tags.extend(['age:aging', 'needs-review'])
+            else:
+                tags.extend(['age:stale', 'very-old'])
+            
+            # Business hours tag
+            if 8 <= created.hour <= 17:
+                tags.append('created:business-hours')
+            else:
+                tags.append('created:after-hours')
+        except:
+            pass
+    
+    # v2.8: Additional field tags
+    if comprehensive_fields.get('has_assets'):
+        tags.extend(['has-asset', f"asset-count:{comprehensive_fields['asset_count']}"])
+    
+    if comprehensive_fields.get('channel'):
+        channel = comprehensive_fields['channel'].lower().replace(' ', '-')
+        tags.extend([f"channel:{channel}", f"source:{channel}"])
+    
+    if comprehensive_fields.get('impact'):
+        impact = comprehensive_fields['impact'].lower().replace(' ', '-')
+        tags.append(f"impact:{impact}")
+    
+    if comprehensive_fields.get('urgency'):
+        urgency = comprehensive_fields['urgency'].lower().replace(' ', '-')
+        tags.append(f"urgency:{urgency}")
+    
+    if comprehensive_fields.get('tier'):
+        tier = comprehensive_fields['tier'].lower().replace(' ', '-')
+        tags.extend([f"tier:{tier}", f"level:{tier}"])
+    
+    if comprehensive_fields.get('has_been_reopened'):
+        tags.extend(['reopened', f"reopened-count:{comprehensive_fields['reopened_count']}"])
+    
+    if comprehensive_fields.get('is_first_call_resolution'):
+        tags.extend(['fcr', 'first-call-resolution', 'quality-win'])
+    
+    if comprehensive_fields.get('has_linked_tickets'):
+        tags.extend(['has-linked-tickets', f"linked-count:{comprehensive_fields['linked_ticket_count']}"])
+    
+    # Combined actionable tags
+    if comprehensive_fields['status_category'] == 'active' and sla_risk == 'critical':
+        tags.append('critical-open-ticket')
+    
+    if comprehensive_fields['status_category'] == 'active' and tech == 'unassigned':
+        tags.extend(['actionable:unassigned-and-open', 'needs-immediate-assignment'])
+    
+    if sla_risk in ['critical', 'high'] and comprehensive_fields['status_category'] == 'active':
+        tags.extend(['actionable:overdue-and-open', 'urgent-action'])
+    
+    return list(set(tags))  # Remove duplicates
+
+# ============================================================
+# DOCUMENT CREATION
+# ============================================================
+
+def create_dust_document(ticket: Dict, conversations: List[Dict], 
+                        comprehensive_fields: Dict, complexity: int,
+                        sentiment: str, sla_risk: str, sla_breach_likelihood: int,
+                        estimated_resolution_hours: float, issue_types: List[str],
+                        response_status: Dict) -> Dict:
+    """Create comprehensive Dust document"""
+    
+    # Build conversation text
+    conversation_text = ""
+    if conversations:
+        for i, conv in enumerate(conversations, 1):
+            sender_obj = conv.get('sender') or {}
+            sender = sender_obj.get('name', 'Unknown') if isinstance(sender_obj, dict) else 'Unknown'
+            is_customer = conv.get('is_customer', False)
+            role = "Customer" if is_customer else "Technician"
+            text = conv.get('description', '')
+            created_time_obj = conv.get('created_time') or {}
+            time = created_time_obj.get('display_value', '') if isinstance(created_time_obj, dict) else ''
+            
+            conversation_text += f"\n### Conversation {i} - {role}: {sender}\n"
+            conversation_text += f"**Time:** {time}\n\n"
+            conversation_text += f"{text}\n"
+    else:
+        conversation_text = "\n*No conversations yet*\n"
+    
+    # Generate tags
+    tags = generate_comprehensive_tags(
+        ticket, conversations, comprehensive_fields,
+        complexity, sentiment, sla_risk, response_status
+    )
+    
+    # Build structured text document
+    document_text = f"""# Ticket #{comprehensive_fields['ticket_id']}: {comprehensive_fields['subject']}
+
+## Overview
+- **Status:** {comprehensive_fields['status']} ({comprehensive_fields['status_category']})
+- **Priority:** {comprehensive_fields['priority']}
+- **Category:** {comprehensive_fields['category']}
+- **Subcategory:** {comprehensive_fields['subcategory'] or 'N/A'}
+
+## People
+- **Requester:** {comprehensive_fields['requester_name']} ({comprehensive_fields['requester_email']})
+- **Technician:** {comprehensive_fields['technician_name']} ({comprehensive_fields['technician_email']})
+- **Group:** {comprehensive_fields['group'] or 'N/A'}
+- **Site:** {comprehensive_fields['site'] or 'N/A'}
+
+## Timeline
+- **Created:** {comprehensive_fields['created_time']}
+- **Due By:** {comprehensive_fields['due_by_time'] or 'No due date'}
+- **Resolved:** {comprehensive_fields['resolved_time'] or 'Not resolved'}
+- **Last Updated:** {comprehensive_fields['last_updated_time']}
+
+## Description
+{comprehensive_fields['description']}
+
+## AI Intelligence
+- **Complexity Score:** {complexity}/10
+- **Sentiment:** {sentiment}
+- **SLA Breach Risk:** {sla_risk} ({sla_breach_likelihood}% likelihood)
+- **Estimated Resolution:** {estimated_resolution_hours} hours
+- **Issue Types:** {', '.join(issue_types)}
+
+## Response Status
+- **Awaiting Response From:** {response_status['awaiting_response']}
+- **Last Responder:** {response_status['last_responder']}
+- **Total Response Time:** {response_status['response_time_hours']} hours
+- **Has Unanswered Questions:** {'Yes' if response_status['has_unanswered_questions'] else 'No'}
+
+## Advanced Fields (v2.8)
+
+### Assets & Resources
+- **Has Assets:** {'Yes' if comprehensive_fields.get('has_assets') else 'No'}
+- **Asset Count:** {comprehensive_fields.get('asset_count', 0)}
+- **Primary Asset:** {comprehensive_fields.get('primary_asset') or 'N/A'}
+- **All Assets:** {', '.join(comprehensive_fields.get('asset_names', [])) or 'None'}
+
+### Channel & Source
+- **Channel/Mode:** {comprehensive_fields.get('channel') or 'Unknown'}
+- **Source:** {comprehensive_fields.get('source') or 'Unknown'}
+
+### Priority Matrix
+- **Impact:** {comprehensive_fields.get('impact') or 'N/A'}
+- **Urgency:** {comprehensive_fields.get('urgency') or 'N/A'}
+
+### Support Details
+- **Level/Tier:** {comprehensive_fields.get('tier') or 'N/A'}
+- **Service:** {comprehensive_fields.get('service') or 'N/A'}
+- **Time Spent:** {comprehensive_fields.get('time_spent_hours', 0)} hours
+
+### Resolution Info
+- **Resolution Category:** {comprehensive_fields.get('resolution_category') or 'N/A'}
+- **Closure Code:** {comprehensive_fields.get('closure_code') or 'N/A'}
+- **Reopened Count:** {comprehensive_fields.get('reopened_count', 0)}
+- **First Call Resolution:** {'Yes' if comprehensive_fields.get('is_first_call_resolution') else 'No'}
+
+### Workflow & Approvals
+- **Approval Status:** {comprehensive_fields.get('approval_status') or 'N/A'}
+- **Has Approvals:** {'Yes' if comprehensive_fields.get('has_approvals') else 'No'}
+
+### Organization
+- **Department:** {comprehensive_fields.get('department') or 'N/A'}
+- **Created By:** {comprehensive_fields.get('created_by') or comprehensive_fields['requester_name']}
+- **Is Proxy Request:** {'Yes' if comprehensive_fields.get('is_proxy_request') else 'No'}
+
+### Relationships
+- **Linked Tickets:** {comprehensive_fields.get('linked_ticket_count', 0)}
+- **Linked Change:** {comprehensive_fields.get('linked_change_id') or 'None'}
+- **Linked Problem:** {comprehensive_fields.get('linked_problem_id') or 'None'}
+
+### Documentation
+- **Attachments:** {comprehensive_fields.get('attachment_count', 0)}
+- **Template Used:** {comprehensive_fields.get('template') or 'None'}
+- **Custom Tags:** {', '.join(comprehensive_fields.get('tags', [])) or 'None'}
+
+### SLA Details
+- **SLA Name:** {comprehensive_fields.get('sla_name') or 'N/A'}
+- **SLA Violated:** {'Yes' if comprehensive_fields.get('sla_violated') else 'No'}
+
+## Conversations ({len(conversations)} total)
+{conversation_text}
+
+## Searchable Tags
+{', '.join(tags[:50])}  {'...' if len(tags) > 50 else ''}
+
+---
+*Last synced: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*
+*Intelligence Suite v{VERSION} - 48 Comprehensive Fields*
+"""
+    
+    # Create document
+    document = {
+        "document_id": f"ticket-{comprehensive_fields['ticket_id']}",
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "tags": tags,
+        "text": document_text,
+        "structured_data": {
+            **comprehensive_fields,
+            "complexity_score": complexity,
+            "sentiment": sentiment,
+            "sla_risk_level": sla_risk,
+            "sla_breach_likelihood": sla_breach_likelihood,
+            "estimated_resolution_hours": estimated_resolution_hours,
+            "issue_types": issue_types,
+            "conversation_count": len(conversations),
+            "response_status": response_status,
+            "intelligence_version": VERSION
+        }
+    }
+    
+    return document
 
 # ============================================================
 # DUST UPLOAD - v3.0 WITH PARALLEL UPLOADS
@@ -820,17 +1231,7 @@ def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
     return uploaded, errors
 
 # ============================================================
-# Replace the old upload_to_dust function call
-# ============================================================
-
-# In process_ticket_batch function, change this line:
-# OLD: uploaded, upload_errors = upload_to_dust(documents)
-# NEW: uploaded, upload_errors = upload_to_dust_parallel(documents)
-
-# (I'll include the modified process_ticket_batch below)
-
-# ============================================================
-# MAIN PROCESSING - MODIFIED FOR PARALLEL UPLOADS
+# MAIN PROCESSING
 # ============================================================
 
 def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int, total_tickets: int) -> Tuple[List[Dict], int]:
@@ -895,12 +1296,6 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
     logger.info(f"  OK Batch complete | Uploaded: {uploaded}/{len(documents)} | Active: {active_count} | Errors: {errors}")
     
     return documents, errors
-
-# ============================================================
-# Keep all your existing functions for:
-# - print_analytics_summary (unchanged)
-# - main() function (unchanged except version number)
-# ============================================================
 
 def print_analytics_summary():
     """Print comprehensive analytics summary"""
