@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.0 - COMPLETE WITH PARALLEL UPLOADS
+ServiceDesk Intelligence Suite v3.0.1 - COMPLETE WITH PARALLEL UPLOADS
 Full 48-field comprehensive ticket intelligence with incremental sync
 
-Changes in v3.0 (SPEED OPTIMIZATIONS):
+Changes in v3.0.1:
+- Fixed checkpoint.json path to always save to project root
+- Checkpoint now saves to: ~/sdp-dust-sync/checkpoint.json
+
+Changes in v3.0:
 - Added parallel document uploads (5 concurrent workers)
 - Reduced upload delay: 500ms → 100ms  
 - Expected speedup: 5-10x faster uploads
 - Estimated time: 80 min → 8-15 min for 4500+ tickets
 
-Previous features (v2.8.3):
-- Fixed Dust API rate limiting (429 errors)
-- All 4500+ tickets (no page limit)
+Previous features:
 - 48 comprehensive fields
+- All tickets (no page limit)
 - Connection pooling and parallel conversation fetching
 """
 
@@ -29,22 +32,27 @@ from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore, Lock
+from pathlib import Path
 import hashlib
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-VERSION = "3.0"
+VERSION = "3.0.1"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
-CHECKPOINT_FILE = 'checkpoint.json'
+
+# NEW v3.0.1: Fixed checkpoint path - always saves to project root
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  # sdp-dust-sync/
+CHECKPOINT_FILE = str(SCRIPT_DIR / 'checkpoint.json')
+
 REQUEST_TIMEOUT = 30
 MAX_PAGES = None  # No limit - fetch all tickets
 
 # NEW v3.0: Parallel upload configuration
-MAX_CONCURRENT_UPLOADS = 5  # Upload 5 documents simultaneously
+MAX_CONCURRENT_UPLOADS = 5
 UPLOAD_TIMEOUT = 30
 
 # Connection pooling
@@ -174,6 +182,7 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 def load_checkpoint() -> Optional[datetime]:
     """Load last sync timestamp from checkpoint file"""
     if not os.path.exists(CHECKPOINT_FILE):
+        logger.info(f"No checkpoint file found at: {CHECKPOINT_FILE}")
         return None
     
     try:
@@ -181,6 +190,7 @@ def load_checkpoint() -> Optional[datetime]:
             checkpoint = json.load(f)
             last_sync = checkpoint.get('last_sync')
             if last_sync:
+                logger.info(f"Loaded checkpoint from: {CHECKPOINT_FILE}")
                 return datetime.fromisoformat(last_sync)
     except Exception as e:
         logger.warning(f"Could not load checkpoint: {e}")
@@ -196,10 +206,14 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
         'errors': total_errors
     }
     
-    with open(CHECKPOINT_FILE, 'w') as f:
-        json.dump(checkpoint, f, indent=2)
-    
-    logger.info(f"SAVED Checkpoint saved: {total_processed} successful, {total_errors} errors")
+    try:
+        with open(CHECKPOINT_FILE, 'w') as f:
+            json.dump(checkpoint, f, indent=2)
+        
+        logger.info(f"SAVED Checkpoint saved to: {CHECKPOINT_FILE}")
+        logger.info(f"      Processed: {total_processed}, Errors: {total_errors}")
+    except Exception as e:
+        logger.error(f"Failed to save checkpoint: {e}")
 
 # ============================================================
 # AUTHENTICATION
@@ -243,7 +257,6 @@ def get_access_token() -> str:
 def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
     """
     Fetch tickets updated since last sync (incremental)
-    v2.8.2: No page limit by default, improved timestamp handling
     """
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
@@ -846,6 +859,7 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     
     # Priority tags
     priority = comprehensive_fields['priority'].lower()
+    tags.appen
     tags.append(f"priority:{priority}")
     
     if 'urgent' in priority:
@@ -1306,17 +1320,7 @@ def print_analytics_summary():
     
     # Top categories
     logger.info("🏆 Top Categories:")
-    for cat, data in Counter(analytics_cache.raw_data['category_stats']).most_common(5):
-        logger.info(f"  {cat}: {data['count']} tickets")
-        if data['count'] > 0:
-            logger.info(f"    Avg resolution: {data['total_resolution_days'] / data['count']:.1f} days")
-    
-    logger.info("")
-    
-    # Technician workload
-    logger.info("👥 Technician Workload:")
-    for tech, data in sorted(analytics_cache.raw_data['technician_workload'].items(), 
-                            key=lambda x: x[1]['active'], reverse=True)[:5]:
+    for cat,'], reverse=True)[:5]:
         logger.info(f"  {tech}: {data['active']} active / {data['total']} total")
         if data['total'] > 0:
             logger.info(f"    Avg response: {data['total_response_hours'] / data['total']:.1f} hours")
@@ -1371,24 +1375,22 @@ def print_analytics_summary():
     logger.info("")
 
 def main():
-    """Main execution - v3.0 with parallel upload optimizations"""
+    """Main execution - v3.0.1 with fixed checkpoint path"""
     
     logger.info("============================================================")
     logger.info(f"START SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info(f"Starting at {datetime.now()}")
+    logger.info(f"Checkpoint file: {CHECKPOINT_FILE}")
     logger.info("============================================================")
     
+    logger.info("✨ v3.0.1 FIX:")
+    logger.info("   • Fixed checkpoint.json path - always saves to project root")
+    logger.info("")
     logger.info("✨ v3.0 SPEED OPTIMIZATIONS:")
     logger.info("   • Parallel document uploads (5 concurrent workers)")
     logger.info("   • Reduced upload delay: 500ms → 100ms")
     logger.info("   • Expected speedup: 5-10x faster")
     logger.info("   • Estimated time: 80 min → 8-15 min for 4500+ tickets")
-    logger.info("")
-    logger.info("✨ v2.8 FEATURES:")
-    logger.info("   • All 48 comprehensive fields")
-    logger.info("   • No page limit - fetches ALL tickets")
-    logger.info("   • Parallel conversation fetching")
-    logger.info("   • Connection pooling & rate limit handling")
     logger.info("")
     
     # Validate environment
@@ -1497,6 +1499,7 @@ def main():
     logger.info(f"  Linked Tickets: {METRICS['linked_tickets']}")
     logger.info("")
     logger.info(f"  Errors/Skipped: {total_errors}")
+    logger.info(f"  Checkpoint saved to: {CHECKPOINT_FILE}")
     logger.info(f"  Finished: {datetime.now()}")
     logger.info("============================================================")
     
