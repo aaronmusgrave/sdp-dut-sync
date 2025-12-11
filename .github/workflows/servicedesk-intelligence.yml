@@ -2,7 +2,7 @@ name: ServiceDesk Sync
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       force_full_sync:
@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
 
-# ⭐ NEW: Add permissions to allow pushing
+# ⭐ ADD THIS
 permissions:
   contents: write
 
@@ -20,11 +20,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      # ⭐ CHANGE THIS - Use v4, remove token parameter
+      - uses: actions/checkout@v4
         with:
-          # ⭐ NEW: Persist credentials for pushing
           persist-credentials: true
-          token: \${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -65,7 +64,7 @@ jobs:
         run: |
           python scripts/sync_servicedesk_intelligence.py
 
-      # ⭐ IMPROVED: Better commit logic
+      # ⭐ IMPROVED COMMIT LOGIC
       - name: Save sync timestamp
         if: always()
         run: |
@@ -77,16 +76,14 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             
-            # Add both timestamp files
             git add last_sync_time.txt
             git add checkpoint.json 2>/dev/null || true
             
-            # Only commit if there are changes
             if git diff --staged --quiet; then
               echo "ℹ️  No changes to commit"
             else
               git commit -m "Update sync timestamp: \$TIMESTAMP [skip ci]"
-              git push origin main
+              git push
               echo "✅ Timestamp committed and pushed to repository"
             fi
           else
