@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.5 - CORRECT INCREMENTAL SYNC
-Fixes incremental sync to check BOTH created and updated times
+ServiceDesk Intelligence Suite v3.1.6 - PRODUCTION READY
+Fixes checkpoint race condition using sync start time
+
+Changes in v3.1.6:
+- FIXED: Checkpoint uses sync START time to prevent race condition gaps
+- Prevents missing updates that occur during sync processing
+- Accepts minor duplicate processing (idempotent uploads)
 
 Changes in v3.1.5:
 - FIXED: Incremental syncs check BOTH created_time AND last_updated_time
@@ -13,11 +18,6 @@ Changes in v3.1.4:
 - FIXED: Sort by created_time instead of last_updated_time
 - FIXED: Use display_id field from API for correct ticket numbers
 - Date range logging for verification
-
-Changes in v3.1.3:
-- Explicit skip tracking with retry logic
-- Detailed failure logging
-- Skipped tickets report
 """
 
 import os
@@ -40,7 +40,7 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.5"
+VERSION = "3.1.6"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -282,22 +282,14 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 # ============================================================
 
 def extract_short_ticket_number(ticket: Dict) -> str:
-    """
-    Extract short ticket number - v3.1.4+
-    Priority:
-    1. Use display_id field from API (most reliable)
-    2. Try to extract from id field
-    3. Fall back to full ID
-    """
+    """Extract short ticket number using display_id field"""
     try:
-        # FIRST: Try display_id field
         display_id = ticket.get('display_id')
         if display_id:
             short_id = str(display_id).lstrip('#').strip()
             if short_id:
                 return short_id
         
-        # SECOND: Try extracting from ID
         ticket_id = ticket.get('id', '')
         ticket_id_str = str(ticket_id)
         
@@ -365,9 +357,10 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
             else:
                 f.write('')
         
-        logger.info(f"✓ SAVED Timestamp to: {TIMESTAMP_FILE}")
-        if last_sync_time:
-            logger.info(f"        {last_sync_time.isoformat()}")
+        if total_processed % 200 == 0 or total_processed < 100:  # Log less frequently
+            logger.info(f"✓ SAVED Timestamp to: {TIMESTAMP_FILE}")
+            if last_sync_time:
+                logger.info(f"        {last_sync_time.isoformat()}")
     except Exception as e:
         logger.error(f"✗ Failed to save timestamp file: {e}")
     
@@ -384,8 +377,9 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
         with open(CHECKPOINT_FILE, 'w') as f:
             json.dump(checkpoint, f, indent=2)
         
-        logger.info(f"✓ SAVED Stats to: {CHECKPOINT_FILE}")
-        logger.info(f"        Processed: {total_processed}, Errors: {total_errors}, Skipped: {METRICS['skipped']}")
+        if total_processed % 200 == 0 or total_processed < 100:  # Log less frequently
+            logger.info(f"✓ SAVED Stats to: {CHECKPOINT_FILE}")
+            logger.info(f"        Processed: {total_processed}, Errors: {total_errors}, Skipped: {METRICS['skipped']}")
     except Exception as e:
         logger.error(f"✗ Failed to save checkpoint stats: {e}")
 
@@ -460,16 +454,12 @@ def classify_ticket_type(ticket: Dict) -> str:
     return 'requests'
 
 # ============================================================
-# TICKET FETCHING - v3.1.5 FIXED INCREMENTAL SYNC
+# TICKET FETCHING - v3.1.5+ (CORRECT INCREMENTAL)
 # ============================================================
 
 def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime], 
                            page_limit: Optional[int] = None) -> List[Dict]:
-    """
-    Fetch all tickets - v3.1.5 CORRECT INCREMENTAL SYNC
-    - Full sync: Sort by created_time (gets ALL tickets, newest first)
-    - Incremental: Filter by created_time OR last_updated_time (catches both new and updated)
-    """
+    """Fetch all tickets with OR condition for incremental sync"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -477,11 +467,9 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
     
     search_criteria = []
     
-    # For incremental sync, get tickets that were EITHER created OR updated since last sync
     if last_sync_time:
         last_sync_ms = int(last_sync_time.timestamp() * 1000)
         
-        # Use OR condition to catch both new tickets AND updates
         search_criteria = [
             {
                 "field": "created_time",
@@ -502,7 +490,7 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
             "row_count": 100,
             "start_index": 1,
             "get_total_count": True,
-            "sort_field": "created_time",  # Sort by created_time (newest first)
+            "sort_field": "created_time",
             "sort_order": "desc"
         }
     }
@@ -532,7 +520,6 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
                 if not tickets:
                     break
                 
-                # LOG DATE RANGE for first 3 pages (debugging)
                 if page <= 3 and tickets:
                     created_dates = []
                     updated_dates = []
@@ -648,7 +635,6 @@ def fetch_conversation_single_with_retry(ticket_id: str, ticket_subject: str, ac
                 conversations = response.json().get('conversations', [])
                 if attempt > 0:
                     METRICS['retried'] += 1
-                    logger.info(f"  ✓ Retry successful for ticket {ticket_id}")
                 return conversations, None
             
             elif response.status_code == 404:
@@ -656,36 +642,31 @@ def fetch_conversation_single_with_retry(ticket_id: str, ticket_subject: str, ac
             
             elif response.status_code == 429:
                 wait_time = (attempt + 1) * 5
-                logger.warning(f"  Rate limited for ticket {ticket_id}, waiting {wait_time}s (attempt {attempt + 1}/{max_attempts})")
+                logger.warning(f"  Rate limited for ticket {ticket_id}, waiting {wait_time}s")
                 time.sleep(wait_time)
                 continue
             
             else:
                 error_msg = f"HTTP {response.status_code}"
                 if attempt < max_attempts - 1:
-                    logger.warning(f"  Conversation fetch failed for {ticket_id}: {error_msg}, retrying...")
                     time.sleep(2)
                     continue
                 else:
                     return [], error_msg
                     
         except requests.exceptions.Timeout:
-            error_msg = "Request timeout"
             if attempt < max_attempts - 1:
-                logger.warning(f"  Timeout fetching conversations for {ticket_id}, retrying...")
                 time.sleep(2)
                 continue
             else:
-                return [], error_msg
+                return [], "Request timeout"
         
         except Exception as e:
-            error_msg = f"Exception: {str(e)}"
             if attempt < max_attempts - 1:
-                logger.warning(f"  Error fetching conversations for {ticket_id}: {error_msg}, retrying...")
                 time.sleep(2)
                 continue
             else:
-                return [], error_msg
+                return [], f"Exception: {str(e)}"
     
     METRICS['failed_after_retry'] += 1
     return [], "All retry attempts failed"
@@ -722,7 +703,6 @@ def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_wor
 def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[str, Any]:
     """Auto-categorize ticket based on content"""
     
-    # If already has a valid category, keep it
     if existing_category and existing_category.lower() not in ['uncategorized', 'general', 'other', '', 'none']:
         return {
             'suggested_category': existing_category,
@@ -1038,7 +1018,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
             return obj.get(key, default)
         return default
     
-    # Extract ticket IDs
     long_ticket_id = ticket.get('id', 'unknown')
     short_ticket_number = extract_short_ticket_number(ticket)
     module_type = ticket.get('_module_type', 'request')
@@ -1048,20 +1027,16 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['module_type'] = module_type
     fields['display_id'] = f"#{short_ticket_number}"
     
-    # Basic fields
     fields['subject'] = ticket.get('subject', 'No subject')
     fields['description'] = ticket.get('description', 'No description')
     
-    # Status
     status = ticket.get('status') or {}
     fields['status'] = safe_get(status, 'name', 'Unknown')
     fields['status_category'] = 'active' if fields['status'].lower() in ['open', 'in progress', 'pending'] else 'closed'
     
-    # Priority
     priority = ticket.get('priority') or {}
     fields['priority'] = safe_get(priority, 'name', 'Normal')
     
-    # People
     requester = ticket.get('requester') or {}
     fields['requester_name'] = safe_get(requester, 'name', 'Unknown')
     fields['requester_email'] = safe_get(requester, 'email_id', '')
@@ -1070,7 +1045,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
     fields['technician_email'] = safe_get(technician, 'email_id', '')
     
-    # Category with auto-categorization
     category = ticket.get('category') or {}
     original_category = safe_get(category, 'name', 'Uncategorized')
     fields['category_original'] = original_category
@@ -1087,7 +1061,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     site = ticket.get('site') or {}
     fields['site'] = safe_get(site, 'name', '')
     
-    # Timeline
     created_time = ticket.get('created_time') or {}
     fields['created_time'] = safe_get(created_time, 'display_value', '')
     
@@ -1100,11 +1073,9 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     last_updated_time = ticket.get('last_updated_time') or {}
     fields['last_updated_time'] = safe_get(last_updated_time, 'display_value', '')
     
-    # Group
     group = ticket.get('group') or {}
     fields['group'] = safe_get(group, 'name', '')
     
-    # Assets
     assets = ticket.get('assets') or []
     if not isinstance(assets, list):
         assets = []
@@ -1113,7 +1084,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['asset_names'] = [safe_get(asset, 'name', '') for asset in assets] if assets else []
     fields['primary_asset'] = safe_get(assets[0], 'name', '') if assets else ''
     
-    # Source/Channel
     request_type = ticket.get('request_type') or {}
     fields['source'] = safe_get(request_type, 'name', 'Unknown')
     
@@ -1121,7 +1091,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['mode'] = safe_get(mode, 'name', fields['source'])
     fields['channel'] = fields['mode']
     
-    # Advanced fields
     fields['impact'] = safe_get(ticket.get('impact') or {}, 'name', '')
     fields['urgency'] = safe_get(ticket.get('urgency') or {}, 'name', '')
     fields['level'] = safe_get(ticket.get('level') or {}, 'name', '')
@@ -1142,16 +1111,13 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
 
 def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
     """Track analytics data"""
-    # Module distribution
     module_type = comprehensive_fields.get('module_type', 'unknown')
     analytics_cache.update_module_distribution(module_type)
     
-    # Auto-categorization stats
     was_auto = comprehensive_fields.get('category_auto_assigned', False)
     confidence = comprehensive_fields.get('category_confidence', 0)
     analytics_cache.update_auto_categorization(was_auto, confidence)
     
-    # Category stats
     category = comprehensive_fields['category']
     resolution_days = 0
     if comprehensive_fields['resolved_time']:
@@ -1163,7 +1129,6 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
             pass
     analytics_cache.update_category_stats(category, resolution_days)
     
-    # Technician workload
     tech = comprehensive_fields['technician_name']
     is_active = comprehensive_fields['status_category'] == 'active'
     response_hours = 0
@@ -1181,7 +1146,6 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
     """Track metrics"""
     METRICS['total_processed'] += 1
     
-    # Module counts
     module_type = comprehensive_fields.get('module_type', 'unknown')
     if module_type == 'requests':
         METRICS['requests'] += 1
@@ -1190,29 +1154,23 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
     elif module_type == 'incidents':
         METRICS['incidents'] += 1
     
-    # Auto-categorization
     if comprehensive_fields.get('category_auto_assigned'):
         METRICS['auto_categorized'] += 1
     
-    # Status
     if comprehensive_fields['status_category'] == 'active':
         METRICS['active_tickets'] += 1
     else:
         METRICS['closed_tickets'] += 1
     
-    # Conversations
     if conversations:
         METRICS['with_conversations'] += 1
     
-    # Complexity
     if complexity >= 7:
         METRICS['high_complexity'] += 1
     
-    # Sentiment
     if sentiment == 'at-risk':
         METRICS['satisfaction_at_risk'] += 1
     
-    # SLA risk
     if sla_risk in ['critical', 'high']:
         METRICS['high_sla_breach_risk'] += 1
 
@@ -1226,7 +1184,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     """Generate comprehensive tags for searchability"""
     tags = []
     
-    # Ticket ID tags
     short_id = comprehensive_fields.get('ticket_id')
     tags.extend([
         f"ticket:{short_id}",
@@ -1234,30 +1191,25 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
         comprehensive_fields.get('display_id', '')
     ])
     
-    # Module type
     module_type = comprehensive_fields.get('module_type', 'unknown')
     tags.append(f"module:{module_type}")
     
-    # Status tags
     status = comprehensive_fields['status'].lower().replace(' ', '-')
     tags.extend([f"status:{status}", f"status-category:{comprehensive_fields['status_category']}"])
     if comprehensive_fields['status_category'] == 'active':
         tags.extend(['active', 'open-status', 'needs-attention'])
     
-    # Priority tags
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
     if 'urgent' in priority:
         tags.extend(['urgent-attention', 'critical-action-required'])
     
-    # People tags
     tech = comprehensive_fields['technician_name'].lower().replace(' ', '-')
     req = comprehensive_fields['requester_name'].lower().replace(' ', '-')
     tags.extend([f"technician:{tech}", f"requester:{req}"])
     if tech == 'unassigned':
         tags.extend(['unassigned', 'needs-assignment'])
     
-    # Category tags
     category = comprehensive_fields['category'].lower().replace(' ', '-').replace('&', 'and')
     tags.append(f"category:{category}")
     if comprehensive_fields.get('category_auto_assigned'):
@@ -1268,24 +1220,20 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
         elif confidence < 50:
             tags.append('low-confidence-category')
     
-    # Complexity tags
     tags.append(f"complexity:{complexity}")
     if complexity >= 7:
         tags.extend(['high-complexity', 'complex-issue'])
     elif complexity <= 3:
         tags.extend(['low-complexity', 'simple-issue'])
     
-    # Sentiment tags
     tags.append(f"sentiment:{sentiment}")
     if sentiment == 'at-risk':
         tags.extend(['satisfaction-at-risk', 'customer-frustration'])
     
-    # SLA tags
     tags.append(f"sla-risk:{sla_risk}")
     if sla_risk in ['critical', 'high']:
         tags.extend(['high-breach-risk', 'sla-attention-needed'])
     
-    # Response status tags
     tags.append(f"awaiting:{response_status['awaiting_response']}")
     if response_status['awaiting_response'] == 'customer':
         tags.append('awaiting-customer-response')
@@ -1305,7 +1253,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
                         response_status: Dict) -> Dict:
     """Create Dust document from ticket data"""
     
-    # Format conversations
     conversation_text = ""
     if conversations:
         for i, conv in enumerate(conversations, 1):
@@ -1323,17 +1270,14 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
     else:
         conversation_text = "\n*No conversations yet*\n"
     
-    # Generate tags
     tags = generate_comprehensive_tags(
         ticket, conversations, comprehensive_fields,
         complexity, sentiment, sla_risk, response_status
     )
     
-    # Format ticket header
     short_id = comprehensive_fields.get('display_id', f"#{comprehensive_fields.get('ticket_id')}")
     module_type = comprehensive_fields.get('module_type', 'request').replace('_', ' ').title()
     
-    # Format category with auto-categorization info
     category_display = comprehensive_fields['category']
     if comprehensive_fields.get('category_auto_assigned'):
         confidence = comprehensive_fields.get('category_confidence', 0)
@@ -1342,7 +1286,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
             keywords = ', '.join(comprehensive_fields['category_keywords'][:5])
             category_display += f"\n  Keywords: {keywords}"
     
-    # Create document text
     document_text = f"""# Ticket {short_id}: {comprehensive_fields['subject']}
 
 ## Type & Overview
@@ -1376,11 +1319,10 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 {', '.join(tags[:50])}
 
 ---
-*Intelligence Suite v{VERSION} - Incremental Sync: Created OR Updated*
+*Intelligence Suite v{VERSION} - Sync Start Time Checkpoint*
 *Module: {module_type} | Ticket ID: {short_id} | Category Confidence: {comprehensive_fields.get('category_confidence', 0):.0f}%*
 """
     
-    # Create document structure
     short_ticket_num = comprehensive_fields.get('ticket_id')
     document = {
         "document_id": f"ticket-{short_ticket_num}",
@@ -1478,26 +1420,21 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
     documents = []
     errors = 0
     
-    # Fetch conversations in parallel
     conversations_map = fetch_conversations_parallel(tickets, access_token)
     
-    # Process each ticket
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket['id']
         ticket_subject = ticket.get('subject', 'No subject')
         short_id = extract_short_ticket_number(ticket)
         
         try:
-            # Get conversations
             conversations, conv_error = conversations_map.get(ticket_id, ([], None))
             if conv_error:
                 track_skipped_ticket(short_id, ticket_subject, f"Conversation fetch failed: {conv_error}", "conversation_fetch")
                 continue
             
-            # Extract fields
             comprehensive_fields = extract_comprehensive_fields(ticket)
             
-            # Calculate AI intelligence
             complexity = calculate_complexity_score(ticket, conversations)
             sentiment = analyze_sentiment(conversations)
             sla_risk, sla_breach_likelihood = predict_sla_breach(ticket, conversations)
@@ -1505,11 +1442,9 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
             issue_types = identify_issue_type(ticket)
             response_status = analyze_response_status(conversations)
             
-            # Track analytics and metrics
             track_analytics(ticket, conversations, complexity, comprehensive_fields)
             track_metrics(comprehensive_fields, conversations, complexity, sentiment, sla_risk, response_status)
             
-            # Create document
             document = create_dust_document(
                 ticket, conversations, comprehensive_fields,
                 complexity, sentiment, sla_risk, sla_breach_likelihood,
@@ -1523,7 +1458,6 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
             track_skipped_ticket(short_id, ticket_subject, f"Processing error: {str(e)}", "ticket_processing")
             errors += 1
     
-    # Upload to Dust
     uploaded, upload_errors = upload_to_dust_parallel(documents)
     errors += upload_errors
     
@@ -1536,7 +1470,6 @@ def print_analytics_summary():
     logger.info("=" * 60)
     logger.info("")
     
-    # Module distribution
     logger.info("📦 Module Distribution:")
     module_dist = analytics_cache.raw_data['module_distribution']
     if module_dist:
@@ -1546,7 +1479,6 @@ def print_analytics_summary():
     
     logger.info("")
     
-    # Auto-categorization stats
     logger.info("🏷️  Auto-Categorization:")
     auto_cat_stats = analytics_cache.raw_data['auto_categorization']
     logger.info(f"  Tickets auto-categorized: {auto_cat_stats['assigned']}")
@@ -1555,7 +1487,6 @@ def print_analytics_summary():
     
     logger.info("")
     
-    # Top categories
     logger.info("🏆 Top Categories:")
     category_stats = analytics_cache.raw_data['category_stats']
     if category_stats:
@@ -1566,7 +1497,7 @@ def print_analytics_summary():
     logger.info("")
 
 # ============================================================
-# MAIN FUNCTION
+# MAIN FUNCTION - v3.1.6 FIXED CHECKPOINT
 # ============================================================
 
 def main():
@@ -1575,24 +1506,21 @@ def main():
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info(f"Started: {datetime.now()}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.5 FEATURES:")
-    logger.info("   • FIXED: Incremental syncs check BOTH created AND updated times")
-    logger.info("   • FIXED: Sort by created_time (catches recent tickets)")
-    logger.info("   • FIXED: Use display_id field for correct ticket numbers")
+    logger.info("✨ v3.1.6 FEATURES:")
+    logger.info("   • FIXED: Checkpoint uses sync START time (prevents race condition)")
+    logger.info("   • No missed updates during sync processing")
+    logger.info("   • Incremental syncs check BOTH created AND updated times")
+    logger.info("   • Sort by created_time (catches recent tickets)")
+    logger.info("   • Use display_id field for correct ticket numbers")
     logger.info("   • OR condition: Gets new tickets AND updates to existing tickets")
-    logger.info("   • Date range logging (created + updated times)")
-    logger.info("   • Multi-module: Requests, Service Requests, Incidents")
-    logger.info("   • Explicit skip tracking with retry logic")
     logger.info("")
     
-    # Validate credentials
     if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
         logger.error("ERROR: Missing ServiceDesk credentials")
         sys.exit(1)
     
     logger.info("✓ Credentials validated")
     
-    # Get access token
     try:
         access_token = get_access_token()
         logger.info("✓ Access token obtained")
@@ -1600,10 +1528,14 @@ def main():
         logger.error(f"FATAL: Failed to get token: {e}")
         sys.exit(1)
     
-    # Load checkpoint
+    # Load previous checkpoint
     last_sync_time = load_checkpoint()
     
-    # Fetch tickets
+    # CRITICAL: Record sync START time BEFORE fetching tickets
+    sync_start_time = datetime.now(timezone.utc)
+    logger.info(f"📍 Sync start time (will be checkpoint): {sync_start_time}")
+    
+    # Fetch tickets using PREVIOUS checkpoint as filter
     try:
         tickets = fetch_all_tickets(access_token, last_sync_time, MAX_PAGES)
     except Exception as e:
@@ -1611,7 +1543,10 @@ def main():
         sys.exit(1)
     
     if not tickets:
+        # No tickets but still update checkpoint to sync start time
+        save_checkpoint(sync_start_time, 0, 0)
         logger.info("✓ No new tickets. Sync complete.")
+        logger.info(f"  ✓ Checkpoint updated to: {sync_start_time}")
         return
     
     # Process tickets in batches
@@ -1633,31 +1568,18 @@ def main():
             total_processed += len(documents)
             total_errors += errors
             
-            # Save checkpoint after each batch
-            save_checkpoint(last_sync_time, total_processed, total_errors)
+            # Save checkpoint with SYNC START TIME (not current time, not latest ticket)
+            save_checkpoint(sync_start_time, total_processed, total_errors)
             
         except Exception as e:
             logger.error(f"FATAL: Batch {batch_num} error: {e}")
             total_errors += len(batch_tickets)
     
-    # Save final checkpoint with latest UPDATED time
-    if tickets:
-        try:
-            latest_updated = max(
-                datetime.fromisoformat(t['last_updated_time']['display_value'].replace('Z', '+00:00'))
-                for t in tickets
-                if t.get('last_updated_time', {}).get('display_value')
-            )
-            save_checkpoint(latest_updated, total_processed, total_errors)
-            logger.info(f"  ✓ Checkpoint saved: {latest_updated}")
-        except Exception as e:
-            logger.warning(f"  Could not determine latest updated time: {e}")
-            save_checkpoint(datetime.now(timezone.utc), total_processed, total_errors)
+    # Final checkpoint
+    logger.info(f"  ✓ Final checkpoint: {sync_start_time}")
     
-    # Save skip report
     save_skipped_tickets_report()
     
-    # Print final summary
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ SYNC COMPLETE (v{VERSION})")
@@ -1677,10 +1599,7 @@ def main():
     logger.info("=" * 60)
     logger.info("")
     
-    # Print analytics
     print_analytics_summary()
-    
-    # Print skip summary
     print_skip_summary()
 
 # ============================================================
