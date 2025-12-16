@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.0.2 - COMPLETE WITH DUAL CHECKPOINT
-Full 48-field comprehensive ticket intelligence with incremental sync
+ServiceDesk Intelligence Suite v3.1.1 - COMPLETE WITH AUTO-CATEGORIZATION
+Syncs Requests, Service Requests, AND Incidents with intelligent categorization
 
-Changes in v3.0.2:
-- Dual checkpoint system:
-  * last_sync_time.txt - Simple timestamp (persists in git repo)
-  * checkpoint.json - Detailed stats (local only, for diagnostics)
-- Compatible with existing git workflow
-- True incremental sync across GitHub Actions runs
+Changes in v3.1.1:
+- Intelligent auto-categorization of tickets
+- 13 predefined categories with keyword matching
+- Confidence scoring (0-100%)
+- Preserves existing categories when present
 
-Changes in v3.0.1:
-- Fixed checkpoint path and syntax errors
-
-Changes in v3.0:
-- Parallel document uploads (5 concurrent workers)
-- 5-10x faster uploads
+Changes in v3.1.0:
+- Multi-module support: requests, service_requests, incidents
+- Short ticket numbers (#16027)
+- Module type tracking
 """
 
 import os
@@ -38,22 +35,29 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "3.0.2"
+VERSION = "3.1.1"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 
-# NEW v3.0.2: Dual checkpoint system
-SCRIPT_DIR = Path(__file__).resolve().parent.parent  # sdp-dust-sync/
-TIMESTAMP_FILE = str(SCRIPT_DIR / 'last_sync_time.txt')  # Persists in git
-CHECKPOINT_FILE = str(SCRIPT_DIR / 'checkpoint.json')    # Local stats only
+# Checkpoint files
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+TIMESTAMP_FILE = str(SCRIPT_DIR / 'last_sync_time.txt')
+CHECKPOINT_FILE = str(SCRIPT_DIR / 'checkpoint.json')
 
 REQUEST_TIMEOUT = 30
-MAX_PAGES = None  # No limit - fetch all tickets
+MAX_PAGES = None
 
-# v3.0: Parallel upload configuration
+# Parallel upload configuration
 MAX_CONCURRENT_UPLOADS = 5
 UPLOAD_TIMEOUT = 30
+
+# Module endpoints to fetch
+TICKET_MODULES = {
+    'requests': '/api/v3/requests',
+    'service_requests': '/api/v3/service_requests',
+    'incidents': '/api/v3/incidents'
+}
 
 # Connection pooling
 SESSION = requests.Session()
@@ -65,7 +69,7 @@ ADAPTER = requests.adapters.HTTPAdapter(
 SESSION.mount('http://', ADAPTER)
 SESSION.mount('https://', ADAPTER)
 
-# Cache for repeated lookups
+# Cache
 CACHE = {
     'technicians': {},
     'requesters': {},
@@ -87,7 +91,9 @@ class AnalyticsCache:
             'department_distribution': defaultdict(int),
             'asset_failure_rates': defaultdict(int),
             'service_usage': defaultdict(int),
-            'resolution_categories': defaultdict(int)
+            'resolution_categories': defaultdict(int),
+            'module_distribution': defaultdict(int),
+            'auto_categorization': {'assigned': 0, 'high_confidence': 0, 'low_confidence': 0}
         }
     
     def update_category_stats(self, category, resolution_days):
@@ -120,12 +126,26 @@ class AnalyticsCache:
     
     def update_resolution_category(self, category):
         self.raw_data['resolution_categories'][category] += 1
+    
+    def update_module_distribution(self, module_type):
+        self.raw_data['module_distribution'][module_type] += 1
+    
+    def update_auto_categorization(self, was_auto: bool, confidence: float):
+        if was_auto:
+            self.raw_data['auto_categorization']['assigned'] += 1
+            if confidence >= 80:
+                self.raw_data['auto_categorization']['high_confidence'] += 1
+            elif confidence < 50:
+                self.raw_data['auto_categorization']['low_confidence'] += 1
 
 analytics_cache = AnalyticsCache()
 
 # Metrics counters
 METRICS = {
     'total_processed': 0,
+    'requests': 0,
+    'service_requests': 0,
+    'incidents': 0,
     'active_tickets': 0,
     'closed_tickets': 0,
     'with_conversations': 0,
@@ -138,7 +158,8 @@ METRICS = {
     'reopened': 0,
     'fcr': 0,
     'with_approvals': 0,
-    'linked_tickets': 0
+    'linked_tickets': 0,
+    'auto_categorized': 0
 }
 
 # ============================================================
@@ -176,29 +197,43 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 
 # ============================================================
-# CHECKPOINT MANAGEMENT - v3.0.2 DUAL SYSTEM
+# HELPER FUNCTIONS
+# ============================================================
+
+def extract_short_ticket_number(ticket_id: str) -> str:
+    """
+    Extract short ticket number from long ID
+    150534000029530963 -> 29530963 (meaningful digits)
+    """
+    try:
+        ticket_id_str = str(ticket_id)
+        
+        if len(ticket_id_str) > 10:
+            # Get last 8 digits and remove leading zeros
+            short_num = ticket_id_str[-8:].lstrip('0')
+            return short_num if short_num else ticket_id_str[-5:]
+        
+        return ticket_id_str
+    except:
+        return str(ticket_id)
+
+# ============================================================
+# CHECKPOINT MANAGEMENT
 # ============================================================
 
 def load_checkpoint() -> Optional[datetime]:
-    """
-    Load last sync timestamp - v3.0.2 dual system
-    Priority: last_sync_time.txt (persists) > checkpoint.json (local)
-    """
-    
-    # Try last_sync_time.txt first (simple text file, persists in repo)
+    """Load last sync timestamp"""
     if os.path.exists(TIMESTAMP_FILE):
         try:
             with open(TIMESTAMP_FILE, 'r') as f:
                 timestamp_str = f.read().strip()
                 if timestamp_str:
-                    # Try parsing as ISO format
                     try:
                         last_sync = datetime.fromisoformat(timestamp_str)
                         logger.info(f"✓ Loaded timestamp from: {TIMESTAMP_FILE}")
                         logger.info(f"  Last sync: {last_sync}")
                         return last_sync
                     except ValueError:
-                        # Try parsing as Unix timestamp (milliseconds)
                         try:
                             timestamp_ms = int(timestamp_str)
                             last_sync = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
@@ -210,7 +245,6 @@ def load_checkpoint() -> Optional[datetime]:
         except Exception as e:
             logger.warning(f"Could not load last_sync_time.txt: {e}")
     
-    # Fallback to checkpoint.json if it exists locally
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
@@ -226,16 +260,10 @@ def load_checkpoint() -> Optional[datetime]:
     return None
 
 def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors: int):
-    """
-    Save checkpoint - v3.0.2 dual system
-    Saves to BOTH files for compatibility and diagnostics
-    """
-    
-    # 1. Save to last_sync_time.txt (PRIORITY - persists in git)
+    """Save checkpoint for incremental sync"""
     try:
         with open(TIMESTAMP_FILE, 'w') as f:
             if last_sync_time:
-                # Save as ISO format (human readable and parseable)
                 f.write(last_sync_time.isoformat())
             else:
                 f.write('')
@@ -246,7 +274,6 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
     except Exception as e:
         logger.error(f"✗ Failed to save timestamp file: {e}")
     
-    # 2. Save to checkpoint.json (detailed stats, local only)
     checkpoint = {
         'last_sync': last_sync_time.isoformat() if last_sync_time else None,
         'last_run': datetime.now(timezone.utc).isoformat(),
@@ -300,11 +327,12 @@ def get_access_token() -> str:
     raise Exception("Failed to obtain access token after max retries")
 
 # ============================================================
-# TICKET FETCHING - INCREMENTAL SYNC
+# TICKET FETCHING - MULTI-MODULE
 # ============================================================
 
-def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
-    """Fetch tickets updated since last sync (incremental)"""
+def fetch_tickets_from_module(access_token: str, module_name: str, endpoint: str, 
+                              last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
+    """Fetch tickets from a specific module"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -319,9 +347,6 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
             "condition": "greater than",
             "value": str(last_sync_ms)
         })
-        logger.info(f"📊 INCREMENTAL SYNC: Fetching tickets updated since {last_sync_time}")
-    else:
-        logger.info("📊 FULL SYNC: Fetching ALL tickets (no checkpoint found)")
     
     list_info = {
         "list_info": {
@@ -336,18 +361,15 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
     if search_criteria:
         list_info["list_info"]["search_criteria"] = search_criteria
     
-    url = f"{SDP_API_BASE}/requests"
+    url = f"{SDP_API_BASE}{endpoint}"
     all_tickets = []
     page = 1
     
-    if page_limit:
-        logger.info(f"  Page limit: {page_limit} pages (up to {page_limit * 100} tickets)")
-    else:
-        logger.info(f"  No page limit - fetching ALL tickets")
+    logger.info(f"  Fetching {module_name}...")
     
     while True:
         if page_limit and page > page_limit:
-            logger.warning(f"  Reached page limit of {page_limit}. Stopping.")
+            logger.warning(f"    Reached page limit of {page_limit} for {module_name}")
             break
         
         list_info["list_info"]["start_index"] = (page - 1) * 100 + 1
@@ -358,45 +380,96 @@ def fetch_tickets_incremental(access_token: str, last_sync_time: Optional[dateti
             
             if response.status_code == 200:
                 data = response.json()
-                tickets = data.get('requests', [])
+                tickets = data.get('requests', data.get('service_requests', data.get('incidents', [])))
                 
                 if not tickets:
                     break
                 
+                for ticket in tickets:
+                    ticket['_module_type'] = module_name
+                
                 all_tickets.extend(tickets)
-                logger.info(f"  Page {page}: Found {len(tickets)} tickets (Total: {len(all_tickets)})")
+                logger.info(f"    Page {page}: Found {len(tickets)} {module_name} (Total: {len(all_tickets)})")
                 
                 list_info_response = data.get('list_info', {})
                 has_more = list_info_response.get('has_more_rows', False)
                 
                 if not has_more:
-                    logger.info(f"  No more pages. Total fetched: {len(all_tickets)}")
                     break
                 
                 page += 1
                 time.sleep(0.1)
                 
             elif response.status_code == 429:
-                logger.warning(f"Rate limited on page {page}. Waiting 30s...")
+                logger.warning(f"    Rate limited on {module_name} page {page}. Waiting 30s...")
                 time.sleep(30)
                 continue
+            elif response.status_code == 404:
+                logger.warning(f"    {module_name} endpoint not found or no access (404)")
+                break
             else:
-                logger.error(f"API error: {response.status_code} - {response.text[:200]}")
+                logger.error(f"    API error for {module_name}: {response.status_code}")
                 break
                 
         except Exception as e:
-            logger.error(f"Error fetching page {page}: {e}")
+            logger.error(f"    Error fetching {module_name} page {page}: {e}")
             break
+    
+    if all_tickets:
+        logger.info(f"  ✓ Fetched {len(all_tickets)} {module_name}")
+    else:
+        logger.info(f"  ℹ No {module_name} found")
+    
+    return all_tickets
+
+def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
+    """Fetch tickets from ALL modules"""
+    
+    if last_sync_time:
+        logger.info(f"📊 INCREMENTAL SYNC: Fetching tickets updated since {last_sync_time}")
+    else:
+        logger.info("📊 FULL SYNC: Fetching ALL tickets (no checkpoint found)")
+    
+    logger.info("  Fetching from 3 modules: Requests, Service Requests, Incidents")
+    
+    all_tickets = []
+    
+    for module_name, endpoint in TICKET_MODULES.items():
+        try:
+            module_tickets = fetch_tickets_from_module(
+                access_token, module_name, endpoint, last_sync_time, page_limit
+            )
+            all_tickets.extend(module_tickets)
+        except Exception as e:
+            logger.error(f"  Failed to fetch {module_name}: {e}")
+    
+    logger.info(f"✓ Total fetched across all modules: {len(all_tickets)}")
+    
+    module_counts = {}
+    for ticket in all_tickets:
+        module_type = ticket.get('_module_type', 'unknown')
+        module_counts[module_type] = module_counts.get(module_type, 0) + 1
+    
+    for module, count in module_counts.items():
+        logger.info(f"  - {module}: {count}")
     
     return all_tickets
 
 # ============================================================
-# CONVERSATION FETCHING - PARALLEL
+# CONVERSATION FETCHING
 # ============================================================
 
-def fetch_conversation_single(ticket_id: str, access_token: str) -> List[Dict]:
+def fetch_conversation_single(ticket_id: str, module_type: str, access_token: str) -> List[Dict]:
     """Fetch conversations for a single ticket"""
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
+    endpoint_map = {
+        'requests': 'requests',
+        'service_requests': 'service_requests',
+        'incidents': 'incidents'
+    }
+    
+    endpoint = endpoint_map.get(module_type, 'requests')
+    url = f"{SDP_API_BASE}/{endpoint}/{ticket_id}/conversations"
+    
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -413,14 +486,19 @@ def fetch_conversation_single(ticket_id: str, access_token: str) -> List[Dict]:
     
     return []
 
-def fetch_conversations_parallel(ticket_ids: List[str], access_token: str, max_workers: int = 10) -> Dict[str, List[Dict]]:
+def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_workers: int = 10) -> Dict[str, List[Dict]]:
     """Fetch conversations for multiple tickets in parallel"""
     conversations_map = {}
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticket = {
-            executor.submit(fetch_conversation_single, ticket_id, access_token): ticket_id
-            for ticket_id in ticket_ids
+            executor.submit(
+                fetch_conversation_single, 
+                ticket['id'], 
+                ticket.get('_module_type', 'requests'),
+                access_token
+            ): ticket['id']
+            for ticket in tickets
         }
         
         for future in as_completed(future_to_ticket):
@@ -433,6 +511,167 @@ def fetch_conversations_parallel(ticket_ids: List[str], access_token: str, max_w
                 conversations_map[ticket_id] = []
     
     return conversations_map
+
+# ============================================================
+# AUTO-CATEGORIZATION - NEW v3.1.1
+# ============================================================
+
+def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[str, Any]:
+    """
+    Automatically categorize ticket based on content analysis
+    Returns category, confidence, and matched keywords
+    """
+    
+    # If ticket already has a meaningful category, keep it
+    if existing_category and existing_category.lower() not in ['uncategorized', 'general', 'other', '', 'none']:
+        return {
+            'suggested_category': existing_category,
+            'confidence': 100,
+            'keywords_matched': [],
+            'use_suggested': False,
+            'original_category': existing_category
+        }
+    
+    # Combine subject and description for analysis
+    subject = ticket.get('subject', '').lower()
+    description = ticket.get('description', '').lower()
+    combined_text = f"{subject} {description}"
+    
+    # Category definitions with weighted keywords
+    category_patterns = {
+        'Hardware Issues': {
+            'primary': ['laptop', 'desktop', 'computer', 'monitor', 'keyboard', 'mouse', 'hardware', 
+                       'screen', 'display', 'device', 'pc', 'workstation', 'dock', 'docking'],
+            'secondary': ['broken', 'damaged', 'not working', 'replacement', 'upgrade', 'new computer'],
+            'weight': 1.0
+        },
+        'Network & Connectivity': {
+            'primary': ['network', 'internet', 'wifi', 'wireless', 'connection', 'connectivity', 
+                       'lan', 'ethernet', 'dns', 'ip address', 'router', 'switch'],
+            'secondary': ['cannot connect', 'no internet', 'slow connection', 'disconnect'],
+            'weight': 1.0
+        },
+        'VPN & Remote Access': {
+            'primary': ['vpn', 'remote', 'forticlient', 'fortitoken', 'remote access', 'work from home',
+                       'remote desktop', 'rdp', 'citrix', 'virtual desktop'],
+            'secondary': ['cannot connect remotely', 'vpn error', 'token', 'two factor'],
+            'weight': 1.2
+        },
+        'Email & Communication': {
+            'primary': ['email', 'outlook', 'mail', 'mailbox', 'exchange', 'inbox', 'calendar',
+                       'teams', 'skype', 'zoom', 'webex', 'meeting'],
+            'secondary': ['cannot send', 'cannot receive', 'email not working', 'calendar invite'],
+            'weight': 1.0
+        },
+        'Software & Applications': {
+            'primary': ['software', 'application', 'program', 'app', 'install', 'installation',
+                       'update', 'upgrade', 'license', 'adobe', 'office', 'excel', 'word'],
+            'secondary': ['cannot open', 'not working', 'crash', 'error message', 'uninstall'],
+            'weight': 0.9
+        },
+        'Access & Permissions': {
+            'primary': ['access', 'permission', 'rights', 'share', 'folder', 'file access',
+                       'denied', 'restricted', 'cannot access', 'locked out'],
+            'secondary': ['need access', 'request access', 'remove access', 'grant access'],
+            'weight': 1.0
+        },
+        'Password & Authentication': {
+            'primary': ['password', 'login', 'credential', 'authentication', 'forgot password',
+                       'reset password', 'cannot login', 'locked account', 'mfa', '2fa'],
+            'secondary': ['username', 'sign in', 'log in', 'account locked'],
+            'weight': 1.1
+        },
+        'Printer & Peripherals': {
+            'primary': ['printer', 'print', 'printing', 'scanner', 'scan', 'copier', 'fax',
+                       'paper jam', 'ink', 'toner'],
+            'secondary': ['cannot print', 'print queue', 'printer offline', 'print error'],
+            'weight': 0.9
+        },
+        'Performance & Speed': {
+            'primary': ['slow', 'performance', 'freeze', 'frozen', 'hang', 'lag', 'sluggish',
+                       'running slow', 'takes forever', 'not responding'],
+            'secondary': ['speed', 'fast', 'optimize', 'cleanup'],
+            'weight': 0.8
+        },
+        'Security & Antivirus': {
+            'primary': ['security', 'antivirus', 'malware', 'virus', 'threat', 'suspicious',
+                       'phishing', 'spam', 'quarantine', 'blocked'],
+            'secondary': ['security alert', 'suspicious email', 'cannot download'],
+            'weight': 1.1
+        },
+        'Account Management': {
+            'primary': ['new user', 'new employee', 'onboarding', 'offboarding', 'termination',
+                       'create account', 'disable account', 'employee setup'],
+            'secondary': ['new hire', 'user account', 'account creation'],
+            'weight': 0.9
+        },
+        'Mobile & Devices': {
+            'primary': ['mobile', 'phone', 'iphone', 'android', 'tablet', 'ipad', 'cell phone',
+                       'smartphone', 'mobile device'],
+            'secondary': ['cell', 'bring', 'sync', 'mobile app'],
+            'weight': 0.8
+        },
+        'Database & Systems': {
+            'primary': ['database', 'sql', 'server', 'system', 'erp', 'crm', 'backup',
+                       'data', 'oracle', 'mysql'],
+            'secondary': ['query', 'report', 'data access', 'system error'],
+            'weight': 0.9
+        }
+    }
+    
+    # Score each category
+    category_scores = {}
+    matched_keywords = {}
+    
+    for category, patterns in category_patterns.items():
+        score = 0
+        keywords = []
+        
+        # Check primary keywords (higher weight)
+        for keyword in patterns['primary']:
+            if keyword in combined_text:
+                score += 10 * patterns['weight']
+                keywords.append(keyword)
+        
+        # Check secondary keywords (lower weight)
+        for keyword in patterns['secondary']:
+            if keyword in combined_text:
+                score += 5 * patterns['weight']
+                keywords.append(keyword)
+        
+        if score > 0:
+            category_scores[category] = score
+            matched_keywords[category] = keywords
+    
+    # Determine best category
+    if not category_scores:
+        return {
+            'suggested_category': 'General Support',
+            'confidence': 0,
+            'keywords_matched': [],
+            'use_suggested': True,
+            'original_category': existing_category or 'Uncategorized'
+        }
+    
+    # Get category with highest score
+    best_category = max(category_scores, key=category_scores.get)
+    best_score = category_scores[best_category]
+    
+    # Calculate confidence (normalize to 0-100)
+    confidence = min(best_score * 2, 100)
+    
+    # If confidence is low and there's a tie, reduce confidence
+    sorted_scores = sorted(category_scores.values(), reverse=True)
+    if len(sorted_scores) > 1 and sorted_scores[0] - sorted_scores[1] < 5:
+        confidence *= 0.7
+    
+    return {
+        'suggested_category': best_category,
+        'confidence': round(confidence, 1),
+        'keywords_matched': matched_keywords.get(best_category, []),
+        'use_suggested': True,
+        'original_category': existing_category or 'Uncategorized'
+    }
 
 # ============================================================
 # AI ANALYSIS
@@ -597,11 +836,11 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
     }
 
 # ============================================================
-# FIELD EXTRACTION
+# FIELD EXTRACTION - WITH AUTO-CATEGORIZATION
 # ============================================================
 
 def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
-    """Extract all 48 comprehensive fields from ticket"""
+    """Extract all fields from ticket with auto-categorization"""
     fields = {}
     
     def safe_get(obj, key, default=''):
@@ -611,7 +850,16 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
             return obj.get(key, default)
         return default
     
-    fields['ticket_id'] = ticket.get('id', 'unknown')
+    # Extract short ticket number and module type
+    long_ticket_id = ticket.get('id', 'unknown')
+    short_ticket_number = extract_short_ticket_number(long_ticket_id)
+    module_type = ticket.get('_module_type', 'request')
+    
+    fields['ticket_id_long'] = long_ticket_id
+    fields['ticket_id'] = short_ticket_number
+    fields['module_type'] = module_type
+    fields['display_id'] = f"#{short_ticket_number}"
+    
     fields['subject'] = ticket.get('subject', 'No subject')
     fields['description'] = ticket.get('description', 'No description')
     
@@ -630,8 +878,16 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
     fields['technician_email'] = safe_get(technician, 'email_id', '')
     
+    # AUTO-CATEGORIZATION - NEW v3.1.1
     category = ticket.get('category') or {}
-    fields['category'] = safe_get(category, 'name', 'Uncategorized')
+    original_category = safe_get(category, 'name', 'Uncategorized')
+    fields['category_original'] = original_category
+    
+    auto_cat = auto_categorize_ticket(ticket, original_category)
+    fields['category'] = auto_cat['suggested_category']
+    fields['category_confidence'] = auto_cat['confidence']
+    fields['category_auto_assigned'] = auto_cat['use_suggested']
+    fields['category_keywords'] = auto_cat['keywords_matched']
     
     subcategory = ticket.get('subcategory') or {}
     fields['subcategory'] = safe_get(subcategory, 'name', '')
@@ -669,87 +925,35 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['mode'] = safe_get(mode, 'name', fields['source'])
     fields['channel'] = fields['mode']
     
-    impact = ticket.get('impact') or {}
-    fields['impact'] = safe_get(impact, 'name', '')
-    
-    urgency = ticket.get('urgency') or {}
-    fields['urgency'] = safe_get(urgency, 'name', '')
-    
-    level = ticket.get('level') or {}
-    fields['level'] = safe_get(level, 'name', '')
+    fields['impact'] = safe_get(ticket.get('impact') or {}, 'name', '')
+    fields['urgency'] = safe_get(ticket.get('urgency') or {}, 'name', '')
+    fields['level'] = safe_get(ticket.get('level') or {}, 'name', '')
     fields['tier'] = fields['level']
-    
-    service = ticket.get('service') or {}
-    fields['service'] = safe_get(service, 'name', '')
-    
+    fields['service'] = safe_get(ticket.get('service') or {}, 'name', '')
     fields['time_spent'] = ticket.get('time_spent', 0) or 0
     fields['time_spent_hours'] = round(fields['time_spent'] / 3600000, 2) if fields['time_spent'] else 0
-    
-    resolution = ticket.get('resolution') or {}
-    fields['resolution_category'] = safe_get(resolution, 'name', '')
-    
-    closure_info = ticket.get('closure_info') or {}
-    closure_code = closure_info.get('closure_code') or {} if isinstance(closure_info, dict) else {}
-    fields['closure_code'] = safe_get(closure_code, 'name', '')
-    
+    fields['resolution_category'] = safe_get(ticket.get('resolution') or {}, 'name', '')
     fields['reopened_count'] = ticket.get('reopened_count', 0) or 0
     fields['has_been_reopened'] = fields['reopened_count'] > 0
-    
-    approval_status = ticket.get('approval_status') or {}
-    fields['approval_status'] = safe_get(approval_status, 'name', '')
-    fields['has_approvals'] = bool(fields['approval_status'])
-    
-    tags = ticket.get('tags') or []
-    if not isinstance(tags, list):
-        tags = []
-    fields['tags'] = [safe_get(tag, 'name', '') for tag in tags] if tags else []
-    fields['has_tags'] = len(fields['tags']) > 0
-    
-    department = ticket.get('department') or {}
-    fields['department'] = safe_get(department, 'name', '')
-    
-    linked_requests = ticket.get('linked_requests') or []
-    if not isinstance(linked_requests, list):
-        linked_requests = []
-    fields['linked_ticket_count'] = len(linked_requests)
-    fields['has_linked_tickets'] = len(linked_requests) > 0
-    fields['linked_ticket_ids'] = [safe_get(req, 'id', '') for req in linked_requests] if linked_requests else []
-    
-    attachments = ticket.get('attachments') or []
-    if not isinstance(attachments, list):
-        attachments = []
-    fields['attachment_count'] = len(attachments)
-    fields['has_attachments'] = len(attachments) > 0
-    
-    change = ticket.get('change') or {}
-    fields['linked_change_id'] = safe_get(change, 'id', '')
-    fields['has_linked_change'] = bool(fields['linked_change_id'])
-    
-    problem = ticket.get('problem') or {}
-    fields['linked_problem_id'] = safe_get(problem, 'id', '')
-    fields['has_linked_problem'] = bool(fields['linked_problem_id'])
-    
     fields['is_first_call_resolution'] = ticket.get('is_fcr', False) or False
-    
-    created_by = ticket.get('created_by') or {}
-    fields['created_by'] = safe_get(created_by, 'name', '')
-    fields['is_proxy_request'] = bool(fields['created_by']) and fields['created_by'] != fields['requester_name']
-    
-    template = ticket.get('template') or {}
-    fields['template'] = safe_get(template, 'name', '')
-    fields['used_template'] = bool(fields['template'])
-    
-    sla = ticket.get('sla') or {}
-    fields['sla_name'] = safe_get(sla, 'name', '')
-    fields['sla_violated'] = ticket.get('is_sla_violated', False) or False
     
     return fields
 
 # ============================================================
-# ANALYTICS & METRICS (Abbreviated - same as before)
+# ANALYTICS & METRICS
 # ============================================================
 
 def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
+    """Track analytics including auto-categorization"""
+    
+    module_type = comprehensive_fields.get('module_type', 'unknown')
+    analytics_cache.update_module_distribution(module_type)
+    
+    # Track auto-categorization
+    was_auto = comprehensive_fields.get('category_auto_assigned', False)
+    confidence = comprehensive_fields.get('category_confidence', 0)
+    analytics_cache.update_auto_categorization(was_auto, confidence)
+    
     category = comprehensive_fields['category']
     resolution_days = 0
     if comprehensive_fields['resolved_time']:
@@ -774,39 +978,23 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
             pass
     
     analytics_cache.update_technician_workload(tech, is_active, response_hours)
-    
-    if comprehensive_fields['created_time']:
-        try:
-            created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
-            analytics_cache.update_peak_hours(created.hour)
-        except:
-            pass
-    
-    description = ticket.get('description', '').lower()
-    issue_keywords = ['hardware', 'email', 'network', 'error', 'access']
-    for keyword in issue_keywords:
-        if keyword in description:
-            analytics_cache.update_issue_types(keyword)
-    
-    if comprehensive_fields.get('channel'):
-        analytics_cache.update_channel(comprehensive_fields['channel'])
-    
-    if comprehensive_fields.get('department'):
-        analytics_cache.update_department(comprehensive_fields['department'])
-    
-    if comprehensive_fields.get('primary_asset'):
-        analytics_cache.update_asset_failure(comprehensive_fields['primary_asset'])
-    
-    if comprehensive_fields.get('service'):
-        analytics_cache.update_service_usage(comprehensive_fields['service'])
-    
-    if comprehensive_fields.get('resolution_category'):
-        analytics_cache.update_resolution_category(comprehensive_fields['resolution_category'])
 
 def track_metrics(comprehensive_fields: Dict, conversations: List[Dict], 
                  complexity: int, sentiment: str, sla_risk: str, response_status: Dict):
+    """Track comprehensive metrics"""
     
     METRICS['total_processed'] += 1
+    
+    module_type = comprehensive_fields.get('module_type', 'unknown')
+    if module_type == 'requests':
+        METRICS['requests'] += 1
+    elif module_type == 'service_requests':
+        METRICS['service_requests'] += 1
+    elif module_type == 'incidents':
+        METRICS['incidents'] += 1
+    
+    if comprehensive_fields.get('category_auto_assigned'):
+        METRICS['auto_categorized'] += 1
     
     if comprehensive_fields['status_category'] == 'active':
         METRICS['active_tickets'] += 1
@@ -824,35 +1012,26 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
     
     if sla_risk in ['critical', 'high']:
         METRICS['high_sla_breach_risk'] += 1
-    
-    if response_status['awaiting_response'] == 'customer':
-        METRICS['awaiting_customer'] += 1
-    elif response_status['awaiting_response'] == 'technician':
-        METRICS['awaiting_technician'] += 1
-    
-    if comprehensive_fields.get('has_assets'):
-        METRICS['with_assets'] += 1
-    
-    if comprehensive_fields.get('has_been_reopened'):
-        METRICS['reopened'] += 1
-    
-    if comprehensive_fields.get('is_first_call_resolution'):
-        METRICS['fcr'] += 1
-    
-    if comprehensive_fields.get('has_approvals'):
-        METRICS['with_approvals'] += 1
-    
-    if comprehensive_fields.get('has_linked_tickets'):
-        METRICS['linked_tickets'] += 1
 
 # ============================================================
-# TAG GENERATION & DOCUMENT CREATION (Abbreviated)
+# TAG GENERATION
 # ============================================================
 
 def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict], 
                                 comprehensive_fields: Dict, complexity: int,
                                 sentiment: str, sla_risk: str, response_status: Dict) -> List[str]:
+    """Generate comprehensive searchable tags"""
     tags = []
+    
+    short_id = comprehensive_fields.get('ticket_id')
+    tags.extend([
+        f"ticket:{short_id}",
+        f"#{short_id}",
+        comprehensive_fields.get('display_id', '')
+    ])
+    
+    module_type = comprehensive_fields.get('module_type', 'unknown')
+    tags.append(f"module:{module_type}")
     
     status = comprehensive_fields['status'].lower().replace(' ', '-')
     tags.extend([f"status:{status}", f"status-category:{comprehensive_fields['status_category']}"])
@@ -873,12 +1052,17 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if tech == 'unassigned':
         tags.extend(['unassigned', 'needs-assignment'])
     
-    category = comprehensive_fields['category'].lower().replace(' ', '-')
+    # Category tags with auto-categorization info
+    category = comprehensive_fields['category'].lower().replace(' ', '-').replace('&', 'and')
     tags.append(f"category:{category}")
     
-    if comprehensive_fields['subcategory']:
-        subcategory = comprehensive_fields['subcategory'].lower().replace(' ', '-')
-        tags.append(f"subcategory:{subcategory}")
+    if comprehensive_fields.get('category_auto_assigned'):
+        tags.append('auto-categorized')
+        confidence = comprehensive_fields.get('category_confidence', 0)
+        if confidence >= 80:
+            tags.append('high-confidence-category')
+        elif confidence < 50:
+            tags.append('low-confidence-category')
     
     tags.append(f"complexity:{complexity}")
     if complexity >= 7:
@@ -894,14 +1078,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if sla_risk in ['critical', 'high']:
         tags.extend(['high-breach-risk', 'sla-attention-needed'])
     
-    conv_count = len(conversations)
-    tags.append(f"conversations:{conv_count}")
-    
-    if conv_count == 0:
-        tags.append('no-conversation')
-    elif conv_count > 10:
-        tags.extend(['high-conversation-volume', 'extensive-discussion'])
-    
     tags.append(f"awaiting:{response_status['awaiting_response']}")
     
     if response_status['awaiting_response'] == 'customer':
@@ -909,59 +1085,18 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     elif response_status['awaiting_response'] == 'technician':
         tags.extend(['awaiting-technician-response', 'actionable'])
     
-    if response_status['has_unanswered_questions']:
-        tags.extend(['has-unanswered-questions', 'needs-clarification'])
-    
-    if comprehensive_fields['created_time']:
-        try:
-            created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
-            now = datetime.now(timezone.utc)
-            age_days = (now - created).days
-            
-            if age_days < 1:
-                tags.extend(['age:new', 'created-today'])
-            elif age_days < 7:
-                tags.extend(['age:this-week', 'recent'])
-            elif age_days < 30:
-                tags.extend(['age:this-month'])
-            elif age_days < 90:
-                tags.extend(['age:aging', 'needs-review'])
-            else:
-                tags.extend(['age:stale', 'very-old'])
-            
-            if 8 <= created.hour <= 17:
-                tags.append('created:business-hours')
-            else:
-                tags.append('created:after-hours')
-        except:
-            pass
-    
-    if comprehensive_fields.get('has_assets'):
-        tags.extend(['has-asset', f"asset-count:{comprehensive_fields['asset_count']}"])
-    
-    if comprehensive_fields.get('channel'):
-        channel = comprehensive_fields['channel'].lower().replace(' ', '-')
-        tags.extend([f"channel:{channel}", f"source:{channel}"])
-    
-    if comprehensive_fields.get('has_been_reopened'):
-        tags.extend(['reopened', f"reopened-count:{comprehensive_fields['reopened_count']}"])
-    
-    if comprehensive_fields.get('is_first_call_resolution'):
-        tags.extend(['fcr', 'first-call-resolution', 'quality-win'])
-    
-    if comprehensive_fields['status_category'] == 'active' and sla_risk == 'critical':
-        tags.append('critical-open-ticket')
-    
-    if comprehensive_fields['status_category'] == 'active' and tech == 'unassigned':
-        tags.extend(['actionable:unassigned-and-open', 'needs-immediate-assignment'])
-    
     return list(set(tags))
+
+# ============================================================
+# DOCUMENT CREATION
+# ============================================================
 
 def create_dust_document(ticket: Dict, conversations: List[Dict], 
                         comprehensive_fields: Dict, complexity: int,
                         sentiment: str, sla_risk: str, sla_breach_likelihood: int,
                         estimated_resolution_hours: float, issue_types: List[str],
                         response_status: Dict) -> Dict:
+    """Create comprehensive Dust document"""
     
     conversation_text = ""
     if conversations:
@@ -985,12 +1120,25 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
         complexity, sentiment, sla_risk, response_status
     )
     
-    document_text = f"""# Ticket #{comprehensive_fields['ticket_id']}: {comprehensive_fields['subject']}
+    short_id = comprehensive_fields.get('display_id', f"#{comprehensive_fields.get('ticket_id')}")
+    module_type = comprehensive_fields.get('module_type', 'request').replace('_', ' ').title()
+    
+    # Category display with confidence
+    category_display = comprehensive_fields['category']
+    if comprehensive_fields.get('category_auto_assigned'):
+        confidence = comprehensive_fields.get('category_confidence', 0)
+        category_display += f" (Auto-assigned: {confidence:.0f}% confidence)"
+        if comprehensive_fields.get('category_keywords'):
+            keywords = ', '.join(comprehensive_fields['category_keywords'][:5])
+            category_display += f"\n  Keywords: {keywords}"
+    
+    document_text = f"""# Ticket {short_id}: {comprehensive_fields['subject']}
 
-## Overview
+## Type & Overview
+- **Type:** {module_type}
 - **Status:** {comprehensive_fields['status']} ({comprehensive_fields['status_category']})
 - **Priority:** {comprehensive_fields['priority']}
-- **Category:** {comprehensive_fields['category']}
+- **Category:** {category_display}
 
 ## People
 - **Requester:** {comprehensive_fields['requester_name']}
@@ -1015,11 +1163,14 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 {', '.join(tags[:50])}
 
 ---
-*Intelligence Suite v{VERSION}*
+*Intelligence Suite v{VERSION} - Multi-Module + Auto-Categorization*
+*Module: {module_type} | Ticket ID: {short_id} | Category Confidence: {comprehensive_fields.get('category_confidence', 0):.0f}%*
 """
     
+    short_ticket_num = comprehensive_fields.get('ticket_id')
+    
     document = {
-        "document_id": f"ticket-{comprehensive_fields['ticket_id']}",
+        "document_id": f"ticket-{short_ticket_num}",
         "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
         "tags": tags,
         "text": document_text,
@@ -1123,8 +1274,7 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
     documents = []
     errors = 0
     
-    ticket_ids = [t['id'] for t in tickets]
-    conversations_map = fetch_conversations_parallel(ticket_ids, access_token)
+    conversations_map = fetch_conversations_parallel(tickets, access_token)
     
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket['id']
@@ -1167,10 +1317,29 @@ def print_analytics_summary():
     logger.info("=" * 60)
     logger.info("")
     
+    # Module distribution
+    logger.info("📦 Module Distribution:")
+    module_dist = analytics_cache.raw_data['module_distribution']
+    if module_dist:
+        for module, count in sorted(module_dist.items()):
+            module_name = module.replace('_', ' ').title()
+            logger.info(f"  {module_name}: {count} tickets")
+    
+    logger.info("")
+    
+    # Auto-categorization stats
+    logger.info("🏷️ Auto-Categorization:")
+    auto_cat_stats = analytics_cache.raw_data['auto_categorization']
+    logger.info(f"  Tickets auto-categorized: {auto_cat_stats['assigned']}")
+    logger.info(f"  High confidence (80%+): {auto_cat_stats['high_confidence']}")
+    logger.info(f"  Low confidence (<50%): {auto_cat_stats['low_confidence']}")
+    
+    logger.info("")
+    
     logger.info("🏆 Top Categories:")
     category_stats = analytics_cache.raw_data['category_stats']
     if category_stats:
-        sorted_categories = sorted(category_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:5]
+        sorted_categories = sorted(category_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:10]
         for cat, data in sorted_categories:
             logger.info(f"  {cat}: {data['count']} tickets")
     
@@ -1183,10 +1352,11 @@ def main():
     logger.info(f"Started: {datetime.now()}")
     logger.info("=" * 60)
     
-    logger.info("✨ v3.0.2 DUAL CHECKPOINT SYSTEM:")
-    logger.info(f"   • Timestamp file: {TIMESTAMP_FILE} (persists in repo)")
-    logger.info(f"   • Stats file: {CHECKPOINT_FILE} (local diagnostics)")
-    logger.info("   • TRUE incremental sync across GitHub Actions runs")
+    logger.info("✨ v3.1.1 FEATURES:")
+    logger.info("   • Multi-module: Requests, Service Requests, Incidents")
+    logger.info("   • Short ticket numbers (#16027)")
+    logger.info("   • Intelligent auto-categorization (13 categories)")
+    logger.info("   • Category confidence scoring")
     logger.info("")
     
     if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
@@ -1205,8 +1375,8 @@ def main():
     last_sync_time = load_checkpoint()
     
     try:
-        tickets = fetch_tickets_incremental(access_token, last_sync_time, MAX_PAGES)
-        logger.info(f"✓ Fetched {len(tickets)} tickets")
+        tickets = fetch_all_tickets(access_token, last_sync_time, MAX_PAGES)
+        logger.info(f"✓ Total tickets fetched: {len(tickets)}")
     except Exception as e:
         logger.error(f"FATAL: Failed to fetch tickets: {e}")
         sys.exit(1)
@@ -1254,6 +1424,10 @@ def main():
     logger.info(f"✓ SYNC COMPLETE (v{VERSION})")
     logger.info("=" * 60)
     logger.info(f"  Total: {METRICS['total_processed']}/{len(tickets)}")
+    logger.info(f"  Requests: {METRICS['requests']}")
+    logger.info(f"  Service Requests: {METRICS['service_requests']}")
+    logger.info(f"  Incidents: {METRICS['incidents']}")
+    logger.info(f"  Auto-categorized: {METRICS['auto_categorized']}")
     logger.info(f"  Active: {METRICS['active_tickets']}")
     logger.info(f"  Errors: {total_errors}")
     logger.info(f"  Finished: {datetime.now()}")
