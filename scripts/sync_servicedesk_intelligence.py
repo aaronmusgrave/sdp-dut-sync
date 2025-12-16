@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.1 - COMPLETE WITH AUTO-CATEGORIZATION
+ServiceDesk Intelligence Suite v3.1.2 - API ENDPOINT FIX
 Syncs Requests, Service Requests, AND Incidents with intelligent categorization
+
+Changes in v3.1.2:
+- Fixed API endpoint structure (uses single /api/v3/requests)
+- Post-fetch ticket classification by type
+- Proper handling of ServiceDesk Plus Cloud API
 
 Changes in v3.1.1:
 - Intelligent auto-categorization of tickets
 - 13 predefined categories with keyword matching
 - Confidence scoring (0-100%)
-- Preserves existing categories when present
 
 Changes in v3.1.0:
 - Multi-module support: requests, service_requests, incidents
@@ -35,7 +39,7 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.1"
+VERSION = "3.1.2"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -51,13 +55,6 @@ MAX_PAGES = None
 # Parallel upload configuration
 MAX_CONCURRENT_UPLOADS = 5
 UPLOAD_TIMEOUT = 30
-
-# Module endpoints to fetch
-TICKET_MODULES = {
-    'requests': '/api/v3/requests',
-    'service_requests': '/api/v3/service_requests',
-    'incidents': '/api/v3/incidents'
-}
 
 # Connection pooling
 SESSION = requests.Session()
@@ -203,13 +200,12 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 def extract_short_ticket_number(ticket_id: str) -> str:
     """
     Extract short ticket number from long ID
-    150534000029530963 -> 29530963 (meaningful digits)
+    150534000029530963 -> 29530963
     """
     try:
         ticket_id_str = str(ticket_id)
         
         if len(ticket_id_str) > 10:
-            # Get last 8 digits and remove leading zeros
             short_num = ticket_id_str[-8:].lstrip('0')
             return short_num if short_num else ticket_id_str[-5:]
         
@@ -327,12 +323,60 @@ def get_access_token() -> str:
     raise Exception("Failed to obtain access token after max retries")
 
 # ============================================================
-# TICKET FETCHING - MULTI-MODULE
+# TICKET TYPE CLASSIFICATION - NEW v3.1.2
 # ============================================================
 
-def fetch_tickets_from_module(access_token: str, module_name: str, endpoint: str, 
-                              last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
-    """Fetch tickets from a specific module"""
+def classify_ticket_type(ticket: Dict) -> str:
+    """
+    Classify ticket type based on request_type, template, or other fields
+    ServiceDesk Plus Cloud uses single endpoint for all tickets
+    """
+    # Check template name
+    template = ticket.get('template', {})
+    template_name = template.get('name', '').lower() if template else ''
+    
+    # Check request type
+    request_type = ticket.get('request_type', {})
+    req_type_name = request_type.get('name', '').lower() if request_type else ''
+    
+    # Check mode
+    mode = ticket.get('mode', {})
+    mode_name = mode.get('name', '').lower() if mode else ''
+    
+    # Check category
+    category = ticket.get('category', {})
+    category_name = category.get('name', '').lower() if category else ''
+    
+    # Classify as Service Request
+    service_keywords = ['service', 'catalog', 'service request', 'service catalog']
+    if any(keyword in template_name for keyword in service_keywords):
+        return 'service_requests'
+    if any(keyword in req_type_name for keyword in service_keywords):
+        return 'service_requests'
+    if ticket.get('is_service_request', False):
+        return 'service_requests'
+    
+    # Classify as Incident
+    incident_keywords = ['incident', 'major incident', 'critical incident']
+    if any(keyword in template_name for keyword in incident_keywords):
+        return 'incidents'
+    if any(keyword in req_type_name for keyword in incident_keywords):
+        return 'incidents'
+    if any(keyword in category_name for keyword in incident_keywords):
+        return 'incidents'
+    if ticket.get('is_incident', False):
+        return 'incidents'
+    
+    # Default to request
+    return 'requests'
+
+# ============================================================
+# TICKET FETCHING - FIXED v3.1.2
+# ============================================================
+
+def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime], 
+                           page_limit: Optional[int] = None) -> List[Dict]:
+    """Fetch all tickets from single /api/v3/requests endpoint"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -361,15 +405,13 @@ def fetch_tickets_from_module(access_token: str, module_name: str, endpoint: str
     if search_criteria:
         list_info["list_info"]["search_criteria"] = search_criteria
     
-    url = f"{SDP_API_BASE}{endpoint}"
+    url = f"{SDP_API_BASE}/requests"
     all_tickets = []
     page = 1
     
-    logger.info(f"  Fetching {module_name}...")
-    
     while True:
         if page_limit and page > page_limit:
-            logger.warning(f"    Reached page limit of {page_limit} for {module_name}")
+            logger.warning(f"  Reached page limit of {page_limit}")
             break
         
         list_info["list_info"]["start_index"] = (page - 1) * 100 + 1
@@ -380,78 +422,74 @@ def fetch_tickets_from_module(access_token: str, module_name: str, endpoint: str
             
             if response.status_code == 200:
                 data = response.json()
-                tickets = data.get('requests', data.get('service_requests', data.get('incidents', [])))
+                tickets = data.get('requests', [])
                 
                 if not tickets:
                     break
                 
-                for ticket in tickets:
-                    ticket['_module_type'] = module_name
-                
                 all_tickets.extend(tickets)
-                logger.info(f"    Page {page}: Found {len(tickets)} {module_name} (Total: {len(all_tickets)})")
+                logger.info(f"  Page {page}: Found {len(tickets)} tickets (Total: {len(all_tickets)})")
                 
                 list_info_response = data.get('list_info', {})
                 has_more = list_info_response.get('has_more_rows', False)
                 
                 if not has_more:
+                    logger.info(f"  No more pages. Total fetched: {len(all_tickets)}")
                     break
                 
                 page += 1
                 time.sleep(0.1)
                 
             elif response.status_code == 429:
-                logger.warning(f"    Rate limited on {module_name} page {page}. Waiting 30s...")
+                logger.warning(f"  Rate limited on page {page}. Waiting 30s...")
                 time.sleep(30)
                 continue
-            elif response.status_code == 404:
-                logger.warning(f"    {module_name} endpoint not found or no access (404)")
-                break
             else:
-                logger.error(f"    API error for {module_name}: {response.status_code}")
+                logger.error(f"  API error: {response.status_code}")
                 break
                 
         except Exception as e:
-            logger.error(f"    Error fetching {module_name} page {page}: {e}")
+            logger.error(f"  Error fetching page {page}: {e}")
             break
-    
-    if all_tickets:
-        logger.info(f"  ✓ Fetched {len(all_tickets)} {module_name}")
-    else:
-        logger.info(f"  ℹ No {module_name} found")
     
     return all_tickets
 
-def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime], page_limit: Optional[int] = None) -> List[Dict]:
-    """Fetch tickets from ALL modules"""
+def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime], 
+                     page_limit: Optional[int] = None) -> List[Dict]:
+    """Fetch all tickets and classify them by type"""
     
     if last_sync_time:
         logger.info(f"📊 INCREMENTAL SYNC: Fetching tickets updated since {last_sync_time}")
     else:
         logger.info("📊 FULL SYNC: Fetching ALL tickets (no checkpoint found)")
     
-    logger.info("  Fetching from 3 modules: Requests, Service Requests, Incidents")
+    logger.info("  No page limit - fetching ALL tickets")
     
-    all_tickets = []
+    # Fetch all tickets from single endpoint
+    all_tickets = fetch_tickets_from_api(access_token, last_sync_time, page_limit)
     
-    for module_name, endpoint in TICKET_MODULES.items():
-        try:
-            module_tickets = fetch_tickets_from_module(
-                access_token, module_name, endpoint, last_sync_time, page_limit
-            )
-            all_tickets.extend(module_tickets)
-        except Exception as e:
-            logger.error(f"  Failed to fetch {module_name}: {e}")
+    if not all_tickets:
+        logger.info("✓ Fetched 0 tickets")
+        return []
     
-    logger.info(f"✓ Total fetched across all modules: {len(all_tickets)}")
+    logger.info(f"✓ Fetched {len(all_tickets)} tickets")
+    logger.info("")
+    logger.info("📋 Classifying tickets by type...")
     
-    module_counts = {}
+    # Classify each ticket
+    module_counts = {'requests': 0, 'service_requests': 0, 'incidents': 0}
     for ticket in all_tickets:
-        module_type = ticket.get('_module_type', 'unknown')
-        module_counts[module_type] = module_counts.get(module_type, 0) + 1
+        ticket_type = classify_ticket_type(ticket)
+        ticket['_module_type'] = ticket_type
+        module_counts[ticket_type] += 1
     
-    for module, count in module_counts.items():
-        logger.info(f"  - {module}: {count}")
+    # Report classification
+    logger.info("✓ Classification complete:")
+    for module_type in ['requests', 'service_requests', 'incidents']:
+        count = module_counts[module_type]
+        if count > 0:
+            module_name = module_type.replace('_', ' ').title()
+            logger.info(f"  • {module_name}: {count}")
     
     return all_tickets
 
@@ -459,16 +497,9 @@ def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime], pag
 # CONVERSATION FETCHING
 # ============================================================
 
-def fetch_conversation_single(ticket_id: str, module_type: str, access_token: str) -> List[Dict]:
+def fetch_conversation_single(ticket_id: str, access_token: str) -> List[Dict]:
     """Fetch conversations for a single ticket"""
-    endpoint_map = {
-        'requests': 'requests',
-        'service_requests': 'service_requests',
-        'incidents': 'incidents'
-    }
-    
-    endpoint = endpoint_map.get(module_type, 'requests')
-    url = f"{SDP_API_BASE}/{endpoint}/{ticket_id}/conversations"
+    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
     
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
@@ -492,12 +523,7 @@ def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_wor
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticket = {
-            executor.submit(
-                fetch_conversation_single, 
-                ticket['id'], 
-                ticket.get('_module_type', 'requests'),
-                access_token
-            ): ticket['id']
+            executor.submit(fetch_conversation_single, ticket['id'], access_token): ticket['id']
             for ticket in tickets
         }
         
@@ -513,13 +539,12 @@ def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_wor
     return conversations_map
 
 # ============================================================
-# AUTO-CATEGORIZATION - NEW v3.1.1
+# AUTO-CATEGORIZATION
 # ============================================================
 
 def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[str, Any]:
     """
     Automatically categorize ticket based on content analysis
-    Returns category, confidence, and matched keywords
     """
     
     # If ticket already has a meaningful category, keep it
@@ -878,7 +903,7 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
     fields['technician_email'] = safe_get(technician, 'email_id', '')
     
-    # AUTO-CATEGORIZATION - NEW v3.1.1
+    # AUTO-CATEGORIZATION
     category = ticket.get('category') or {}
     original_category = safe_get(category, 'name', 'Uncategorized')
     fields['category_original'] = original_category
@@ -944,12 +969,11 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
 # ============================================================
 
 def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
-    """Track analytics including auto-categorization"""
+    """Track analytics"""
     
     module_type = comprehensive_fields.get('module_type', 'unknown')
     analytics_cache.update_module_distribution(module_type)
     
-    # Track auto-categorization
     was_auto = comprehensive_fields.get('category_auto_assigned', False)
     confidence = comprehensive_fields.get('category_confidence', 0)
     analytics_cache.update_auto_categorization(was_auto, confidence)
@@ -981,7 +1005,7 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
 
 def track_metrics(comprehensive_fields: Dict, conversations: List[Dict], 
                  complexity: int, sentiment: str, sla_risk: str, response_status: Dict):
-    """Track comprehensive metrics"""
+    """Track metrics"""
     
     METRICS['total_processed'] += 1
     
@@ -1052,7 +1076,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     if tech == 'unassigned':
         tags.extend(['unassigned', 'needs-assignment'])
     
-    # Category tags with auto-categorization info
     category = comprehensive_fields['category'].lower().replace(' ', '-').replace('&', 'and')
     tags.append(f"category:{category}")
     
@@ -1278,7 +1301,6 @@ def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int,
     
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket['id']
-        global_index = (batch_num - 1) * BATCH_SIZE + i
         
         try:
             conversations = conversations_map.get(ticket_id, [])
@@ -1328,7 +1350,7 @@ def print_analytics_summary():
     logger.info("")
     
     # Auto-categorization stats
-    logger.info("🏷️ Auto-Categorization:")
+    logger.info("🏷️  Auto-Categorization:")
     auto_cat_stats = analytics_cache.raw_data['auto_categorization']
     logger.info(f"  Tickets auto-categorized: {auto_cat_stats['assigned']}")
     logger.info(f"  High confidence (80%+): {auto_cat_stats['high_confidence']}")
@@ -1352,11 +1374,12 @@ def main():
     logger.info(f"Started: {datetime.now()}")
     logger.info("=" * 60)
     
-    logger.info("✨ v3.1.1 FEATURES:")
+    logger.info("✨ v3.1.2 FEATURES:")
     logger.info("   • Multi-module: Requests, Service Requests, Incidents")
     logger.info("   • Short ticket numbers (#16027)")
     logger.info("   • Intelligent auto-categorization (13 categories)")
     logger.info("   • Category confidence scoring")
+    logger.info("   • Fixed API endpoint structure")
     logger.info("")
     
     if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
