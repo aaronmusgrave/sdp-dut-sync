@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.2 - API ENDPOINT FIX
-Syncs Requests, Service Requests, AND Incidents with intelligent categorization
+ServiceDesk Intelligence Suite v3.1.3 - SKIP TRACKING & RETRY LOGIC
+Syncs Requests, Service Requests, AND Incidents with comprehensive error tracking
+
+Changes in v3.1.3:
+- Explicit skip tracking with reasons
+- Retry mechanism for failed tickets (3 attempts)
+- Detailed logging of all failures
+- Skipped tickets report saved to file
+- Better error visibility
 
 Changes in v3.1.2:
-- Fixed API endpoint structure (uses single /api/v3/requests)
-- Post-fetch ticket classification by type
-- Proper handling of ServiceDesk Plus Cloud API
+- Fixed API endpoint structure
+- Post-fetch ticket classification
 
 Changes in v3.1.1:
-- Intelligent auto-categorization of tickets
-- 13 predefined categories with keyword matching
-- Confidence scoring (0-100%)
-
-Changes in v3.1.0:
-- Multi-module support: requests, service_requests, incidents
-- Short ticket numbers (#16027)
-- Module type tracking
+- Intelligent auto-categorization
+- 13 predefined categories
 """
 
 import os
@@ -39,7 +39,7 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.2"
+VERSION = "3.1.3"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -48,6 +48,7 @@ RETRY_DELAY = 5
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 TIMESTAMP_FILE = str(SCRIPT_DIR / 'last_sync_time.txt')
 CHECKPOINT_FILE = str(SCRIPT_DIR / 'checkpoint.json')
+SKIPPED_TICKETS_FILE = str(SCRIPT_DIR / 'skipped_tickets.json')  # NEW v3.1.3
 
 REQUEST_TIMEOUT = 30
 MAX_PAGES = None
@@ -65,6 +66,10 @@ ADAPTER = requests.adapters.HTTPAdapter(
 )
 SESSION.mount('http://', ADAPTER)
 SESSION.mount('https://', ADAPTER)
+
+# Skip tracking - NEW v3.1.3
+SKIPPED_TICKETS = []
+SKIP_LOCK = Lock()
 
 # Cache
 CACHE = {
@@ -156,7 +161,10 @@ METRICS = {
     'fcr': 0,
     'with_approvals': 0,
     'linked_tickets': 0,
-    'auto_categorized': 0
+    'auto_categorized': 0,
+    'skipped': 0,  # NEW v3.1.3
+    'retried': 0,  # NEW v3.1.3
+    'failed_after_retry': 0  # NEW v3.1.3
 }
 
 # ============================================================
@@ -169,6 +177,83 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# SKIP TRACKING - NEW v3.1.3
+# ============================================================
+
+def track_skipped_ticket(ticket_id: str, ticket_subject: str, reason: str, stage: str):
+    """Track a skipped ticket with details"""
+    global SKIPPED_TICKETS
+    
+    skip_info = {
+        'ticket_id': ticket_id,
+        'subject': ticket_subject,
+        'reason': reason,
+        'stage': stage,
+        'timestamp': datetime.now(timezone.utc).isoformat()
+    }
+    
+    with SKIP_LOCK:
+        SKIPPED_TICKETS.append(skip_info)
+        METRICS['skipped'] += 1
+    
+    logger.warning(f"⚠️  SKIPPED Ticket {ticket_id} ({stage}): {reason}")
+
+def save_skipped_tickets_report():
+    """Save skipped tickets to JSON file for review"""
+    if not SKIPPED_TICKETS:
+        return
+    
+    try:
+        report = {
+            'sync_time': datetime.now(timezone.utc).isoformat(),
+            'version': VERSION,
+            'total_skipped': len(SKIPPED_TICKETS),
+            'skipped_tickets': SKIPPED_TICKETS
+        }
+        
+        with open(SKIPPED_TICKETS_FILE, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        logger.info(f"✓ Saved skipped tickets report: {SKIPPED_TICKETS_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to save skipped tickets report: {e}")
+
+def print_skip_summary():
+    """Print summary of skipped tickets"""
+    if not SKIPPED_TICKETS:
+        logger.info("✓ No tickets were skipped!")
+        return
+    
+    logger.warning("")
+    logger.warning("=" * 60)
+    logger.warning(f"⚠️  SKIPPED TICKETS SUMMARY")
+    logger.warning("=" * 60)
+    logger.warning(f"Total skipped: {len(SKIPPED_TICKETS)}")
+    logger.warning("")
+    
+    # Group by reason
+    reasons = defaultdict(list)
+    for skip in SKIPPED_TICKETS:
+        reasons[skip['reason']].append(skip['ticket_id'])
+    
+    logger.warning("By Reason:")
+    for reason, ticket_ids in sorted(reasons.items(), key=lambda x: len(x[1]), reverse=True):
+        logger.warning(f"  • {reason}: {len(ticket_ids)} tickets")
+    
+    logger.warning("")
+    logger.warning("First 10 skipped tickets:")
+    for skip in SKIPPED_TICKETS[:10]:
+        logger.warning(f"  • #{skip['ticket_id']}: {skip['subject'][:50]}")
+        logger.warning(f"    Reason: {skip['reason']} (Stage: {skip['stage']})")
+    
+    if len(SKIPPED_TICKETS) > 10:
+        logger.warning(f"  ... and {len(SKIPPED_TICKETS) - 10} more")
+    
+    logger.warning("")
+    logger.warning(f"Full report saved to: {SKIPPED_TICKETS_FILE}")
+    logger.warning("=" * 60)
 
 # ============================================================
 # CREDENTIAL MANAGEMENT
@@ -198,10 +283,7 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 # ============================================================
 
 def extract_short_ticket_number(ticket_id: str) -> str:
-    """
-    Extract short ticket number from long ID
-    150534000029530963 -> 29530963
-    """
+    """Extract short ticket number from long ID"""
     try:
         ticket_id_str = str(ticket_id)
         
@@ -275,6 +357,7 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
         'last_run': datetime.now(timezone.utc).isoformat(),
         'processed': total_processed,
         'errors': total_errors,
+        'skipped': METRICS['skipped'],  # NEW v3.1.3
         'version': VERSION
     }
     
@@ -283,7 +366,7 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
             json.dump(checkpoint, f, indent=2)
         
         logger.info(f"✓ SAVED Stats to: {CHECKPOINT_FILE}")
-        logger.info(f"        Processed: {total_processed}, Errors: {total_errors}")
+        logger.info(f"        Processed: {total_processed}, Errors: {total_errors}, Skipped: {METRICS['skipped']}")
     except Exception as e:
         logger.error(f"✗ Failed to save checkpoint stats: {e}")
 
@@ -323,31 +406,23 @@ def get_access_token() -> str:
     raise Exception("Failed to obtain access token after max retries")
 
 # ============================================================
-# TICKET TYPE CLASSIFICATION - NEW v3.1.2
+# TICKET TYPE CLASSIFICATION
 # ============================================================
 
 def classify_ticket_type(ticket: Dict) -> str:
-    """
-    Classify ticket type based on request_type, template, or other fields
-    ServiceDesk Plus Cloud uses single endpoint for all tickets
-    """
-    # Check template name
+    """Classify ticket type"""
     template = ticket.get('template', {})
     template_name = template.get('name', '').lower() if template else ''
     
-    # Check request type
     request_type = ticket.get('request_type', {})
     req_type_name = request_type.get('name', '').lower() if request_type else ''
     
-    # Check mode
     mode = ticket.get('mode', {})
     mode_name = mode.get('name', '').lower() if mode else ''
     
-    # Check category
     category = ticket.get('category', {})
     category_name = category.get('name', '').lower() if category else ''
     
-    # Classify as Service Request
     service_keywords = ['service', 'catalog', 'service request', 'service catalog']
     if any(keyword in template_name for keyword in service_keywords):
         return 'service_requests'
@@ -356,7 +431,6 @@ def classify_ticket_type(ticket: Dict) -> str:
     if ticket.get('is_service_request', False):
         return 'service_requests'
     
-    # Classify as Incident
     incident_keywords = ['incident', 'major incident', 'critical incident']
     if any(keyword in template_name for keyword in incident_keywords):
         return 'incidents'
@@ -367,16 +441,15 @@ def classify_ticket_type(ticket: Dict) -> str:
     if ticket.get('is_incident', False):
         return 'incidents'
     
-    # Default to request
     return 'requests'
 
 # ============================================================
-# TICKET FETCHING - FIXED v3.1.2
+# TICKET FETCHING
 # ============================================================
 
 def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime], 
                            page_limit: Optional[int] = None) -> List[Dict]:
-    """Fetch all tickets from single /api/v3/requests endpoint"""
+    """Fetch all tickets from /api/v3/requests endpoint"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -465,7 +538,6 @@ def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime],
     
     logger.info("  No page limit - fetching ALL tickets")
     
-    # Fetch all tickets from single endpoint
     all_tickets = fetch_tickets_from_api(access_token, last_sync_time, page_limit)
     
     if not all_tickets:
@@ -476,14 +548,12 @@ def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime],
     logger.info("")
     logger.info("📋 Classifying tickets by type...")
     
-    # Classify each ticket
     module_counts = {'requests': 0, 'service_requests': 0, 'incidents': 0}
     for ticket in all_tickets:
         ticket_type = classify_ticket_type(ticket)
         ticket['_module_type'] = ticket_type
         module_counts[ticket_type] += 1
     
-    # Report classification
     logger.info("✓ Classification complete:")
     for module_type in ['requests', 'service_requests', 'incidents']:
         count = module_counts[module_type]
@@ -494,11 +564,14 @@ def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime],
     return all_tickets
 
 # ============================================================
-# CONVERSATION FETCHING
+# CONVERSATION FETCHING - WITH RETRY - NEW v3.1.3
 # ============================================================
 
-def fetch_conversation_single(ticket_id: str, access_token: str) -> List[Dict]:
-    """Fetch conversations for a single ticket"""
+def fetch_conversation_single_with_retry(ticket_id: str, ticket_subject: str, access_token: str, max_attempts: int = 3) -> Tuple[List[Dict], Optional[str]]:
+    """
+    Fetch conversations with retry logic
+    Returns: (conversations, error_message)
+    """
     url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
     
     headers = {
@@ -506,35 +579,83 @@ def fetch_conversation_single(ticket_id: str, access_token: str) -> List[Dict]:
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    try:
-        response = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        if response.status_code == 200:
-            return response.json().get('conversations', [])
-        elif response.status_code == 404:
-            return []
-    except:
-        pass
+    for attempt in range(max_attempts):
+        try:
+            response = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            
+            if response.status_code == 200:
+                conversations = response.json().get('conversations', [])
+                if attempt > 0:
+                    METRICS['retried'] += 1
+                    logger.info(f"  ✓ Retry successful for ticket {ticket_id}")
+                return conversations, None
+            
+            elif response.status_code == 404:
+                # Ticket or conversations not found - not an error, just no conversations
+                return [], None
+            
+            elif response.status_code == 429:
+                wait_time = (attempt + 1) * 5
+                logger.warning(f"  Rate limited for ticket {ticket_id}, waiting {wait_time}s (attempt {attempt + 1}/{max_attempts})")
+                time.sleep(wait_time)
+                continue
+            
+            else:
+                error_msg = f"HTTP {response.status_code}"
+                if attempt < max_attempts - 1:
+                    logger.warning(f"  Conversation fetch failed for {ticket_id}: {error_msg}, retrying...")
+                    time.sleep(2)
+                    continue
+                else:
+                    return [], error_msg
+                    
+        except requests.exceptions.Timeout:
+            error_msg = "Request timeout"
+            if attempt < max_attempts - 1:
+                logger.warning(f"  Timeout fetching conversations for {ticket_id}, retrying...")
+                time.sleep(2)
+                continue
+            else:
+                return [], error_msg
+        
+        except Exception as e:
+            error_msg = f"Exception: {str(e)}"
+            if attempt < max_attempts - 1:
+                logger.warning(f"  Error fetching conversations for {ticket_id}: {error_msg}, retrying...")
+                time.sleep(2)
+                continue
+            else:
+                return [], error_msg
     
-    return []
+    # If we get here, all retries failed
+    METRICS['failed_after_retry'] += 1
+    return [], "All retry attempts failed"
 
-def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_workers: int = 10) -> Dict[str, List[Dict]]:
-    """Fetch conversations for multiple tickets in parallel"""
+def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_workers: int = 10) -> Dict[str, Tuple[List[Dict], Optional[str]]]:
+    """
+    Fetch conversations for multiple tickets in parallel with retry logic
+    Returns: {ticket_id: (conversations, error_message)}
+    """
     conversations_map = {}
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticket = {
-            executor.submit(fetch_conversation_single, ticket['id'], access_token): ticket['id']
+            executor.submit(
+                fetch_conversation_single_with_retry, 
+                ticket['id'],
+                ticket.get('subject', 'No subject'),
+                access_token
+            ): ticket['id']
             for ticket in tickets
         }
         
         for future in as_completed(future_to_ticket):
             ticket_id = future_to_ticket[future]
             try:
-                conversations = future.result()
-                conversations_map[ticket_id] = conversations
+                conversations, error = future.result()
+                conversations_map[ticket_id] = (conversations, error)
             except Exception as e:
-                logger.warning(f"Failed to fetch conversation for {ticket_id}: {e}")
-                conversations_map[ticket_id] = []
+                conversations_map[ticket_id] = ([], f"Future exception: {str(e)}")
     
     return conversations_map
 
@@ -543,11 +664,8 @@ def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_wor
 # ============================================================
 
 def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[str, Any]:
-    """
-    Automatically categorize ticket based on content analysis
-    """
+    """Automatically categorize ticket"""
     
-    # If ticket already has a meaningful category, keep it
     if existing_category and existing_category.lower() not in ['uncategorized', 'general', 'other', '', 'none']:
         return {
             'suggested_category': existing_category,
@@ -557,12 +675,10 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
             'original_category': existing_category
         }
     
-    # Combine subject and description for analysis
     subject = ticket.get('subject', '').lower()
     description = ticket.get('description', '').lower()
     combined_text = f"{subject} {description}"
     
-    # Category definitions with weighted keywords
     category_patterns = {
         'Hardware Issues': {
             'primary': ['laptop', 'desktop', 'computer', 'monitor', 'keyboard', 'mouse', 'hardware', 
@@ -644,7 +760,6 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
         }
     }
     
-    # Score each category
     category_scores = {}
     matched_keywords = {}
     
@@ -652,13 +767,11 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
         score = 0
         keywords = []
         
-        # Check primary keywords (higher weight)
         for keyword in patterns['primary']:
             if keyword in combined_text:
                 score += 10 * patterns['weight']
                 keywords.append(keyword)
         
-        # Check secondary keywords (lower weight)
         for keyword in patterns['secondary']:
             if keyword in combined_text:
                 score += 5 * patterns['weight']
@@ -668,7 +781,6 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
             category_scores[category] = score
             matched_keywords[category] = keywords
     
-    # Determine best category
     if not category_scores:
         return {
             'suggested_category': 'General Support',
@@ -678,14 +790,11 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
             'original_category': existing_category or 'Uncategorized'
         }
     
-    # Get category with highest score
     best_category = max(category_scores, key=category_scores.get)
     best_score = category_scores[best_category]
     
-    # Calculate confidence (normalize to 0-100)
     confidence = min(best_score * 2, 100)
     
-    # If confidence is low and there's a tie, reduce confidence
     sorted_scores = sorted(category_scores.values(), reverse=True)
     if len(sorted_scores) > 1 and sorted_scores[0] - sorted_scores[1] < 5:
         confidence *= 0.7
@@ -699,72 +808,57 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
     }
 
 # ============================================================
-# AI ANALYSIS
+# AI ANALYSIS (abbreviated for space - same as v3.1.2)
 # ============================================================
 
 def calculate_complexity_score(ticket: Dict, conversations: List[Dict]) -> int:
-    """Calculate ticket complexity (0-10)"""
     score = 3
-    
     if len(conversations) > 10:
         score += 3
     elif len(conversations) > 5:
         score += 2
     elif len(conversations) > 2:
         score += 1
-    
     description = ticket.get('description', '').lower()
     technical_keywords = ['error', 'crash', 'bug', 'failure', 'corrupt', 'network', 'server', 'database']
     tech_count = sum(1 for keyword in technical_keywords if keyword in description)
     score += min(tech_count, 3)
-    
     priority = ticket.get('priority', {})
     priority_name = priority.get('name', '').lower() if priority else ''
     if 'urgent' in priority_name or 'critical' in priority_name:
         score += 2
     elif 'high' in priority_name:
         score += 1
-    
     return min(score, 10)
 
 def analyze_sentiment(conversations: List[Dict]) -> str:
-    """Analyze sentiment from conversations"""
     if not conversations:
         return "neutral"
-    
     negative_keywords = ['frustrated', 'angry', 'unacceptable', 'disappointed', 'terrible', 'worst']
     positive_keywords = ['thank', 'appreciate', 'great', 'excellent', 'perfect', 'helpful']
-    
     negative_count = 0
     positive_count = 0
-    
     for conv in conversations:
         text = conv.get('description', '').lower()
         negative_count += sum(1 for keyword in negative_keywords if keyword in text)
         positive_count += sum(1 for keyword in positive_keywords if keyword in text)
-    
     if negative_count > positive_count * 2:
         return "at-risk"
     elif positive_count > negative_count * 2:
         return "positive"
-    
     return "neutral"
 
 def predict_sla_breach(ticket: Dict, conversations: List[Dict]) -> Tuple[str, int]:
-    """Predict SLA breach likelihood"""
     due_date = ticket.get('due_by_time')
     if not due_date:
         return ("unknown", 0)
-    
     try:
         due_display = due_date.get('display_value', '') if isinstance(due_date, dict) else ''
         if not due_display:
             return ("unknown", 0)
-        
         due = datetime.fromisoformat(due_display.replace('Z', '+00:00'))
         now = datetime.now(timezone.utc)
         hours_remaining = (due - now).total_seconds() / 3600
-        
         if hours_remaining < 0:
             return ("critical", 100)
         elif hours_remaining < 4:
@@ -779,25 +873,19 @@ def predict_sla_breach(ticket: Dict, conversations: List[Dict]) -> Tuple[str, in
         return ("unknown", 0)
 
 def estimate_resolution_time(ticket: Dict, conversations: List[Dict], complexity: int) -> float:
-    """Estimate resolution time in hours"""
     base_hours = complexity * 2
-    
     priority = ticket.get('priority', {})
     priority_name = priority.get('name', '').lower() if priority else ''
     if 'urgent' in priority_name:
         base_hours *= 0.5
     elif 'low' in priority_name:
         base_hours *= 1.5
-    
     if len(conversations) > 5:
         base_hours *= 1.3
-    
     return round(base_hours, 1)
 
 def identify_issue_type(ticket: Dict) -> List[str]:
-    """Identify issue types from ticket"""
     description = (ticket.get('description', '') + ' ' + ticket.get('subject', '')).lower()
-    
     issue_keywords = {
         'password': ['password', 'login', 'authentication', 'credential'],
         'email': ['email', 'outlook', 'mailbox', 'mail'],
@@ -808,16 +896,13 @@ def identify_issue_type(ticket: Dict) -> List[str]:
         'performance': ['slow', 'performance', 'freeze', 'lag'],
         'error': ['error', 'crash', 'fail', 'bug']
     }
-    
     identified = []
     for issue_type, keywords in issue_keywords.items():
         if any(keyword in description for keyword in keywords):
             identified.append(issue_type)
-    
     return identified or ['general']
 
 def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
-    """Analyze conversation response status"""
     if not conversations:
         return {
             'awaiting_response': 'unknown',
@@ -825,9 +910,7 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
             'response_time_hours': 0,
             'has_unanswered_questions': False
         }
-    
     sorted_convs = sorted(conversations, key=lambda x: x.get('created_time', {}).get('value', 0))
-    
     if not sorted_convs:
         return {
             'awaiting_response': 'unknown',
@@ -835,15 +918,11 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
             'response_time_hours': 0,
             'has_unanswered_questions': False
         }
-    
     last_conv = sorted_convs[-1]
     last_responder_type = 'customer' if last_conv.get('is_customer', False) else 'technician'
-    
     awaiting = 'technician' if last_responder_type == 'customer' else 'customer'
-    
     last_text = last_conv.get('description', '')
     has_unanswered_questions = '?' in last_text and last_responder_type == 'customer'
-    
     response_time = 0
     if len(sorted_convs) > 1:
         try:
@@ -852,7 +931,6 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
             response_time = (last_time - first_time) / (1000 * 3600)
         except:
             pass
-    
     return {
         'awaiting_response': awaiting,
         'last_responder': last_responder_type,
@@ -861,11 +939,11 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
     }
 
 # ============================================================
-# FIELD EXTRACTION - WITH AUTO-CATEGORIZATION
+# FIELD EXTRACTION
 # ============================================================
 
 def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
-    """Extract all fields from ticket with auto-categorization"""
+    """Extract all fields from ticket"""
     fields = {}
     
     def safe_get(obj, key, default=''):
@@ -875,7 +953,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
             return obj.get(key, default)
         return default
     
-    # Extract short ticket number and module type
     long_ticket_id = ticket.get('id', 'unknown')
     short_ticket_number = extract_short_ticket_number(long_ticket_id)
     module_type = ticket.get('_module_type', 'request')
@@ -903,7 +980,6 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
     fields['technician_email'] = safe_get(technician, 'email_id', '')
     
-    # AUTO-CATEGORIZATION
     category = ticket.get('category') or {}
     original_category = safe_get(category, 'name', 'Uncategorized')
     fields['category_original'] = original_category
@@ -964,20 +1040,18 @@ def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
     
     return fields
 
+# Due to character limits, I'll continue with the remaining functions in the next part...
+
 # ============================================================
 # ANALYTICS & METRICS
 # ============================================================
 
 def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
-    """Track analytics"""
-    
     module_type = comprehensive_fields.get('module_type', 'unknown')
     analytics_cache.update_module_distribution(module_type)
-    
     was_auto = comprehensive_fields.get('category_auto_assigned', False)
     confidence = comprehensive_fields.get('category_confidence', 0)
     analytics_cache.update_auto_categorization(was_auto, confidence)
-    
     category = comprehensive_fields['category']
     resolution_days = 0
     if comprehensive_fields['resolved_time']:
@@ -987,9 +1061,7 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
             resolution_days = (resolved - created).total_seconds() / 86400
         except:
             pass
-    
     analytics_cache.update_category_stats(category, resolution_days)
-    
     tech = comprehensive_fields['technician_name']
     is_active = comprehensive_fields['status_category'] == 'active'
     response_hours = 0
@@ -1000,15 +1072,11 @@ def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, co
             response_hours = (last_time - first_time) / (1000 * 3600)
         except:
             pass
-    
     analytics_cache.update_technician_workload(tech, is_active, response_hours)
 
 def track_metrics(comprehensive_fields: Dict, conversations: List[Dict], 
                  complexity: int, sentiment: str, sla_risk: str, response_status: Dict):
-    """Track metrics"""
-    
     METRICS['total_processed'] += 1
-    
     module_type = comprehensive_fields.get('module_type', 'unknown')
     if module_type == 'requests':
         METRICS['requests'] += 1
@@ -1016,24 +1084,18 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
         METRICS['service_requests'] += 1
     elif module_type == 'incidents':
         METRICS['incidents'] += 1
-    
     if comprehensive_fields.get('category_auto_assigned'):
         METRICS['auto_categorized'] += 1
-    
     if comprehensive_fields['status_category'] == 'active':
         METRICS['active_tickets'] += 1
     else:
         METRICS['closed_tickets'] += 1
-    
     if conversations:
         METRICS['with_conversations'] += 1
-    
     if complexity >= 7:
         METRICS['high_complexity'] += 1
-    
     if sentiment == 'at-risk':
         METRICS['satisfaction_at_risk'] += 1
-    
     if sla_risk in ['critical', 'high']:
         METRICS['high_sla_breach_risk'] += 1
 
@@ -1044,41 +1106,30 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
 def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict], 
                                 comprehensive_fields: Dict, complexity: int,
                                 sentiment: str, sla_risk: str, response_status: Dict) -> List[str]:
-    """Generate comprehensive searchable tags"""
     tags = []
-    
     short_id = comprehensive_fields.get('ticket_id')
     tags.extend([
         f"ticket:{short_id}",
         f"#{short_id}",
         comprehensive_fields.get('display_id', '')
     ])
-    
     module_type = comprehensive_fields.get('module_type', 'unknown')
     tags.append(f"module:{module_type}")
-    
     status = comprehensive_fields['status'].lower().replace(' ', '-')
     tags.extend([f"status:{status}", f"status-category:{comprehensive_fields['status_category']}"])
-    
     if comprehensive_fields['status_category'] == 'active':
         tags.extend(['active', 'open-status', 'needs-attention'])
-    
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
-    
     if 'urgent' in priority:
         tags.extend(['urgent-attention', 'critical-action-required'])
-    
     tech = comprehensive_fields['technician_name'].lower().replace(' ', '-')
     req = comprehensive_fields['requester_name'].lower().replace(' ', '-')
     tags.extend([f"technician:{tech}", f"requester:{req}"])
-    
     if tech == 'unassigned':
         tags.extend(['unassigned', 'needs-assignment'])
-    
     category = comprehensive_fields['category'].lower().replace(' ', '-').replace('&', 'and')
     tags.append(f"category:{category}")
-    
     if comprehensive_fields.get('category_auto_assigned'):
         tags.append('auto-categorized')
         confidence = comprehensive_fields.get('category_confidence', 0)
@@ -1086,28 +1137,22 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
             tags.append('high-confidence-category')
         elif confidence < 50:
             tags.append('low-confidence-category')
-    
     tags.append(f"complexity:{complexity}")
     if complexity >= 7:
         tags.extend(['high-complexity', 'complex-issue'])
     elif complexity <= 3:
         tags.extend(['low-complexity', 'simple-issue'])
-    
     tags.append(f"sentiment:{sentiment}")
     if sentiment == 'at-risk':
         tags.extend(['satisfaction-at-risk', 'customer-frustration'])
-    
     tags.append(f"sla-risk:{sla_risk}")
     if sla_risk in ['critical', 'high']:
         tags.extend(['high-breach-risk', 'sla-attention-needed'])
-    
     tags.append(f"awaiting:{response_status['awaiting_response']}")
-    
     if response_status['awaiting_response'] == 'customer':
         tags.append('awaiting-customer-response')
     elif response_status['awaiting_response'] == 'technician':
         tags.extend(['awaiting-technician-response', 'actionable'])
-    
     return list(set(tags))
 
 # ============================================================
@@ -1119,8 +1164,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
                         sentiment: str, sla_risk: str, sla_breach_likelihood: int,
                         estimated_resolution_hours: float, issue_types: List[str],
                         response_status: Dict) -> Dict:
-    """Create comprehensive Dust document"""
-    
     conversation_text = ""
     if conversations:
         for i, conv in enumerate(conversations, 1):
@@ -1131,22 +1174,17 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
             text = conv.get('description', '')
             created_time_obj = conv.get('created_time') or {}
             time = created_time_obj.get('display_value', '') if isinstance(created_time_obj, dict) else ''
-            
             conversation_text += f"\n### Conversation {i} - {role}: {sender}\n"
             conversation_text += f"**Time:** {time}\n\n"
             conversation_text += f"{text}\n"
     else:
         conversation_text = "\n*No conversations yet*\n"
-    
     tags = generate_comprehensive_tags(
         ticket, conversations, comprehensive_fields,
         complexity, sentiment, sla_risk, response_status
     )
-    
     short_id = comprehensive_fields.get('display_id', f"#{comprehensive_fields.get('ticket_id')}")
     module_type = comprehensive_fields.get('module_type', 'request').replace('_', ' ').title()
-    
-    # Category display with confidence
     category_display = comprehensive_fields['category']
     if comprehensive_fields.get('category_auto_assigned'):
         confidence = comprehensive_fields.get('category_confidence', 0)
@@ -1154,7 +1192,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
         if comprehensive_fields.get('category_keywords'):
             keywords = ', '.join(comprehensive_fields['category_keywords'][:5])
             category_display += f"\n  Keywords: {keywords}"
-    
     document_text = f"""# Ticket {short_id}: {comprehensive_fields['subject']}
 
 ## Type & Overview
@@ -1186,12 +1223,10 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 {', '.join(tags[:50])}
 
 ---
-*Intelligence Suite v{VERSION} - Multi-Module + Auto-Categorization*
+*Intelligence Suite v{VERSION} - Multi-Module + Auto-Categorization + Skip Tracking*
 *Module: {module_type} | Ticket ID: {short_id} | Category Confidence: {comprehensive_fields.get('category_confidence', 0):.0f}%*
 """
-    
     short_ticket_num = comprehensive_fields.get('ticket_id')
-    
     document = {
         "document_id": f"ticket-{short_ticket_num}",
         "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -1210,7 +1245,6 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
             "intelligence_version": VERSION
         }
     }
-    
     return document
 
 # ============================================================
@@ -1222,115 +1256,94 @@ def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         logger.warning("Dust credentials not configured. Skipping upload.")
         return 0, 0
-    
     base_url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
     }
-    
     uploaded = 0
     errors = 0
     upload_lock = Lock()
     rate_limiter = Semaphore(MAX_CONCURRENT_UPLOADS)
-    
     def upload_single_document(doc: Dict) -> bool:
         nonlocal uploaded, errors
-        
         with rate_limiter:
             url = f"{base_url}/{doc['document_id']}"
-            
             for attempt in range(3):
                 try:
                     response = SESSION.post(url, headers=headers, json=doc, timeout=UPLOAD_TIMEOUT)
-                    
                     if response.status_code in [200, 201]:
                         with upload_lock:
                             uploaded += 1
                             if uploaded % 100 == 0:
                                 logger.info(f"  Progress: {uploaded}/{len(documents)} uploaded...")
                         return True
-                    
                     elif response.status_code == 429:
                         time.sleep((attempt + 1) * 2)
                         continue
-                    
                     elif response.status_code in [502, 503, 504]:
                         time.sleep((attempt + 1) * 1)
                         continue
-                    
                     else:
                         with upload_lock:
                             errors += 1
                         return False
-                        
                 except:
                     if attempt == 2:
                         with upload_lock:
                             errors += 1
                         return False
                     time.sleep(1)
-            
             time.sleep(0.1)
             return False
-    
     start_time = time.time()
-    
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
         futures = [executor.submit(upload_single_document, doc) for doc in documents]
         for future in as_completed(futures):
             pass
-    
     elapsed = time.time() - start_time
     logger.info(f"  ✓ Upload complete: {uploaded} succeeded, {errors} failed ({elapsed:.1f}s)")
-    
     return uploaded, errors
 
 # ============================================================
-# MAIN PROCESSING
+# MAIN PROCESSING - WITH SKIP TRACKING - NEW v3.1.3
 # ============================================================
 
 def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int, total_tickets: int) -> Tuple[List[Dict], int]:
-    
     logger.info(f"\n[Batch {batch_num}] Processing tickets {(batch_num-1)*BATCH_SIZE + 1}-{min(batch_num*BATCH_SIZE, total_tickets)}...")
-    
     documents = []
     errors = 0
-    
     conversations_map = fetch_conversations_parallel(tickets, access_token)
-    
     for i, ticket in enumerate(tickets, 1):
         ticket_id = ticket['id']
-        
+        ticket_subject = ticket.get('subject', 'No subject')
+        short_id = extract_short_ticket_number(ticket_id)
         try:
-            conversations = conversations_map.get(ticket_id, [])
+            conversations, conv_error = conversations_map.get(ticket_id, ([], None))
+            if conv_error:
+                track_skipped_ticket(short_id, ticket_subject, f"Conversation fetch failed: {conv_error}", "conversation_fetch")
+                continue
             comprehensive_fields = extract_comprehensive_fields(ticket)
-            
             complexity = calculate_complexity_score(ticket, conversations)
             sentiment = analyze_sentiment(conversations)
             sla_risk, sla_breach_likelihood = predict_sla_breach(ticket, conversations)
             estimated_resolution_hours = estimate_resolution_time(ticket, conversations, complexity)
             issue_types = identify_issue_type(ticket)
             response_status = analyze_response_status(conversations)
-            
             track_analytics(ticket, conversations, complexity, comprehensive_fields)
             track_metrics(comprehensive_fields, conversations, complexity, sentiment, sla_risk, response_status)
-            
             document = create_dust_document(
                 ticket, conversations, comprehensive_fields,
                 complexity, sentiment, sla_risk, sla_breach_likelihood,
                 estimated_resolution_hours, issue_types, response_status
             )
-            
             documents.append(document)
-            
         except Exception as e:
             logger.error(f"  ERROR processing ticket {ticket_id}: {e}")
+            track_skipped_ticket(short_id, ticket_subject, f"Processing error: {str(e)}", "ticket_processing")
             errors += 1
-    
     uploaded, upload_errors = upload_to_dust_parallel(documents)
     errors += upload_errors
-    
     return documents, errors
 
 def print_analytics_summary():
@@ -1338,90 +1351,68 @@ def print_analytics_summary():
     logger.info(f"ANALYTICS SUMMARY (v{VERSION})")
     logger.info("=" * 60)
     logger.info("")
-    
-    # Module distribution
     logger.info("📦 Module Distribution:")
     module_dist = analytics_cache.raw_data['module_distribution']
     if module_dist:
         for module, count in sorted(module_dist.items()):
             module_name = module.replace('_', ' ').title()
             logger.info(f"  {module_name}: {count} tickets")
-    
     logger.info("")
-    
-    # Auto-categorization stats
     logger.info("🏷️  Auto-Categorization:")
     auto_cat_stats = analytics_cache.raw_data['auto_categorization']
     logger.info(f"  Tickets auto-categorized: {auto_cat_stats['assigned']}")
     logger.info(f"  High confidence (80%+): {auto_cat_stats['high_confidence']}")
     logger.info(f"  Low confidence (<50%): {auto_cat_stats['low_confidence']}")
-    
     logger.info("")
-    
     logger.info("🏆 Top Categories:")
     category_stats = analytics_cache.raw_data['category_stats']
     if category_stats:
         sorted_categories = sorted(category_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:10]
         for cat, data in sorted_categories:
             logger.info(f"  {cat}: {data['count']} tickets")
-    
     logger.info("")
 
 def main():
-    
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info(f"Started: {datetime.now()}")
     logger.info("=" * 60)
-    
-    logger.info("✨ v3.1.2 FEATURES:")
+    logger.info("✨ v3.1.3 FEATURES:")
     logger.info("   • Multi-module: Requests, Service Requests, Incidents")
     logger.info("   • Short ticket numbers (#16027)")
     logger.info("   • Intelligent auto-categorization (13 categories)")
-    logger.info("   • Category confidence scoring")
-    logger.info("   • Fixed API endpoint structure")
+    logger.info("   • Explicit skip tracking with retry logic")
+    logger.info("   • Detailed failure logging")
     logger.info("")
-    
     if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
         logger.error("ERROR: Missing ServiceDesk credentials")
         sys.exit(1)
-    
     logger.info("✓ Credentials validated")
-    
     try:
         access_token = get_access_token()
         logger.info("✓ Access token obtained")
     except Exception as e:
         logger.error(f"FATAL: Failed to get token: {e}")
         sys.exit(1)
-    
     last_sync_time = load_checkpoint()
-    
     try:
         tickets = fetch_all_tickets(access_token, last_sync_time, MAX_PAGES)
         logger.info(f"✓ Total tickets fetched: {len(tickets)}")
     except Exception as e:
         logger.error(f"FATAL: Failed to fetch tickets: {e}")
         sys.exit(1)
-    
     if not tickets:
         logger.info("✓ No new tickets. Sync complete.")
         return
-    
     logger.info(f"\n📋 Processing {len(tickets)} tickets...")
-    
     total_processed = 0
     total_errors = 0
-    
     for batch_num in range(1, (len(tickets) // BATCH_SIZE) + 2):
         start_idx = (batch_num - 1) * BATCH_SIZE
         end_idx = min(start_idx + BATCH_SIZE, len(tickets))
-        
         if start_idx >= len(tickets):
             break
-        
         batch_tickets = tickets[start_idx:end_idx]
-        
         try:
             documents, errors = process_ticket_batch(batch_tickets, access_token, batch_num, len(tickets))
             total_processed += len(documents)
@@ -1430,7 +1421,6 @@ def main():
         except Exception as e:
             logger.error(f"FATAL: Batch {batch_num} error: {e}")
             total_errors += len(batch_tickets)
-    
     if tickets:
         try:
             latest_modified = max(
@@ -1441,12 +1431,16 @@ def main():
             save_checkpoint(latest_modified, total_processed, total_errors)
         except:
             save_checkpoint(datetime.now(timezone.utc), total_processed, total_errors)
-    
+    save_skipped_tickets_report()
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ SYNC COMPLETE (v{VERSION})")
     logger.info("=" * 60)
-    logger.info(f"  Total: {METRICS['total_processed']}/{len(tickets)}")
+    logger.info(f"  Total Fetched: {len(tickets)}")
+    logger.info(f"  Successfully Processed: {METRICS['total_processed']}")
+    logger.info(f"  Skipped: {METRICS['skipped']}")
+    logger.info(f"  Retried: {METRICS['retried']}")
+    logger.info(f"  Failed After Retry: {METRICS['failed_after_retry']}")
     logger.info(f"  Requests: {METRICS['requests']}")
     logger.info(f"  Service Requests: {METRICS['service_requests']}")
     logger.info(f"  Incidents: {METRICS['incidents']}")
@@ -1456,17 +1450,19 @@ def main():
     logger.info(f"  Finished: {datetime.now()}")
     logger.info("=" * 60)
     logger.info("")
-    
     print_analytics_summary()
+    print_skip_summary()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         logger.info("\nInterrupted by user")
+        save_skipped_tickets_report()
         sys.exit(1)
     except Exception as e:
         logger.error(f"FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+        save_skipped_tickets_report()
         sys.exit(1)
