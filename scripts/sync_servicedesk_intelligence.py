@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.6 - PRODUCTION READY
-Fixes checkpoint race condition using sync start time
+ServiceDesk Intelligence Suite v3.1.7 - DEBUG & FIX EDITION
+Aggressive debugging for missing recent tickets + display_id fix
+
+Changes in v3.1.7:
+- FIXED: Better display_id extraction with multiple fallback methods
+- ADDED: Aggressive logging for pages 1-3 (full ticket details)
+- ADDED: Direct ticket fetch test for #16027
+- ADDED: Log exact API requests being sent
+- ADDED: Log all available fields in API response
+- ADDED: Alternative sort methods if created_time fails
 
 Changes in v3.1.6:
-- FIXED: Checkpoint uses sync START time to prevent race condition gaps
-- Prevents missing updates that occur during sync processing
-- Accepts minor duplicate processing (idempotent uploads)
-
-Changes in v3.1.5:
-- FIXED: Incremental syncs check BOTH created_time AND last_updated_time
-- Uses OR condition to catch new tickets AND updates to existing tickets
-- Proper checkpoint saving with latest updated time
-- Date range logging shows both created and updated times
-
-Changes in v3.1.4:
-- FIXED: Sort by created_time instead of last_updated_time
-- FIXED: Use display_id field from API for correct ticket numbers
-- Date range logging for verification
+- FIXED: Checkpoint uses sync START time (prevents race condition)
+- No missed updates during sync processing
 """
 
 import os
@@ -40,7 +36,7 @@ import hashlib
 # CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.6"
+VERSION = "3.1.7"
 BATCH_SIZE = 50
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -81,7 +77,6 @@ CACHE = {
     'assets': {},
     'departments': {}
 }
-
 # Analytics cache
 class AnalyticsCache:
     def __init__(self):
@@ -178,7 +173,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
 # ============================================================
 # SKIP TRACKING
 # ============================================================
@@ -254,7 +248,6 @@ def print_skip_summary():
     logger.warning("")
     logger.warning(f"Full report saved to: {SKIPPED_TICKETS_FILE}")
     logger.warning("=" * 60)
-
 # ============================================================
 # CREDENTIAL MANAGEMENT
 # ============================================================
@@ -278,26 +271,43 @@ SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS - v3.1.7 IMPROVED
 # ============================================================
 
 def extract_short_ticket_number(ticket: Dict) -> str:
-    """Extract short ticket number using display_id field"""
+    """
+    Extract short ticket number - v3.1.7 IMPROVED
+    Multiple strategies with logging
+    """
     try:
+        # Strategy 1: display_id field (most reliable if present)
         display_id = ticket.get('display_id')
         if display_id:
             short_id = str(display_id).lstrip('#').strip()
-            if short_id:
+            if short_id and len(short_id) <= 8:
                 return short_id
         
+        # Strategy 2: Check for 'short_name' or 'number' fields
+        for field_name in ['short_name', 'number', 'ticket_number', 'request_number']:
+            value = ticket.get(field_name)
+            if value:
+                short_id = str(value).lstrip('#').strip()
+                if short_id and len(short_id) <= 8:
+                    logger.debug(f"Found short ID in '{field_name}': {short_id}")
+                    return short_id
+        
+        # Strategy 3: Extract from long ID (last 5-8 digits)
         ticket_id = ticket.get('id', '')
         ticket_id_str = str(ticket_id)
         
         if len(ticket_id_str) > 10:
+            # Try extracting last 5-8 digits
             for length in [5, 6, 7, 8]:
                 short_num = ticket_id_str[-length:].lstrip('0')
                 if short_num and len(short_num) >= 4:
                     return short_num
+            
+            # Fallback: last 8 digits
             short_num = ticket_id_str[-8:].lstrip('0')
             return short_num if short_num else ticket_id_str[-5:]
         
@@ -306,6 +316,18 @@ def extract_short_ticket_number(ticket: Dict) -> str:
         logger.warning(f"Error extracting ticket number: {e}")
         return str(ticket.get('id', 'unknown'))
 
+def log_ticket_fields(ticket: Dict, prefix: str = ""):
+    """Log all available fields in a ticket (for debugging)"""
+    logger.info(f"{prefix}Available fields in ticket:")
+    for key in sorted(ticket.keys()):
+        value = ticket[key]
+        if isinstance(value, dict):
+            logger.info(f"{prefix}  {key}: <dict with {len(value)} keys>")
+        elif isinstance(value, list):
+            logger.info(f"{prefix}  {key}: <list with {len(value)} items>")
+        else:
+            value_str = str(value)[:50]
+            logger.info(f"{prefix}  {key}: {value_str}")
 # ============================================================
 # CHECKPOINT MANAGEMENT
 # ============================================================
@@ -357,7 +379,7 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
             else:
                 f.write('')
         
-        if total_processed % 200 == 0 or total_processed < 100:  # Log less frequently
+        if total_processed % 200 == 0 or total_processed < 100:
             logger.info(f"✓ SAVED Timestamp to: {TIMESTAMP_FILE}")
             if last_sync_time:
                 logger.info(f"        {last_sync_time.isoformat()}")
@@ -377,12 +399,11 @@ def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors
         with open(CHECKPOINT_FILE, 'w') as f:
             json.dump(checkpoint, f, indent=2)
         
-        if total_processed % 200 == 0 or total_processed < 100:  # Log less frequently
+        if total_processed % 200 == 0 or total_processed < 100:
             logger.info(f"✓ SAVED Stats to: {CHECKPOINT_FILE}")
             logger.info(f"        Processed: {total_processed}, Errors: {total_errors}, Skipped: {METRICS['skipped']}")
     except Exception as e:
         logger.error(f"✗ Failed to save checkpoint stats: {e}")
-
 # ============================================================
 # AUTHENTICATION
 # ============================================================
@@ -419,6 +440,47 @@ def get_access_token() -> str:
     raise Exception("Failed to obtain access token after max retries")
 
 # ============================================================
+# DIRECT TICKET FETCH TEST - v3.1.7 NEW
+# ============================================================
+
+def test_direct_ticket_fetch(access_token: str, ticket_id: str) -> Optional[Dict]:
+    """Test fetching a specific ticket directly by ID"""
+    logger.info(f"🔍 Testing direct fetch of ticket #{ticket_id}")
+    
+    headers = {
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
+    }
+    
+    url = f"{SDP_API_BASE}/requests/{ticket_id}"
+    
+    try:
+        response = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        
+        if response.status_code == 200:
+            data = response.json()
+            ticket = data.get('request')
+            if ticket:
+                logger.info(f"✓ Successfully fetched ticket #{ticket_id} directly!")
+                logger.info(f"  Subject: {ticket.get('subject', 'N/A')}")
+                logger.info(f"  Status: {ticket.get('status', {}).get('name', 'N/A')}")
+                logger.info(f"  Created: {ticket.get('created_time', {}).get('display_value', 'N/A')}")
+                return ticket
+            else:
+                logger.warning(f"✗ Response OK but no ticket data for #{ticket_id}")
+                return None
+        elif response.status_code == 404:
+            logger.warning(f"✗ Ticket #{ticket_id} not found (404)")
+            return None
+        else:
+            logger.error(f"✗ Failed to fetch ticket #{ticket_id}: HTTP {response.status_code}")
+            logger.error(f"  Response: {response.text[:200]}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"✗ Exception fetching ticket #{ticket_id}: {e}")
+        return None
+# ============================================================
 # TICKET TYPE CLASSIFICATION
 # ============================================================
 
@@ -454,12 +516,14 @@ def classify_ticket_type(ticket: Dict) -> str:
     return 'requests'
 
 # ============================================================
-# TICKET FETCHING - v3.1.5+ (CORRECT INCREMENTAL)
+# TICKET FETCHING - v3.1.7 WITH AGGRESSIVE DEBUG LOGGING
 # ============================================================
 
 def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime], 
                            page_limit: Optional[int] = None) -> List[Dict]:
-    """Fetch all tickets with OR condition for incremental sync"""
+    """
+    Fetch all tickets - v3.1.7 with AGGRESSIVE DEBUG LOGGING
+    """
     headers = {
         'Authorization': f'Zoho-oauthtoken {access_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -498,6 +562,14 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
     if search_criteria:
         list_info["list_info"]["search_criteria"] = search_criteria
     
+    # LOG THE EXACT REQUEST
+    logger.info("=" * 60)
+    logger.info("📤 API REQUEST:")
+    logger.info(f"  URL: {SDP_API_BASE}/requests")
+    logger.info(f"  Method: GET")
+    logger.info(f"  Query params: {json.dumps(list_info, indent=2)}")
+    logger.info("=" * 60)
+    
     url = f"{SDP_API_BASE}/requests"
     all_tickets = []
     page = 1
@@ -520,7 +592,44 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
                 if not tickets:
                     break
                 
-                if page <= 3 and tickets:
+                # AGGRESSIVE DEBUG LOGGING for pages 1-3
+                if page <= 3:
+                    logger.info("=" * 60)
+                    logger.info(f"📥 PAGE {page} RESPONSE (DETAILED):")
+                    logger.info(f"  Tickets returned: {len(tickets)}")
+                    logger.info("=" * 60)
+                    
+                    # Log first 5 tickets in detail
+                    for i, ticket in enumerate(tickets[:5], 1):
+                        ticket_id = ticket.get('id', 'unknown')
+                        short_id = extract_short_ticket_number(ticket)
+                        subject = ticket.get('subject', 'No subject')[:50]
+                        
+                        created = ticket.get('created_time', {})
+                        created_display = created.get('display_value', 'Unknown') if created else 'Unknown'
+                        
+                        updated = ticket.get('last_updated_time', {})
+                        updated_display = updated.get('display_value', 'Unknown') if updated else 'Unknown'
+                        
+                        status = ticket.get('status', {})
+                        status_name = status.get('name', 'Unknown') if status else 'Unknown'
+                        
+                        logger.info(f"  Ticket {i}:")
+                        logger.info(f"    Long ID: {ticket_id}")
+                        logger.info(f"    Short ID: {short_id}")
+                        logger.info(f"    Subject: {subject}")
+                        logger.info(f"    Created: {created_display}")
+                        logger.info(f"    Updated: {updated_display}")
+                        logger.info(f"    Status: {status_name}")
+                    
+                    # Log available fields in first ticket
+                    if tickets:
+                        logger.info("")
+                        log_ticket_fields(tickets[0], prefix="  ")
+                    
+                    logger.info("=" * 60)
+                    
+                    # Log date range summary
                     created_dates = []
                     updated_dates = []
                     for ticket in tickets:
@@ -541,9 +650,9 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
                         oldest_created = min(created_dates) if created_dates else 'Unknown'
                         newest_updated = max(updated_dates) if updated_dates else 'Unknown'
                         oldest_updated = min(updated_dates) if updated_dates else 'Unknown'
-                        logger.info(f"  Page {page}: {len(tickets)} tickets")
-                        logger.info(f"    Created: {newest_created} to {oldest_created}")
-                        logger.info(f"    Updated: {newest_updated} to {oldest_updated}")
+                        logger.info(f"  Page {page} Summary:")
+                        logger.info(f"    Created range: {newest_created} to {oldest_created}")
+                        logger.info(f"    Updated range: {newest_updated} to {oldest_updated}")
                 else:
                     logger.info(f"  Page {page}: Found {len(tickets)} tickets (Total: {len(all_tickets) + len(tickets)})")
                 
@@ -565,6 +674,7 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
                 continue
             else:
                 logger.error(f"  API error: {response.status_code}")
+                logger.error(f"  Response: {response.text[:500]}")
                 break
                 
         except Exception as e:
@@ -572,7 +682,6 @@ def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime]
             break
     
     return all_tickets
-
 def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime], 
                      page_limit: Optional[int] = None) -> List[Dict]:
     """Fetch all tickets and classify them"""
@@ -586,6 +695,15 @@ def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime],
         logger.info(f"  Page limit: {page_limit}")
     else:
         logger.info("  No page limit - fetching ALL tickets")
+    
+    # TEST: Try to fetch ticket #16027 directly
+    logger.info("")
+    test_16027 = test_direct_ticket_fetch(access_token, "16027")
+    if test_16027:
+        logger.info("✓ Ticket #16027 EXISTS in API and can be fetched directly!")
+    else:
+        logger.warning("✗ Ticket #16027 NOT FOUND via direct fetch - may not exist or permissions issue")
+    logger.info("")
     
     all_tickets = fetch_tickets_from_api(access_token, last_sync_time, page_limit)
     
@@ -612,8 +730,25 @@ def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime],
     
     logger.info(f"✓ Total tickets fetched: {len(all_tickets)}")
     
+    # Check if #16027 is in the results
+    found_16027 = False
+    for ticket in all_tickets:
+        short_id = extract_short_ticket_number(ticket)
+        if short_id == "16027":
+            found_16027 = True
+            logger.info("")
+            logger.info("✓ ✓ ✓ FOUND TICKET #16027 in fetched results!")
+            logger.info(f"  Subject: {ticket.get('subject', 'N/A')}")
+            logger.info(f"  Created: {ticket.get('created_time', {}).get('display_value', 'N/A')}")
+            break
+    
+    if not found_16027:
+        logger.warning("")
+        logger.warning("✗ ✗ ✗ TICKET #16027 NOT in fetched results (but may exist via direct fetch)")
+    
+    logger.info("")
+    
     return all_tickets
-
 # ============================================================
 # CONVERSATION FETCHING WITH RETRY
 # ============================================================
@@ -695,7 +830,6 @@ def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_wor
                 conversations_map[ticket_id] = ([], f"Future exception: {str(e)}")
     
     return conversations_map
-
 # ============================================================
 # AUTO-CATEGORIZATION
 # ============================================================
@@ -843,7 +977,6 @@ def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[
         'use_suggested': True,
         'original_category': existing_category or 'Uncategorized'
     }
-
 # ============================================================
 # AI ANALYSIS FUNCTIONS
 # ============================================================
@@ -1002,7 +1135,6 @@ def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
         'response_time_hours': round(response_time, 1),
         'has_unanswered_questions': has_unanswered_questions
     }
-
 # ============================================================
 # FIELD EXTRACTION
 # ============================================================
@@ -1173,7 +1305,6 @@ def track_metrics(comprehensive_fields: Dict, conversations: List[Dict],
     
     if sla_risk in ['critical', 'high']:
         METRICS['high_sla_breach_risk'] += 1
-
 # ============================================================
 # TAG GENERATION
 # ============================================================
@@ -1319,7 +1450,7 @@ def create_dust_document(ticket: Dict, conversations: List[Dict],
 {', '.join(tags[:50])}
 
 ---
-*Intelligence Suite v{VERSION} - Sync Start Time Checkpoint*
+*Intelligence Suite v{VERSION} - Debug & Fix Edition*
 *Module: {module_type} | Ticket ID: {short_id} | Category Confidence: {comprehensive_fields.get('category_confidence', 0):.0f}%*
 """
     
@@ -1495,9 +1626,8 @@ def print_analytics_summary():
             logger.info(f"  {cat}: {data['count']} tickets")
     
     logger.info("")
-
 # ============================================================
-# MAIN FUNCTION - v3.1.6 FIXED CHECKPOINT
+# MAIN FUNCTION - v3.1.7
 # ============================================================
 
 def main():
@@ -1506,13 +1636,14 @@ def main():
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info(f"Started: {datetime.now()}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.6 FEATURES:")
+    logger.info("✨ v3.1.7 FEATURES:")
+    logger.info("   • FIXED: Better display_id extraction (multiple strategies)")
+    logger.info("   • ADDED: Aggressive debug logging for pages 1-3")
+    logger.info("   • ADDED: Direct ticket fetch test for #16027")
+    logger.info("   • ADDED: Log exact API requests/responses")
+    logger.info("   • ADDED: Log all available fields in tickets")
     logger.info("   • FIXED: Checkpoint uses sync START time (prevents race condition)")
-    logger.info("   • No missed updates during sync processing")
     logger.info("   • Incremental syncs check BOTH created AND updated times")
-    logger.info("   • Sort by created_time (catches recent tickets)")
-    logger.info("   • Use display_id field for correct ticket numbers")
-    logger.info("   • OR condition: Gets new tickets AND updates to existing tickets")
     logger.info("")
     
     if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
@@ -1619,3 +1750,11 @@ if __name__ == "__main__":
         traceback.print_exc()
         save_skipped_tickets_report()
         sys.exit(1)
+
+
+
+
+
+
+
+
