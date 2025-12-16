@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      force_full_sync:
+        description: 'Force full sync (ignore checkpoint)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -11,6 +17,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,6 +30,14 @@ jobs:
 
       - name: Install dependencies
         run: pip install requests
+
+      # NEW: Delete checkpoint if force sync requested
+      - name: Check for force full sync
+        if: github.event.inputs.force_full_sync == 'true'
+        run: |
+          echo "🔄 Force full sync requested - deleting checkpoint"
+          rm -f last_sync_time.txt
+          rm -f checkpoint.json
 
       - name: Run sync
         env:
@@ -42,4 +57,3 @@ jobs:
           git add -A
           git diff --staged --quiet || git commit -m "Update timestamp"
           git push || true
-          
