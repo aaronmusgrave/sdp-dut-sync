@@ -13,7 +13,8 @@ New in v3.1.10:
 - Robust environment variable validation with character cleaning
 - Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
 - Enhanced OAuth error debugging
-- Auto-cleans OAuth credentials (removes backslashes)
+- Auto-cleans ALL credentials (removes backslashes)
+- Fixed API request method (POST instead of GET)
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -151,9 +152,9 @@ validate_required_env_vars()
 print("=" * 60)
 print("")
 
-# Dust Configuration
-DUST_API_KEY = os.environ.get("DUST_API_KEY")
-DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad")
+# Dust Configuration - WITH AUTO-CLEANING
+DUST_API_KEY = os.environ.get("DUST_API_KEY", "").strip().lstrip('\\').lstrip('/')
+DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad").strip().lstrip('\\').lstrip('/')
 DUST_DATA_SOURCE_ID = "servicedesk_intelligence"
 DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
 
@@ -172,7 +173,7 @@ print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Base URL: {SDP_BASE_URL}")
 print(f"  OAuth URL: {ZOHO_OAUTH_URL}")
-print(f"  ✓ OAuth credentials auto-cleaned (backslashes removed)")
+print(f"  ✓ ALL credentials auto-cleaned (backslashes removed)")
 print("")
 
 # Processing Configuration
@@ -442,7 +443,7 @@ def should_run_cleanup() -> bool:
         age = datetime.now(timezone.utc) - last_cleanup_time
         
         if age.days > 7:
-            logger.info(f"🧹 Last cleanup was {age.days} ago - cleanup recommended")
+            logger.info(f"🧹 Last cleanup was {age.days} days ago - cleanup recommended")
             return True
     except Exception as e:
         logger.warning(f"Could not determine cleanup age: {e}")
@@ -574,7 +575,7 @@ def cleanup_dust_data_source():
     logger.info("")
 
 # ============================================================
-# SERVICEDESK PLUS API
+# SERVICEDESK PLUS API - FIXED FOR POST REQUEST
 # ============================================================
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
@@ -584,7 +585,7 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
     
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/x-www-form-urlencoded"
     }
     
     list_info = {
@@ -603,14 +604,15 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
             "value": timestamp_ms
         }
     
-    input_data = {"list_info": list_info}
+    input_data = json.dumps({"list_info": list_info})
     url = f"{SDP_BASE_URL}/api/v3/requests"
     
     try:
-        response = session.get(
+        # POST request with form data (not JSON body)
+        response = session.post(
             url,
             headers=headers,
-            params={"input_data": json.dumps(input_data)},
+            data={"input_data": input_data},
             timeout=30
         )
         response.raise_for_status()
