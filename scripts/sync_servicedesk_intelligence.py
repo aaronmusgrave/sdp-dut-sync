@@ -14,8 +14,7 @@ New in v3.1.10:
 - Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
 - Enhanced OAuth error debugging
 - Auto-cleans ALL credentials (removes backslashes)
-- Fixed API request method (POST instead of GET)
-- Simplified list_info structure (removed unsupported fields)
+- Ultra-simple GET request (OData-style pagination)
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -576,7 +575,7 @@ def cleanup_dust_data_source():
     logger.info("")
 
 # ============================================================
-# SERVICEDESK PLUS API - SIMPLIFIED STRUCTURE
+# SERVICEDESK PLUS API - ULTRA-SIMPLE GET REQUEST
 # ============================================================
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
@@ -585,34 +584,25 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
     access_token = token_manager.get_token()
     
     headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Authorization": f"Bearer {access_token}"
     }
     
-    # Simplified list_info - only essential fields
-    list_info = {
-        "row_count": row_count,
-        "start_index": start_index
-    }
-    
-    # Add search criteria if incremental sync
-    if last_sync_time:
-        timestamp_ms = int(last_sync_time.timestamp() * 1000)
-        list_info["search_criteria"] = {
-            "field": "created_time",
-            "condition": "greater than",
-            "value": timestamp_ms
-        }
-    
-    input_data = json.dumps({"list_info": list_info})
+    # Ultra-simple GET request with minimal parameters
     url = f"{SDP_BASE_URL}/api/v3/requests"
+    params = {}
+    
+    # Add only row_count and start_index as query params (no input_data wrapper)
+    if row_count:
+        params['\$limit'] = row_count
+    if start_index > 1:
+        params['\$skip'] = start_index - 1
     
     try:
-        # POST request with form data
-        response = session.post(
+        # Simple GET request
+        response = session.get(
             url,
             headers=headers,
-            data={"input_data": input_data},
+            params=params,
             timeout=30
         )
         response.raise_for_status()
