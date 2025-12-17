@@ -15,6 +15,7 @@ New in v3.1.10:
 - Enhanced OAuth error debugging
 - Auto-cleans ALL credentials (removes backslashes)
 - Fixed API request method (POST instead of GET)
+- Simplified list_info structure (removed unsupported fields)
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -443,7 +444,7 @@ def should_run_cleanup() -> bool:
         age = datetime.now(timezone.utc) - last_cleanup_time
         
         if age.days > 7:
-            logger.info(f"🧹 Last cleanup was {age.days} days ago - cleanup recommended")
+            logger.info(f"🧹 Last cleanup was {age.days} ago - cleanup recommended")
             return True
     except Exception as e:
         logger.warning(f"Could not determine cleanup age: {e}")
@@ -575,7 +576,7 @@ def cleanup_dust_data_source():
     logger.info("")
 
 # ============================================================
-# SERVICEDESK PLUS API - FIXED FOR POST REQUEST
+# SERVICEDESK PLUS API - SIMPLIFIED STRUCTURE
 # ============================================================
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
@@ -588,14 +589,13 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
+    # Simplified list_info - only essential fields
     list_info = {
         "row_count": row_count,
-        "start_index": start_index,
-        "get_total_count": True,
-        "sort_field": "created_time",
-        "sort_order": "desc"
+        "start_index": start_index
     }
     
+    # Add search criteria if incremental sync
     if last_sync_time:
         timestamp_ms = int(last_sync_time.timestamp() * 1000)
         list_info["search_criteria"] = {
@@ -608,7 +608,7 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
     url = f"{SDP_BASE_URL}/api/v3/requests"
     
     try:
-        # POST request with form data (not JSON body)
+        # POST request with form data
         response = session.post(
             url,
             headers=headers,
