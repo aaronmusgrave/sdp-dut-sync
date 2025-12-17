@@ -110,7 +110,7 @@ BATCH_DELAY = 3.0
 MAX_429_RETRIES = 3
 
 # Cleanup Configuration
-CLEANUP_INTERVAL_HOURS = 24  # Run cleanup once per day
+CLEANUP_INTERVAL_HOURS = 24
 LAST_CLEANUP_FILE = "last_cleanup.json"
 
 # ============================================================
@@ -373,16 +373,13 @@ def cleanup_orphaned_tickets(current_ticket_ids: Set[str]):
     logger.info("CLEANUP: Removing Orphaned Tickets")
     logger.info("=" * 60)
     
-    # Check if cleanup should run
     if not should_run_cleanup():
         logger.info("  Cleanup skipped (ran recently)")
         logger.info("=" * 60)
         return
     
-    # Fetch all documents from Dust
     dust_doc_ids = fetch_all_dust_documents()
     
-    # Find orphaned tickets (in Dust but not in ServiceDesk Plus)
     orphaned_ids = dust_doc_ids - current_ticket_ids
     METRICS['orphaned_tickets_found'] = len(orphaned_ids)
     
@@ -392,7 +389,6 @@ def cleanup_orphaned_tickets(current_ticket_ids: Set[str]):
     else:
         logger.info(f"  ✓ No orphaned tickets found - Dust is in sync")
     
-    # Save cleanup time
     save_cleanup_time()
     
     logger.info("=" * 60)
@@ -520,7 +516,6 @@ def fetch_all_tickets() -> List[Dict]:
 
 # ============================================================
 # FIELD EXTRACTION & PROCESSING
-# (Identical to v3.1.19 - keeping for brevity)
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -843,7 +838,7 @@ def upload_batch_parallel(documents: List[Dict]) -> Tuple[int, int]:
             except Exception as e:
                 failure_count += 1
                 METRICS['failed_uploads'] += 1
-                logger.error(f"Uploalogger.error(f"Upload exception: {e}")
+                logger.error(f"Upload exception: {e}")
             
             time.sleep(0.2)
     
@@ -953,17 +948,14 @@ def main():
     try:
         token_manager.get_token()
         
-        # Fetch all tickets
         tickets = fetch_all_tickets()
         
         if not tickets:
             logger.info("✓ No tickets to process")
             return 0
         
-        # Get current ticket IDs for cleanup
         current_ticket_ids = {str(t.get('display_id')) for t in tickets}
         
-        # Process in batches
         total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
         logger.info(f"Estimated time: {total_batches * 0.7:.0f} minutes\n")
@@ -978,10 +970,8 @@ def main():
                 logger.error(f"Error processing batch {batch_num}: {e}")
                 continue
         
-        # Cleanup orphaned tickets
         cleanup_orphaned_tickets(current_ticket_ids)
         
-        # Final summary
         elapsed_time = time.time() - start_time
         logger.info(f"\n⏱️  Total execution time: {elapsed_time/60:.1f} minutes")
         print_final_summary()
