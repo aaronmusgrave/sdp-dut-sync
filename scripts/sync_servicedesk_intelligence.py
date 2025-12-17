@@ -10,6 +10,7 @@ New in v3.1.10:
 - Multiple redundant tags for better open ticket search
 - Improved closed ticket tagging with NOT-ACTIVE flags
 - Status-specific tags (STATUS-OPEN, CURRENTLY-OPEN, etc.)
+- Environment variable validation with helpful error messages
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -39,6 +40,84 @@ from urllib3.util.retry import Retry
 
 VERSION = "3.1.10"
 
+# Validate environment variables first
+def validate_required_env_vars():
+    """Validate all required environment variables are set"""
+    required = {
+        'DUST_API_KEY': 'Dust API key',
+        'DUST_WORKSPACE_ID': 'Dust workspace ID',
+        'SDP_DOMAIN': 'ServiceDesk Plus domain (e.g., motorad.sdpondemand.com)',
+        'SDP_CLIENT_ID': 'ServiceDesk Plus OAuth client ID',
+        'SDP_CLIENT_SECRET': 'ServiceDesk Plus OAuth client secret',
+        'SDP_REFRESH_TOKEN': 'ServiceDesk Plus OAuth refresh token'
+    }
+    
+    missing = []
+    empty = []
+    
+    for var, description in required.items():
+        value = os.environ.get(var)
+        if not value:
+            missing.append(f"{var} ({description})")
+        elif not value.strip():
+            empty.append(f"{var} ({description})")
+    
+    if missing:
+        print("=" * 60)
+        print("❌ MISSING REQUIRED ENVIRONMENT VARIABLES")
+        print("=" * 60)
+        for var in missing:
+            print(f"  • {var}")
+        print("=" * 60)
+        print("\nPlease set these variables in your GitHub repository secrets:")
+        print("Settings → Secrets and variables → Actions → New repository secret")
+        print("=" * 60)
+        sys.exit(1)
+    
+    if empty:
+        print("=" * 60)
+        print("❌ EMPTY ENVIRONMENT VARIABLES")
+        print("=" * 60)
+        for var in empty:
+            print(f"  • {var}")
+        print("=" * 60)
+        sys.exit(1)
+    
+    # Validate SDP_DOMAIN format
+    sdp_domain = os.environ.get('SDP_DOMAIN', '').strip()
+    if sdp_domain:
+        # Remove https:// or http:// if present
+        sdp_domain = sdp_domain.replace('https://', '').replace('http://', '')
+        # Remove trailing slash if present
+        sdp_domain = sdp_domain.rstrip('/')
+        
+        if not sdp_domain or sdp_domain == '***' or len(sdp_domain) < 5:
+            print("=" * 60)
+            print("❌ INVALID SDP_DOMAIN")
+            print("=" * 60)
+            print(f"Current value appears invalid")
+            print("\nSDP_DOMAIN should be just the domain name, for example:")
+            print("  motorad.sdpondemand.com")
+            print("\nDO NOT include:")
+            print("  ❌ https://")
+            print("  ❌ http://")
+            print("  ❌ Trailing slashes")
+            print("=" * 60)
+            sys.exit(1)
+        
+        # Update the environment variable with cleaned value
+        os.environ['SDP_DOMAIN'] = sdp_domain
+        # Show first 20 chars for verification (security)
+        domain_display = sdp_domain[:20] + "..." if len(sdp_domain) > 20 else sdp_domain
+        print(f"✓ SDP_DOMAIN validated: {domain_display}")
+    
+    return True
+
+# Validate before setting configuration
+print("Validating environment variables...")
+validate_required_env_vars()
+print("")
+
 # Dust Configuration
 DUST_API_KEY = os.environ.get("DUST_API_KEY")
 DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad")
@@ -46,11 +125,17 @@ DUST_DATA_SOURCE_ID = "servicedesk_intelligence"
 DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
 
 # ServiceDesk Plus Configuration
-SDP_DOMAIN = os.environ.get("SDP_DOMAIN")
+SDP_DOMAIN = os.environ.get("SDP_DOMAIN").strip()
 SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID")
 SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET")
 SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN")
 SDP_BASE_URL = f"https://{SDP_DOMAIN}"
+
+print(f"✓ Configuration loaded")
+print(f"  Workspace: {DUST_WORKSPACE_ID}")
+print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
+print(f"  SDP Base URL: {SDP_BASE_URL}")
+print("")
 
 # Processing Configuration
 BATCH_SIZE = 50
@@ -127,6 +212,9 @@ class TokenManager:
             logger.info("🔄 Token expiring soon, refreshing...")
         
         token_url = f"{SDP_BASE_URL}/oauth/v1/token"
+        
+        logger.info(f"  Token URL: {token_url}")
+        
         payload = {
             'client_id': SDP_CLIENT_ID,
             'client_secret': SDP_CLIENT_SECRET,
@@ -143,10 +231,13 @@ class TokenManager:
             expires_in = token_data.get('expires_in', 3300)
             self.token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
             
-            logger.info(f"✓ Token refreshed successfully")
+            logger.info(f"✓ Token refreshed successfully (expires in {expires_in/60:.0f} minutes)")
             
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             logger.error(f"❌ Failed to refresh token: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"  Response status: {e.response.status_code}")
+                logger.error(f"  Response body: {e.response.text[:500]}")
             raise
 
 token_manager = TokenManager()
@@ -439,6 +530,9 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"  Response status: {e.response.status_code}")
+            logger.error(f"  Response body: {e.response.text[:500]}")
         raise
 
 def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
@@ -1012,7 +1106,7 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
         stats['failed'] += failed
     
     stats['skipped'] = METRICS['skipped']
-    logger.info(f"\n✓ Processing complete: {stats['successful']} successful, {stats['failed']} failed, {stats['skipped']} skipped\n")
+    logger.info(f"\nn✓ Processing complete: {stats['successful']} successful, {stats['failed']} failed, {stats['skipped']} skipped\n")
     
     return stats
 
@@ -1029,12 +1123,9 @@ def main():
     logger.info("")
     
     try:
-        required_vars = ['DUST_API_KEY', 'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN']
-        missing = [var for var in required_vars if not os.environ.get(var)]
-        if missing:
-            logger.error(f"Missing environment variables: {', '.join(missing)}")
-            return 1
+        # Environment variables already validated during import
         
+        # Initialize token manager
         token_manager.get_token()
         
         checkpoint = load_checkpoint()
