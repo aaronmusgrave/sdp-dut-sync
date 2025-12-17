@@ -222,8 +222,8 @@ def create_session() -> requests.Session:
     )
     adapter = HTTPAdapter(
         max_retries=retry_strategy,
-        pool_connections=100,  # v3.1.17: Sized for 20 outer × 5 inner workers
-        pool_maxsize=100       # v3.1.17: Sized for 20 outer × 5 inner workers
+        pool_connections=100,
+        pool_maxsize=100
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -506,7 +506,6 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
         
         detailed_conversations = []
         
-        # v3.1.17: Reduced from 20 to 5 to prevent nested pool overflow
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_conv = {
                 executor.submit(fetch_conversation_detail, ticket_id, conv['id']): conv 
@@ -819,7 +818,7 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
-    if 'urgent' in priority: 'urgent' in priority:
+    if 'urgent' in priority:
         tags.append('urgent-attention')
     
     category = comprehensive_fields.get('category', 'general')
@@ -1090,7 +1089,6 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
         stats['successful'] += successful
         stats['failed'] += failed
         
-        # ALWAYS RETRY FAILURES (removed threshold check)
         if failed > 0:
             failure_rate = failed / len(batch)
             logger.warning(f"  ⚠️  {failed} failures ({failure_rate*100:.1f}%) - Retrying in smaller batches...")
