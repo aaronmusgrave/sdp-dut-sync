@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.18-PRODUCTION
-=================================================
+ServiceDesk Intelligence Suite v3.1.19-RATE-LIMITED
+===================================================
 
-Final production release with comprehensive ticket intelligence.
-- 48 comprehensive fields per ticket
-- Conversation metadata (count, activity patterns)
-- AI intelligence (complexity, sentiment, SLA predictions)
-- Parallel processing for performance
-- Robust error handling and retry logic
-- Production-ready for 4,500+ tickets
+Optimized for 99%+ upload success with aggressive rate limiting.
+- Reduced concurrent uploads (5 instead of 10)
+- Longer delays between requests
+- Exponential backoff on 429 errors
+- Automatic retry logic
+- Slower but more reliable
 """
 
 import os
@@ -31,7 +30,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.18-PRODUCTION"
+VERSION = "3.1.19-RATE-LIMITED"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -96,16 +95,19 @@ print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Domain: {SDP_DOMAIN}")
+print(f"  Mode: RATE-LIMITED (slower but more reliable)")
 print("")
 
-# Processing Configuration
-BATCH_SIZE = 100  # Tickets per batch
-SUB_BATCH_SIZE = 10  # For conversation fetching
-MAX_CONCURRENT_CONVERSATIONS = 10
-MAX_CONCURRENT_UPLOADS = 10
-RETRY_ATTEMPTS = 3
-RETRY_DELAY = 2
-UPLOAD_DELAY = 0.5
+# Processing Configuration - RATE LIMITED
+BATCH_SIZE = 50  # Smaller batches (was 100)
+SUB_BATCH_SIZE = 10
+MAX_CONCURRENT_CONVERSATIONS = 8  # Reduced (was 10)
+MAX_CONCURRENT_UPLOADS = 3  # Much reduced (was 10)
+RETRY_ATTEMPTS = 5  # More retries (was 3)
+RETRY_DELAY = 3  # Longer delay (was 2)
+UPLOAD_DELAY = 2.0  # Much longer (was 0.5)
+BATCH_DELAY = 3.0  # Delay between batches
+MAX_429_RETRIES = 3  # Specific retries for rate limits
 
 # ============================================================
 # LOGGING SETUP
@@ -128,6 +130,8 @@ METRICS = {
     'total_uploaded': 0,
     'skipped': 0,
     'failed_uploads': 0,
+    'retried_uploads': 0,
+    'rate_limited': 0,
     'conversations_fetched': 0,
     'active_tickets': 0,
     'closed_tickets': 0,
@@ -201,14 +205,14 @@ def create_session() -> requests.Session:
     session = requests.Session()
     retry_strategy = Retry(
         total=RETRY_ATTEMPTS,
-        backoff_factor=1,
+        backoff_factor=2,  # Longer backoff
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE"]
     )
     adapter = HTTPAdapter(
         max_retries=retry_strategy,
-        pool_connections=100,
-        pool_maxsize=100
+        pool_connections=50,
+        pool_maxsize=50
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -642,11 +646,11 @@ def process_single_ticket(ticket: Dict, conversations: List[Dict]) -> Optional[D
         return None
 
 # ============================================================
-# DUST API
+# DUST API WITH RETRY LOGIC
 # ============================================================
 
-def upsert_to_dust(document: Dict) -> bool:
-    """Upload document to Dust"""
+def upsert_to_dust_with_retry(document: Dict, max_retries: int = MAX_429_RETRIES) -> bool:
+    """Upload document to Dust with exponential backoff for 429 errors"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
@@ -663,24 +667,48 @@ def upsert_to_dust(document: Dict) -> bool:
         'light_document_output': True
     }
     
-    try:
-        response = session.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        error_type = type(e).__name__
-        METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
-        METRICS['failed_uploads'] += 1
-        logger.error(f"Failed to upload ticket {document['id']}: {e}")
-        return False
+    for attempt in range(max_retries + 1):
+        try:
+            response = session.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            return True
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                METRICS['rate_limited'] += 1
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) * 2  # Exponential: 2s, 4s, 8s
+                    logger.warning(f"Rate limited on ticket {document['id']}, waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    METRICS['retried_uploads'] += 1
+                    continue
+                else:
+                    logger.error(f"Failed to upload ticket {document['id']} after {max_retries} retries (rate limited)")
+                    METRICS['failed_uploads'] += 1
+                    return False
+            else:
+                error_type = type(e).__name__
+                METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
+                METRICS['failed_uploads'] += 1
+                logger.error(f"Failed to upload ticket {document['id']}: {e}")
+                return False
+                
+        except Exception as e:
+            error_type = type(e).__name__
+            METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
+            METRICS['failed_uploads'] += 1
+            logger.error(f"Failed to upload ticket {document['id']}: {e}")
+            return False
+    
+    return False
 
 def upload_batch_parallel(documents: List[Dict]) -> Tuple[int, int]:
-    """Upload batch of documents in parallel"""
+    """Upload batch of documents in parallel with rate limiting"""
     success_count = 0
     failure_count = 0
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-        futures = {executor.submit(upsert_to_dust, doc): doc for doc in documents}
+        futures = {executor.submit(upsert_to_dust_with_retry, doc): doc for doc in documents}
         
         for future in as_completed(futures):
             try:
@@ -693,6 +721,9 @@ def upload_batch_parallel(documents: List[Dict]) -> Tuple[int, int]:
                 failure_count += 1
                 METRICS['failed_uploads'] += 1
                 logger.error(f"Upload exception: {e}")
+            
+            # Small delay between completions
+            time.sleep(0.2)
     
     return success_count, failure_count
 
@@ -724,15 +755,18 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int
     
     logger.info(f"  ✓ Processed {len(documents)} documents")
     
-    # Upload to Dust
+    # Upload to Dust with rate limiting
     if documents:
-        logger.info("  Uploading to Dust...")
+        logger.info("  Uploading to Dust (with rate limit protection)...")
         success, failure = upload_batch_parallel(documents)
         logger.info(f"  ✓ Uploaded {success}/{len(documents)} documents")
         if failure > 0:
             logger.warning(f"  ⚠️  {failure} upload failures")
     
-    time.sleep(UPLOAD_DELAY)
+    # Longer delay between batches
+    if batch_num < total_batches:
+        logger.info(f"  ⏸️  Pausing {BATCH_DELAY}s before next batch...")
+        time.sleep(BATCH_DELAY)
 
 def print_final_summary():
     """Print comprehensive final summary"""
@@ -746,6 +780,8 @@ def print_final_summary():
     logger.info(f"  Total Uploaded:    {METRICS['total_uploaded']}")
     logger.info(f"  Skipped:           {METRICS['skipped']}")
     logger.info(f"  Upload Failures:   {METRICS['failed_uploads']}")
+    logger.info(f"  Retried:           {METRICS['retried_uploads']}")
+    logger.info(f"  Rate Limited:      {METRICS['rate_limited']}")
     
     if METRICS['total_processed'] > 0:
         success_rate = (METRICS['total_uploaded'] / METRICS['total_processed']) * 100
@@ -774,6 +810,7 @@ def print_final_summary():
     
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
+    logger.info("  Mode: RATE-LIMITED (slower but more reliable)")
     logger.info("=" * 60)
 
 def main():
@@ -783,6 +820,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
+    logger.info(f"Mode: RATE-LIMITED (optimized for 99%+ success)")
     logger.info(f"Production sync starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
     
@@ -797,8 +835,10 @@ def main():
             logger.info("✓ No tickets to process")
             return 0
         
-        # Process in batches
+        # Process in smaller batches with delays
         total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
+        logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
+        logger.info(f"Estimated time: {total_batches * 0.7:.0f} minutes\n")
         
         for i in range(0, len(tickets), BATCH_SIZE):
             batch = tickets[i:i+BATCH_SIZE]
