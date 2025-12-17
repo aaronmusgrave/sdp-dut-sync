@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.14
+ServiceDesk Intelligence Suite v3.1.15
 =====================================
 
-CRITICAL FIX: Fetch individual conversation details to get actual text content.
+New in v3.1.15:
+- FIXED: Increased connection pool size to match worker count (20)
+- CHANGED: Always retry failed tickets (removed 20% threshold)
+- Eliminates connection pool warnings
+- More aggressive retry strategy for 100% success rate
 
-New in v3.1.14:
-- FIXED: Now fetches individual conversation details (not just list)
-- Each conversation makes additional API call to get text content
-- Parallel processing maintained for performance (20 workers)
-- Actual conversation text for solution intelligence
-- Rate limiting to prevent API overload
-
-The Problem We're Fixing:
-- /conversations endpoint returns metadata only (no text)
-- /conversations/{id} endpoint returns full detail with text
-- v3.1.13 and earlier never fetched the actual text content
-
-Expected Impact:
-- 6x more API calls (but parallelized)
-- 2-3x longer sync time
-- ACTUAL conversation content for solution intelligence
-- Real troubleshooting paths visible in tickets
+Retained from v3.1.14:
+- Individual conversation detail fetching (actual text content)
+- Parallel processing for performance
+- Rate limiting
+- Smart sub-batch retry logic
 """
 
 import os
@@ -43,7 +35,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.14"
+VERSION = "3.1.15"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -113,14 +105,13 @@ print("")
 BATCH_SIZE = 50
 SUB_BATCH_SIZE = 25
 MAX_PAGES = None
-MAX_CONCURRENT_CONVERSATIONS = 20  # For fetching conversation details in parallel
+MAX_CONCURRENT_CONVERSATIONS = 20
 MAX_CONCURRENT_UPLOADS = 10
 MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
 UPLOAD_DELAY = 0.5
-CONVERSATION_DETAIL_DELAY = 0.1  # Small delay between conversation detail fetches
-FAILURE_THRESHOLD = 0.20
+CONVERSATION_DETAIL_DELAY = 0.1
 
 # File paths
 CHECKPOINT_FILE = "checkpoint.json"
@@ -216,11 +207,11 @@ class TokenManager:
 token_manager = TokenManager()
 
 # ============================================================
-# HTTP SESSION
+# HTTP SESSION WITH INCREASED POOL SIZE
 # ============================================================
 
 def create_session() -> requests.Session:
-    """Create requests session with retry logic"""
+    """Create requests session with retry logic and proper pool sizing"""
     session = requests.Session()
     retry_strategy = Retry(
         total=RETRY_ATTEMPTS,
@@ -228,7 +219,11 @@ def create_session() -> requests.Session:
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE"]
     )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=20,  # Match MAX_CONCURRENT_CONVERSATIONS
+        pool_maxsize=20       # Match MAX_CONCURRENT_CONVERSATIONS
+    )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
@@ -465,10 +460,7 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         raise
 
 def fetch_conversation_detail(ticket_id: str, conversation_id: str) -> Dict:
-    """
-    Fetch individual conversation detail to get actual text content.
-    v3.1.14 CRITICAL FIX: This is what we were missing!
-    """
+    """Fetch individual conversation detail to get actual text content"""
     access_token = token_manager.get_token()
     
     headers = {
@@ -483,7 +475,6 @@ def fetch_conversation_detail(ticket_id: str, conversation_id: str) -> Dict:
         response.raise_for_status()
         data = response.json()
         
-        # Small delay to prevent API overload
         time.sleep(CONVERSATION_DETAIL_DELAY)
         
         METRICS['conversation_details_fetched'] += 1
@@ -493,10 +484,7 @@ def fetch_conversation_detail(ticket_id: str, conversation_id: str) -> Dict:
         return {}
 
 def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
-    """
-    Fetch conversation list, then fetch details for each conversation.
-    v3.1.14: Now gets actual text content!
-    """
+    """Fetch conversation list, then fetch details for each conversation"""
     access_token = token_manager.get_token()
     
     headers = {
@@ -504,7 +492,6 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Step 1: Get conversation list (metadata only)
     url = f"{SDP_BASE_URL}/api/v3/requests/{ticket_id}/conversations"
     
     try:
@@ -516,7 +503,6 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
         if not conversations:
             return []
         
-        # Step 2: Fetch details for each conversation in parallel
         detailed_conversations = []
         
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
@@ -529,11 +515,8 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
                 original_conv = future_to_conv[future]
                 try:
                     conv_detail = future.result()
-                    
-                    # Merge metadata with detail
                     merged_conv = {**original_conv, **conv_detail}
                     
-                    # Track text presence
                     if merged_conv.get('text'):
                         METRICS['conversations_with_text'] += 1
                     else:
@@ -541,7 +524,6 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
                     
                     detailed_conversations.append(merged_conv)
                 except Exception:
-                    # If detail fetch fails, keep original metadata
                     METRICS['conversations_empty'] += 1
                     detailed_conversations.append(original_conv)
         
@@ -610,7 +592,7 @@ def fetch_all_tickets(max_pages: Optional[int] = None,
     return all_tickets
 
 # ============================================================
-# TICKET PROCESSING (Same as v3.1.13 except conversation handling)
+# TICKET PROCESSING (Same as v3.1.14)
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -807,7 +789,7 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
                                 comprehensive_fields: Dict, complexity: int,
                                 sentiment: str, sla_risk: str, 
                                 response_status: Dict) -> List[str]:
-    """Generate comprehensive tags - STREAMLINED"""
+    """Generate comprehensive tags"""
     tags = []
     
     short_id = comprehensive_fields.get('ticket_id')
@@ -885,18 +867,11 @@ def strip_html_preserve_text(html_text: str) -> str:
     if not html_text:
         return ''
     
-    # Decode HTML entities first
     text = unescape(html_text)
-    
-    # Replace break tags with newlines
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</div>', '\n', text, flags=re.IGNORECASE)
-    
-    # Remove all HTML tags but keep the text between them
     text = re.sub(r'<[^>]+>', '', text)
-    
-    # Clean up excessive whitespace
     text = re.sub(r'\n\s*\n', '\n\n', text)
     text = re.sub(r' +', ' ', text)
     text = text.strip()
@@ -904,26 +879,20 @@ def strip_html_preserve_text(html_text: str) -> str:
     return text
 
 def format_conversations_readable(conversations: List[Dict]) -> str:
-    """Format conversations - v3.1.14 WITH ACTUAL TEXT"""
+    """Format conversations with actual text"""
     if not conversations:
         return "No conversations"
     
     formatted = []
     for i, conv in enumerate(conversations, 1):
-        # Get sender - try multiple fields
         sender = (conv.get('sender', {}).get('name') or 
                  conv.get('created_by', {}).get('name') or 
                  'Unknown')
         
         time_val = conv.get('created_time', {}).get('display_value', 'Unknown')
-        
-        # Get raw text - v3.1.14: NOW AVAILABLE!
         raw_text = conv.get('text', '')
-        
-        # Strip HTML while preserving text
         text = strip_html_preserve_text(raw_text)
         
-        # If still empty, mark as no content
         if not text or not text.strip():
             text = '[No text content]'
         
@@ -999,7 +968,7 @@ def generate_ticket_document(ticket: Dict, conversations: List[Dict],
 # ============================================================
 
 def upload_to_dust(document: Dict) -> Tuple[bool, str]:
-    """Upload document to Dust - WITH RATE LIMITING"""
+    """Upload document to Dust"""
     headers = {
         "Authorization": f"Bearer {DUST_API_KEY}",
         "Content-Type": "application/json"
@@ -1016,7 +985,7 @@ def upload_to_dust(document: Dict) -> Tuple[bool, str]:
         return False, document['document_id']
 
 def upload_documents_parallel(documents: List[Dict]) -> Tuple[int, int, List[str]]:
-    """Upload documents in parallel - WITH FAILED TRACKING"""
+    """Upload documents in parallel"""
     if not documents:
         return 0, 0, []
     
@@ -1077,7 +1046,7 @@ def process_single_ticket(ticket: Dict, conversations_map: Dict[str, List[Dict]]
 
 def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int, 
                         retry_attempt: int = 0) -> Tuple[List[Dict], int, int, List[str]]:
-    """Process batch of tickets - WITH RETRY SUPPORT"""
+    """Process batch of tickets"""
     batch_start = (batch_num - 1) * BATCH_SIZE + 1
     batch_end = min(batch_start + len(tickets) - 1, total_tickets)
     
@@ -1101,12 +1070,12 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int
     return [], 0, 0, []
 
 def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
-    """Process all tickets in batches - WITH SMART RETRY"""
+    """Process all tickets in batches - ALWAYS RETRY FAILURES"""
     total_tickets = len(tickets)
     logger.info(f"\n📋 Processing {total_tickets} tickets in batches of {BATCH_SIZE}...")
     logger.info(f"⚡ Rate limiting: {UPLOAD_DELAY}s delay between uploads")
-    logger.info(f"🔄 Smart retry: Batches with >{FAILURE_THRESHOLD*100:.0f}% failures will retry in sub-batches of {SUB_BATCH_SIZE}")
-    logger.info(f"💬 v3.1.14: Fetching individual conversation details (actual text content!)\n")
+    logger.info(f"🔄 Always retry: ANY failures will retry in sub-batches of {SUB_BATCH_SIZE}")
+    logger.info(f"💬 v3.1.15: Connection pool optimized + always retry\n")
     
     stats = {'total': total_tickets, 'successful': 0, 'failed': 0, 'skipped': 0}
     
@@ -1119,29 +1088,27 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
         stats['successful'] += successful
         stats['failed'] += failed
         
-        # SMART RETRY LOGIC
+        # ALWAYS RETRY FAILURES (removed threshold check)
         if failed > 0:
             failure_rate = failed / len(batch)
+            logger.warning(f"  ⚠️  {failed} failures ({failure_rate*100:.1f}%) - Retrying in smaller batches...")
+            METRICS['batches_retried'] += 1
             
-            if failure_rate > FAILURE_THRESHOLD:
-                logger.warning(f"  ⚠️  High failure rate ({failure_rate*100:.1f}%) - Retrying failed tickets in smaller batches...")
-                METRICS['batches_retried'] += 1
+            failed_tickets = [t for t in batch if f"ticket-{t.get('display_id')}" in failed_ids]
+            
+            for j in range(0, len(failed_tickets), SUB_BATCH_SIZE):
+                sub_batch = failed_tickets[j:j+SUB_BATCH_SIZE]
+                logger.info(f"  🔄 Retrying sub-batch ({j+1}-{j+len(sub_batch)} of {len(failed_tickets)} failed)...")
                 
-                failed_tickets = [t for t in batch if f"ticket-{t.get('display_id')}" in failed_ids]
+                _, retry_success, retry_failed, _ = process_ticket_batch(
+                    sub_batch, batch_num, total_tickets, retry_attempt=1
+                )
                 
-                for j in range(0, len(failed_tickets), SUB_BATCH_SIZE):
-                    sub_batch = failed_tickets[j:j+SUB_BATCH_SIZE]
-                    logger.info(f"  🔄 Retrying sub-batch ({j+1}-{j+len(sub_batch)} of {len(failed_tickets)} failed)...")
-                    
-                    _, retry_success, retry_failed, _ = process_ticket_batch(
-                        sub_batch, batch_num, total_tickets, retry_attempt=1
-                    )
-                    
-                    stats['successful'] += retry_success
-                    stats['failed'] -= retry_success
-                    METRICS['retried'] += retry_success
-                    
-                    time.sleep(1)
+                stats['successful'] += retry_success
+                stats['failed'] -= retry_success
+                METRICS['retried'] += retry_success
+                
+                time.sleep(1)
     
     stats['skipped'] = METRICS['skipped']
     METRICS['failed_after_retry'] = stats['failed']
@@ -1167,7 +1134,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.14: CONVERSATION DETAIL FETCHING (actual text!)")
+    logger.info("✨ v3.1.15: Connection pool optimized + always retry")
     logger.info("")
     
     try:
@@ -1183,7 +1150,6 @@ def main():
             logger.info("📊 FULL SYNC (no checkpoint)")
             last_sync_time = None
         
-        # ALWAYS CLEANUP ON FULL SYNC
         if not last_sync_time:
             logger.info("🧹 FULL SYNC detected - forcing cleanup")
             cleanup_dust_data_source()
