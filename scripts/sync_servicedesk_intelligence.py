@@ -11,6 +11,7 @@ New in v3.1.10:
 - Improved closed ticket tagging with NOT-ACTIVE flags
 - Status-specific tags (STATUS-OPEN, CURRENTLY-OPEN, etc.)
 - Robust environment variable validation with character cleaning
+- Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -46,7 +47,7 @@ def validate_required_env_vars():
     required = {
         'DUST_API_KEY': 'Dust API key',
         'DUST_WORKSPACE_ID': 'Dust workspace ID',
-        'SDP_DOMAIN': 'ServiceDesk Plus domain (e.g., motorad.sdpondemand.com)',
+        'SDP_DOMAIN': 'ServiceDesk Plus domain (e.g., motorad.sdpondemand.manageengine.com)',
         'SDP_CLIENT_ID': 'ServiceDesk Plus OAuth client ID',
         'SDP_CLIENT_SECRET': 'ServiceDesk Plus OAuth client secret',
         'SDP_REFRESH_TOKEN': 'ServiceDesk Plus OAuth refresh token'
@@ -106,7 +107,7 @@ def validate_required_env_vars():
             print("=" * 60)
             print(f"After cleaning: '{sdp_domain}'")
             print("\nSDP_DOMAIN should be just the domain name, for example:")
-            print("  motorad.sdpondemand.com")
+            print("  motorad.sdpondemand.manageengine.com")
             print("\nDO NOT include:")
             print("  ❌ https://")
             print("  ❌ http://")
@@ -127,7 +128,7 @@ def validate_required_env_vars():
             print(f"Domain: '{sdp_domain}'")
             print(f"Found invalid characters: {found_invalid}")
             print("\nPlease update the SDP_DOMAIN secret to contain ONLY:")
-            print("  motorad.sdpondemand.com")
+            print("  motorad.sdpondemand.manageengine.com")
             print("=" * 60)
             sys.exit(1)
         
@@ -161,10 +162,14 @@ SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET")
 SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN")
 SDP_BASE_URL = f"https://{SDP_DOMAIN}"
 
+# Zoho OAuth Configuration (ServiceDesk Plus Cloud uses Zoho OAuth)
+ZOHO_OAUTH_URL = os.environ.get("ZOHO_OAUTH_URL", "https://accounts.zoho.com/oauth/v2/token")
+
 print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Base URL: {SDP_BASE_URL}")
+print(f"  OAuth URL: {ZOHO_OAUTH_URL}")
 print("")
 
 # Processing Configuration
@@ -212,7 +217,7 @@ METRICS = {
 SKIPPED_TICKETS = []
 
 # ============================================================
-# TOKEN MANAGER
+# TOKEN MANAGER - CORRECTED FOR SERVICEDESK PLUS CLOUD
 # ============================================================
 
 class TokenManager:
@@ -241,9 +246,12 @@ class TokenManager:
         else:
             logger.info("🔄 Token expiring soon, refreshing...")
         
-        token_url = f"{SDP_BASE_URL}/oauth/v1/token"
+        # ServiceDesk Plus Cloud uses Zoho's OAuth endpoint
+        # NOT the SDP domain endpoint
+        token_url = ZOHO_OAUTH_URL
         
         logger.info(f"  Token URL: {token_url}")
+        logger.info(f"  Using Zoho OAuth endpoint (ServiceDesk Plus Cloud)")
         
         payload = {
             'client_id': SDP_CLIENT_ID,
@@ -263,11 +271,31 @@ class TokenManager:
             
             logger.info(f"✓ Token refreshed successfully (expires in {expires_in/60:.0f} minutes)")
             
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.HTTPError as e:
             logger.error(f"❌ Failed to refresh token: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"  Response status: {e.response.status_code}")
                 logger.error(f"  Response body: {e.response.text[:500]}")
+                
+                # Provide helpful error messages
+                if e.response.status_code == 401:
+                    logger.error("\n  💡 HINT: 401 Unauthorized suggests:")
+                    logger.error("     - SDP_CLIENT_ID might be incorrect")
+                    logger.error("     - SDP_CLIENT_SECRET might be incorrect")
+                    logger.error("     - SDP_REFRESH_TOKEN might be expired")
+                    logger.error("\n     Generate a new refresh token in ServiceDesk Plus:")
+                    logger.error("     Admin → OAuth → Your App → Generate Token")
+                elif e.response.status_code == 404:
+                    logger.error("\n  💡 HINT: 404 Not Found suggests:")
+                    logger.error("     - OAuth endpoint might be different for your region")
+                    logger.error("     - Try setting ZOHO_OAUTH_URL to:")
+                    logger.error("       US: https://accounts.zoho.com/oauth/v2/token")
+                    logger.error("       EU: https://accounts.zoho.eu/oauth/v2/token")
+                    logger.error("       IN: https://accounts.zoho.in/oauth/v2/token")
+                    logger.error("       AU: https://accounts.zoho.com.au/oauth/v2/token")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Failed to refresh token: {e}")
             raise
 
 token_manager = TokenManager()
@@ -842,9 +870,7 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
                                 comprehensive_fields: Dict, complexity: int,
                                 sentiment: str, sla_risk: str, 
                                 response_status: Dict) -> List[str]:
-    """
-    Generate comprehensive tags - v3.1.10 ENHANCED
-    """
+    """Generate comprehensive tags - v3.1.10 ENHANCED"""
     tags = []
     
     short_id = comprehensive_fields.get('ticket_id')
