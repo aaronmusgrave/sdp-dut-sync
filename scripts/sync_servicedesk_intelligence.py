@@ -35,7 +35,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.15"
+VERSION = "3.1.16"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -221,8 +221,8 @@ def create_session() -> requests.Session:
     )
     adapter = HTTPAdapter(
         max_retries=retry_strategy,
-        pool_connections=20,  # Match MAX_CONCURRENT_CONVERSATIONS
-        pool_maxsize=20       # Match MAX_CONCURRENT_CONVERSATIONS
+        pool_connections=50,  # Match MAX_CONCURRENT_CONVERSATIONS
+        pool_maxsize=50       # Match MAX_CONCURRENT_CONVERSATIONS
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
