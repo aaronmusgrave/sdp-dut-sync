@@ -14,7 +14,7 @@ New in v3.1.10:
 - Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
 - Enhanced OAuth error debugging
 - Auto-cleans ALL credentials (removes backslashes)
-- Minimal input_data (only row_count and start_index)
+- Uses WORKING v3.1.9 API request format
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -575,7 +575,7 @@ def cleanup_dust_data_source():
     logger.info("")
 
 # ============================================================
-# SERVICEDESK PLUS API - MINIMAL INPUT_DATA
+# SERVICEDESK PLUS API - WORKING v3.1.9 FORMAT
 # ============================================================
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
@@ -584,28 +584,35 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
     access_token = token_manager.get_token()
     
     headers = {
-        "Authorization": f"Bearer {access_token}"
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Absolute minimal list_info - just pagination
+    # Use the EXACT format that worked in v3.1.9
     list_info = {
-        "row_count": row_count,
-        "start_index": start_index
+        "list_info": {
+            "row_count": row_count,
+            "start_index": start_index,
+            "sort_field": "created_time",
+            "sort_order": "desc"
+        }
     }
     
-    input_data = {"list_info": list_info}
+    # Add search criteria if incremental sync
+    if last_sync_time:
+        timestamp_ms = int(last_sync_time.timestamp() * 1000)
+        list_info["list_info"]["search_criteria"] = {
+            "field": "created_time",
+            "condition": "greater than",
+            "value": timestamp_ms
+        }
     
-    # URL encode the JSON
+    params = {'input_data': json.dumps(list_info)}
     url = f"{SDP_BASE_URL}/api/v3/requests"
     
     try:
-        # GET request with input_data as query parameter
-        response = session.get(
-            url,
-            headers=headers,
-            params={"input_data": json.dumps(input_data)},
-            timeout=30
-        )
+        # GET request with params (exactly as v3.1.9)
+        response = session.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         return response.json()
         
@@ -621,8 +628,8 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
     access_token = token_manager.get_token()
     
     headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
+        'Authorization': f'Zoho-oauthtoken {access_token}',
+        'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
     url = f"{SDP_BASE_URL}/api/v3/requests/{ticket_id}/conversations"
