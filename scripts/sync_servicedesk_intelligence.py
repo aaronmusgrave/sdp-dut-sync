@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.10
+ServiceDesk Intelligence Suite v3.1.11
 =====================================
 
-Enhanced tagging for open/active ticket search reliability.
+Streamlined tagging for reliable open ticket search without document bloat.
 
-New in v3.1.10:
-- Enhanced status tagging with prominent ACTIVE-TICKET and IS-OPEN flags
-- Multiple redundant tags for better open ticket search
-- Improved closed ticket tagging with NOT-ACTIVE flags
-- Status-specific tags (STATUS-OPEN, CURRENTLY-OPEN, etc.)
-- Robust environment variable validation with character cleaning
-- Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
-- Enhanced OAuth error debugging
-- Auto-cleans ALL credentials (removes backslashes)
-- Uses WORKING v3.1.9 API request format
-- WORKING v3.1.9 concurrency settings (10 workers, 30s timeout)
+New in v3.1.11:
+- STREAMLINED tagging: Essential tags only (no bloat)
+- status-category:active (CRITICAL for open ticket search)
+- ACTIVE-TICKET (single prominent flag)
+- Removed 20+ redundant tags that caused document bloat
+- Returns to v3.1.9 reliability with v3.1.10 search capability
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
 - Parallel cleanup deletion (51 min → 3 min)
 - Smart cleanup detection (skip when unnecessary)
-- Increased parallel workers (20 conversation, 10 upload)
+- Working concurrency settings (20 conversation, 10 upload)
+- 30 second timeout (proven to work)
 - Progress tracking and speed metrics
 """
 
@@ -43,7 +39,7 @@ from urllib3.util.retry import Retry
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.10"
+VERSION = "3.1.11"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -97,14 +93,13 @@ def validate_required_env_vars():
         # Remove common invalid prefixes/suffixes
         sdp_domain = sdp_domain.replace('https://', '')
         sdp_domain = sdp_domain.replace('http://', '')
-        sdp_domain = sdp_domain.lstrip('\\')  # Remove leading backslash
-        sdp_domain = sdp_domain.lstrip('/')   # Remove leading forward slash
-        sdp_domain = sdp_domain.rstrip('/')   # Remove trailing slash
-        sdp_domain = sdp_domain.strip()       # Remove any whitespace
+        sdp_domain = sdp_domain.lstrip('\\')
+        sdp_domain = sdp_domain.lstrip('/')
+        sdp_domain = sdp_domain.rstrip('/')
+        sdp_domain = sdp_domain.strip()
         
         print(f"🧹 Cleaned SDP_DOMAIN: '{sdp_domain}'")
         
-        # Validate cleaned domain
         if not sdp_domain or sdp_domain == '***' or len(sdp_domain) < 5:
             print("=" * 60)
             print("❌ INVALID SDP_DOMAIN")
@@ -112,16 +107,9 @@ def validate_required_env_vars():
             print(f"After cleaning: '{sdp_domain}'")
             print("\nSDP_DOMAIN should be just the domain name, for example:")
             print("  motorad.sdpondemand.manageengine.com")
-            print("\nDO NOT include:")
-            print("  ❌ https://")
-            print("  ❌ http://")
-            print("  ❌ Backslashes (\\)")
-            print("  ❌ Forward slashes (/)")
-            print("  ❌ Trailing slashes")
             print("=" * 60)
             sys.exit(1)
         
-        # Check for remaining invalid characters
         invalid_chars = ['\\', ' ', '\t', '\n', '\r']
         found_invalid = [char for char in invalid_chars if char in sdp_domain]
         
@@ -131,15 +119,10 @@ def validate_required_env_vars():
             print("=" * 60)
             print(f"Domain: '{sdp_domain}'")
             print(f"Found invalid characters: {found_invalid}")
-            print("\nPlease update the SDP_DOMAIN secret to contain ONLY:")
-            print("  motorad.sdpondemand.manageengine.com")
             print("=" * 60)
             sys.exit(1)
         
-        # Update the environment variable with cleaned value
         os.environ['SDP_DOMAIN'] = sdp_domain
-        
-        # Show first 30 chars for verification (security)
         domain_display = sdp_domain[:30] + "..." if len(sdp_domain) > 30 else sdp_domain
         print(f"✓ SDP_DOMAIN validated: {domain_display}")
     
@@ -153,20 +136,20 @@ validate_required_env_vars()
 print("=" * 60)
 print("")
 
-# Dust Configuration - WITH AUTO-CLEANING
+# Dust Configuration
 DUST_API_KEY = os.environ.get("DUST_API_KEY", "").strip().lstrip('\\').lstrip('/')
 DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad").strip().lstrip('\\').lstrip('/')
 DUST_DATA_SOURCE_ID = "servicedesk"
 DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
 
-# ServiceDesk Plus Configuration - WITH AUTO-CLEANING
+# ServiceDesk Plus Configuration
 SDP_DOMAIN = os.environ.get("SDP_DOMAIN", "").strip()
 SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID", "").strip().lstrip('\\').lstrip('/')
 SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET", "").strip().lstrip('\\').lstrip('/')
 SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN", "").strip().lstrip('\\').lstrip('/')
 SDP_BASE_URL = f"https://{SDP_DOMAIN}"
 
-# Zoho OAuth Configuration (ServiceDesk Plus Cloud uses Zoho OAuth)
+# Zoho OAuth Configuration
 ZOHO_OAUTH_URL = os.environ.get("ZOHO_OAUTH_URL", "https://accounts.zoho.com/oauth/v2/token")
 
 print(f"✓ Configuration loaded")
@@ -174,14 +157,13 @@ print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Base URL: {SDP_BASE_URL}")
 print(f"  OAuth URL: {ZOHO_OAUTH_URL}")
-print(f"  ✓ ALL credentials auto-cleaned (backslashes removed)")
 print("")
 
 # Processing Configuration - WORKING v3.1.9 SETTINGS
 BATCH_SIZE = 50
 MAX_PAGES = None
 MAX_CONCURRENT_CONVERSATIONS = 20
-MAX_CONCURRENT_UPLOADS = 10        # WORKING v3.1.9 SETTING
+MAX_CONCURRENT_UPLOADS = 10
 MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
@@ -222,7 +204,7 @@ METRICS = {
 SKIPPED_TICKETS = []
 
 # ============================================================
-# TOKEN MANAGER - WITH ENHANCED OAUTH DEBUGGING
+# TOKEN MANAGER
 # ============================================================
 
 class TokenManager:
@@ -251,13 +233,10 @@ class TokenManager:
         else:
             logger.info("🔄 Token expiring soon, refreshing...")
         
-        # ServiceDesk Plus Cloud uses Zoho's OAuth endpoint
         token_url = ZOHO_OAUTH_URL
         
         logger.info(f"  Token URL: {token_url}")
         logger.info(f"  Using Zoho OAuth endpoint (ServiceDesk Plus Cloud)")
-        
-        # Show credential info (masked for security)
         logger.info(f"  Client ID: {SDP_CLIENT_ID[:10]}...{SDP_CLIENT_ID[-4:] if len(SDP_CLIENT_ID) > 14 else ''}")
         logger.info(f"  Client Secret: {SDP_CLIENT_SECRET[:4]}...{SDP_CLIENT_SECRET[-4:] if len(SDP_CLIENT_SECRET) > 8 else ''}")
         logger.info(f"  Refresh Token: {SDP_REFRESH_TOKEN[:10]}...{SDP_REFRESH_TOKEN[-4:] if len(SDP_REFRESH_TOKEN) > 14 else ''}")
@@ -271,30 +250,18 @@ class TokenManager:
         
         try:
             response = requests.post(token_url, data=payload, timeout=30)
-            
-            # Log full response for debugging
             logger.info(f"  Response status: {response.status_code}")
             
             if response.status_code == 400:
-                # Parse error message
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('error', 'unknown')
-                    
                     logger.error(f"\n  ❌ OAuth Error: {error_msg}")
                     
                     if error_msg == 'invalid_client':
                         logger.error("  💡 SOLUTION: Client ID or Client Secret is incorrect")
-                        logger.error("     • Check SDP_CLIENT_ID in GitHub secrets")
-                        logger.error("     • Check SDP_CLIENT_SECRET in GitHub secrets")
                     elif error_msg == 'invalid_grant':
                         logger.error("  💡 SOLUTION: Refresh Token is invalid or expired")
-                        logger.error("     • Generate a new refresh token in ServiceDesk Plus")
-                        logger.error("     • Admin → Developer Space → OAuth → Generate Token")
-                        logger.error("     • Update SDP_REFRESH_TOKEN in GitHub secrets")
-                    else:
-                        logger.error(f"  💡 Unknown OAuth error: {error_msg}")
-                        logger.error(f"  Full response: {response.text[:500]}")
                 except:
                     logger.error(f"  Response body: {response.text[:500]}")
             
@@ -307,25 +274,6 @@ class TokenManager:
             
             logger.info(f"✓ Token refreshed successfully (expires in {expires_in/60:.0f} minutes)")
             
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"\n❌ Failed to refresh token: {e}")
-            
-            logger.error("\n" + "=" * 60)
-            logger.error("TROUBLESHOOTING STEPS:")
-            logger.error("=" * 60)
-            logger.error("1. Log into ServiceDesk Plus as admin")
-            logger.error("2. Go to: Admin → Developer Space → OAuth")
-            logger.error("3. Find your OAuth app (or create new one)")
-            logger.error("4. Click 'Generate Token'")
-            logger.error("5. Copy these values to GitHub secrets:")
-            logger.error("   • Client ID → SDP_CLIENT_ID")
-            logger.error("   • Client Secret → SDP_CLIENT_SECRET")
-            logger.error("   • Refresh Token → SDP_REFRESH_TOKEN")
-            logger.error("6. Make sure to NOT include any backslashes!")
-            logger.error("7. Re-run this workflow")
-            logger.error("=" * 60)
-            
-            raise
         except Exception as e:
             logger.error(f"❌ Failed to refresh token: {e}")
             raise
@@ -576,7 +524,7 @@ def cleanup_dust_data_source():
     logger.info("")
 
 # ============================================================
-# SERVICEDESK PLUS API - WORKING v3.1.9 FORMAT
+# SERVICEDESK PLUS API
 # ============================================================
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
@@ -589,7 +537,6 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Use the EXACT format that worked in v3.1.9
     list_info = {
         "list_info": {
             "row_count": row_count,
@@ -599,7 +546,6 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         }
     }
     
-    # Add search criteria if incremental sync
     if last_sync_time:
         timestamp_ms = int(last_sync_time.timestamp() * 1000)
         list_info["list_info"]["search_criteria"] = {
@@ -612,7 +558,6 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
     url = f"{SDP_BASE_URL}/api/v3/requests"
     
     try:
-        # GET request with params (exactly as v3.1.9)
         response = session.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         return response.json()
@@ -901,9 +846,10 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
                                 comprehensive_fields: Dict, complexity: int,
                                 sentiment: str, sla_risk: str, 
                                 response_status: Dict) -> List[str]:
-    """Generate comprehensive tags - v3.1.10 ENHANCED"""
+    """Generate comprehensive tags - v3.1.11 STREAMLINED"""
     tags = []
     
+    # Ticket ID tags
     short_id = comprehensive_fields.get('ticket_id')
     tags.extend([
         f"ticket:{short_id}",
@@ -911,99 +857,83 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
         comprehensive_fields.get('display_id_str', '')
     ])
     
+    # Module type
     module_type = comprehensive_fields.get('module_type', 'unknown')
     tags.append(f"module:{module_type}")
     
     # ============================================================
-    # STATUS TAGS - v3.1.10 ENHANCED
+    # STATUS TAGS - v3.1.11 STREAMLINED (ESSENTIAL ONLY)
     # ============================================================
     status = comprehensive_fields['status'].lower().replace(' ', '-')
     status_category = comprehensive_fields['status_category']
     
+    # Core status tags
     tags.extend([
         f"status:{status}",
-        f"status-category:{status_category}"
+        f"status-category:{status_category}"  # CRITICAL for search
     ])
     
+    # ONE prominent flag only
     if status_category == 'active':
-        tags.extend([
-            'ACTIVE-TICKET',
-            'IS-OPEN',
-            'NOT-CLOSED',
-            'OPEN-STATUS',
-            'active',
-            'open-status',
-            'needs-attention',
-            'actionable-ticket',
-            'requires-work'
-        ])
-        
-        if 'open' in status:
-            tags.extend(['STATUS-OPEN', 'CURRENTLY-OPEN'])
-        if 'progress' in status or 'in-progress' in status:
-            tags.extend(['STATUS-IN-PROGRESS', 'BEING-WORKED'])
-        if 'pending' in status:
-            tags.extend(['STATUS-PENDING', 'WAITING'])
-        if 'hold' in status or 'on-hold' in status:
-            tags.extend(['STATUS-ON-HOLD', 'PAUSED'])
-            
+        tags.append('ACTIVE-TICKET')  # Single searchable flag
     else:
-        tags.extend([
-            'CLOSED-TICKET',
-            'IS-CLOSED',
-            'NOT-ACTIVE',
-            'completed',
-            'resolved'
-        ])
+        tags.append('CLOSED-TICKET')  # Single searchable flag
     # ============================================================
     
+    # Priority
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
     if 'urgent' in priority:
-        tags.extend(['urgent-attention', 'critical-action-required'])
+        tags.append('urgent-attention')
     
+    # Category
     category = comprehensive_fields.get('category', 'general')
     if category and category != 'General':
         tags.append(f"category:{category.lower().replace(' ', '-')}")
     
+    # Technician
     technician = comprehensive_fields.get('technician', 'Unassigned')
     if technician and technician.lower() not in ['unassigned', 'unknown', '']:
         tech_tag = technician.lower().replace(' ', '-').replace('.', '-')
-        tags.extend([
-            f"technician:{tech_tag}",
-            f"assigned-to:{tech_tag}"
-        ])
+        tags.append(f"technician:{tech_tag}")
     else:
-        tags.extend(['unassigned', 'needs-assignment'])
+        tags.append('unassigned')
     
+    # Requester
     requester = comprehensive_fields.get('requester', '')
     if requester:
         req_tag = requester.lower().replace(' ', '-').replace('.', '-')
-        tags.extend([f"requester:{req_tag}"])
+        tags.append(f"requester:{req_tag}")
     
+    # AI Intelligence
     tags.extend([
         f"complexity:{complexity}",
         f"sentiment:{sentiment}",
         f"sla-risk:{sla_risk}"
     ])
     
+    # Overdue
     if comprehensive_fields.get('is_overdue'):
-        tags.extend(['overdue', 'past-due', 'sla-breached'])
+        tags.append('overdue')
     
+    # Conversations
     conv_count = len(conversations)
     if conv_count == 0:
         tags.append('no-conversation')
     elif conv_count > 10:
         tags.append('high-conversation-volume')
     
+    # Awaiting
     awaiting = response_status.get('awaiting_response')
     tags.append(f"awaiting:{awaiting}")
     
+    # Module type detail
     if comprehensive_fields.get('is_service_request'):
         tags.append('service-request')
     else:
         tags.append('request')
     
+    # Remove duplicates
     tags = list(dict.fromkeys([tag.strip() for tag in tags if tag and tag.strip()]))
     return tags
 
@@ -1081,7 +1011,7 @@ def generate_ticket_document(ticket: Dict, conversations: List[Dict],
     return document
 
 def upload_to_dust(document: Dict) -> bool:
-    """Upload document to Dust - WORKING v3.1.9 SETTINGS"""
+    """Upload document to Dust"""
     headers = {
         "Authorization": f"Bearer {DUST_API_KEY}",
         "Content-Type": "application/json"
@@ -1090,14 +1020,14 @@ def upload_to_dust(document: Dict) -> bool:
     url = f"{DUST_API_URL}/documents/{document['document_id']}"
     
     try:
-        response = session.post(url, headers=headers, json=document, timeout=30)  # v3.1.9 SETTING
+        response = session.post(url, headers=headers, json=document, timeout=30)
         response.raise_for_status()
         return True
     except Exception:
         return False
 
 def upload_documents_parallel(documents: List[Dict]) -> tuple:
-    """Upload documents in parallel - WORKING v3.1.9 SETTINGS"""
+    """Upload documents in parallel"""
     if not documents:
         return 0, 0
     
@@ -1206,13 +1136,10 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.10: Enhanced tagging for open ticket search")
+    logger.info("✨ v3.1.11: Streamlined tagging (no bloat)")
     logger.info("")
     
     try:
-        # Environment variables already validated during import
-        
-        # Initialize token manager
         token_manager.get_token()
         
         checkpoint = load_checkpoint()
