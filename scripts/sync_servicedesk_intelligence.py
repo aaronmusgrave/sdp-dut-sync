@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.11
+ServiceDesk Intelligence Suite v3.1.12
 =====================================
 
-Streamlined tagging for reliable open ticket search without document bloat.
+Rate limiting + smart retry for failed batches.
 
-New in v3.1.11:
-- STREAMLINED tagging: Essential tags only (no bloat)
-- status-category:active (CRITICAL for open ticket search)
-- ACTIVE-TICKET (single prominent flag)
-- Removed 20+ redundant tags that caused document bloat
-- Returns to v3.1.9 reliability with v3.1.10 search capability
+New in v3.1.12:
+- Rate limiting: 0.5s delay between uploads (reduce API stress)
+- Smart retry: Batches with >20% failures retry in smaller sub-batches
+- Failed ticket tracking and retry logic
+- Maximum 2 retry attempts per batch to avoid infinite loops
 
-Retained from v3.1.9:
-- Token Manager with auto-refresh (prevents 401 failures)
-- Parallel cleanup deletion (51 min → 3 min)
-- Smart cleanup detection (skip when unnecessary)
-- Working concurrency settings (20 conversation, 10 upload)
-- 30 second timeout (proven to work)
-- Progress tracking and speed metrics
+Retained from v3.1.11:
+- Streamlined tagging (no bloat)
+- status-category:active for reliable search
+- ACTIVE-TICKET single flag
+- Working v3.1.9 core settings
 """
 
 import os
@@ -28,7 +25,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 import re
@@ -39,7 +36,7 @@ from urllib3.util.retry import Retry
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.11"
+VERSION = "3.1.12"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -70,9 +67,6 @@ def validate_required_env_vars():
         for var in missing:
             print(f"  • {var}")
         print("=" * 60)
-        print("\nPlease set these variables in your GitHub repository secrets:")
-        print("Settings → Secrets and variables → Actions → New repository secret")
-        print("=" * 60)
         sys.exit(1)
     
     if empty:
@@ -84,51 +78,20 @@ def validate_required_env_vars():
         print("=" * 60)
         sys.exit(1)
     
-    # Validate and clean SDP_DOMAIN format
     sdp_domain = os.environ.get('SDP_DOMAIN', '').strip()
     
     if sdp_domain:
-        print(f"🔍 Raw SDP_DOMAIN: '{sdp_domain[:50]}'")
-        
-        # Remove common invalid prefixes/suffixes
-        sdp_domain = sdp_domain.replace('https://', '')
-        sdp_domain = sdp_domain.replace('http://', '')
-        sdp_domain = sdp_domain.lstrip('\\')
-        sdp_domain = sdp_domain.lstrip('/')
-        sdp_domain = sdp_domain.rstrip('/')
-        sdp_domain = sdp_domain.strip()
-        
-        print(f"🧹 Cleaned SDP_DOMAIN: '{sdp_domain}'")
+        sdp_domain = sdp_domain.replace('https://', '').replace('http://', '')
+        sdp_domain = sdp_domain.lstrip('\\').lstrip('/').rstrip('/').strip()
         
         if not sdp_domain or sdp_domain == '***' or len(sdp_domain) < 5:
-            print("=" * 60)
             print("❌ INVALID SDP_DOMAIN")
-            print("=" * 60)
-            print(f"After cleaning: '{sdp_domain}'")
-            print("\nSDP_DOMAIN should be just the domain name, for example:")
-            print("  motorad.sdpondemand.manageengine.com")
-            print("=" * 60)
-            sys.exit(1)
-        
-        invalid_chars = ['\\', ' ', '\t', '\n', '\r']
-        found_invalid = [char for char in invalid_chars if char in sdp_domain]
-        
-        if found_invalid:
-            print("=" * 60)
-            print("❌ INVALID CHARACTERS IN SDP_DOMAIN")
-            print("=" * 60)
-            print(f"Domain: '{sdp_domain}'")
-            print(f"Found invalid characters: {found_invalid}")
-            print("=" * 60)
             sys.exit(1)
         
         os.environ['SDP_DOMAIN'] = sdp_domain
-        domain_display = sdp_domain[:30] + "..." if len(sdp_domain) > 30 else sdp_domain
-        print(f"✓ SDP_DOMAIN validated: {domain_display}")
     
     return True
 
-# Validate before setting configuration
 print("=" * 60)
 print("VALIDATING ENVIRONMENT VARIABLES")
 print("=" * 60)
@@ -155,18 +118,19 @@ ZOHO_OAUTH_URL = os.environ.get("ZOHO_OAUTH_URL", "https://accounts.zoho.com/oau
 print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
-print(f"  SDP Base URL: {SDP_BASE_URL}")
-print(f"  OAuth URL: {ZOHO_OAUTH_URL}")
 print("")
 
-# Processing Configuration - WORKING v3.1.9 SETTINGS
+# Processing Configuration - WITH RATE LIMITING
 BATCH_SIZE = 50
+SUB_BATCH_SIZE = 25  # For retry
 MAX_PAGES = None
 MAX_CONCURRENT_CONVERSATIONS = 20
 MAX_CONCURRENT_UPLOADS = 10
 MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
+UPLOAD_DELAY = 0.5  # NEW: Delay between uploads (rate limiting)
+FAILURE_THRESHOLD = 0.20  # NEW: 20% failure rate triggers retry
 
 # File paths
 CHECKPOINT_FILE = "checkpoint.json"
@@ -198,7 +162,8 @@ METRICS = {
     'service_requests': 0,
     'incidents': 0,
     'auto_categorized': 0,
-    'active_tickets': 0
+    'active_tickets': 0,
+    'batches_retried': 0
 }
 
 SKIPPED_TICKETS = []
@@ -235,12 +200,6 @@ class TokenManager:
         
         token_url = ZOHO_OAUTH_URL
         
-        logger.info(f"  Token URL: {token_url}")
-        logger.info(f"  Using Zoho OAuth endpoint (ServiceDesk Plus Cloud)")
-        logger.info(f"  Client ID: {SDP_CLIENT_ID[:10]}...{SDP_CLIENT_ID[-4:] if len(SDP_CLIENT_ID) > 14 else ''}")
-        logger.info(f"  Client Secret: {SDP_CLIENT_SECRET[:4]}...{SDP_CLIENT_SECRET[-4:] if len(SDP_CLIENT_SECRET) > 8 else ''}")
-        logger.info(f"  Refresh Token: {SDP_REFRESH_TOKEN[:10]}...{SDP_REFRESH_TOKEN[-4:] if len(SDP_REFRESH_TOKEN) > 14 else ''}")
-        
         payload = {
             'client_id': SDP_CLIENT_ID,
             'client_secret': SDP_CLIENT_SECRET,
@@ -250,21 +209,6 @@ class TokenManager:
         
         try:
             response = requests.post(token_url, data=payload, timeout=30)
-            logger.info(f"  Response status: {response.status_code}")
-            
-            if response.status_code == 400:
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('error', 'unknown')
-                    logger.error(f"\n  ❌ OAuth Error: {error_msg}")
-                    
-                    if error_msg == 'invalid_client':
-                        logger.error("  💡 SOLUTION: Client ID or Client Secret is incorrect")
-                    elif error_msg == 'invalid_grant':
-                        logger.error("  💡 SOLUTION: Refresh Token is invalid or expired")
-                except:
-                    logger.error(f"  Response body: {response.text[:500]}")
-            
             response.raise_for_status()
             
             token_data = response.json()
@@ -381,7 +325,6 @@ def save_cleanup_tracking(deleted_count: int):
 def should_run_cleanup() -> bool:
     """Determine if cleanup should run"""
     last_cleanup = load_last_cleanup()
-    checkpoint = load_checkpoint()
     
     if not last_cleanup:
         logger.info("🧹 No cleanup record - cleanup recommended")
@@ -396,10 +339,6 @@ def should_run_cleanup() -> bool:
             return True
     except Exception as e:
         logger.warning(f"Could not determine cleanup age: {e}")
-        return True
-    
-    if not checkpoint:
-        logger.info("🧹 Full sync detected - cleanup recommended")
         return True
     
     logger.info("✓ Recent cleanup found, skipping cleanup")
@@ -564,9 +503,6 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"  Response status: {e.response.status_code}")
-            logger.error(f"  Response body: {e.response.text[:500]}")
         raise
 
 def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
@@ -648,7 +584,7 @@ def fetch_all_tickets(max_pages: Optional[int] = None,
     return all_tickets
 
 # ============================================================
-# TICKET PROCESSING
+# TICKET PROCESSING (SAME AS v3.1.11)
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -822,9 +758,7 @@ def analyze_response_status(conversations: List[Dict], comprehensive_fields: Dic
     
     last_conv = conversations[-1]
     last_sender = last_conv.get('sender', {}).get('name', '').lower()
-    
     requester = comprehensive_fields.get('requester', '').lower()
-    
     awaiting = 'technician' if requester in last_sender else 'customer'
     
     return {
@@ -849,7 +783,6 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     """Generate comprehensive tags - v3.1.11 STREAMLINED"""
     tags = []
     
-    # Ticket ID tags
     short_id = comprehensive_fields.get('ticket_id')
     tags.extend([
         f"ticket:{short_id}",
@@ -857,41 +790,31 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
         comprehensive_fields.get('display_id_str', '')
     ])
     
-    # Module type
     module_type = comprehensive_fields.get('module_type', 'unknown')
     tags.append(f"module:{module_type}")
     
-    # ============================================================
-    # STATUS TAGS - v3.1.11 STREAMLINED (ESSENTIAL ONLY)
-    # ============================================================
     status = comprehensive_fields['status'].lower().replace(' ', '-')
     status_category = comprehensive_fields['status_category']
     
-    # Core status tags
     tags.extend([
         f"status:{status}",
-        f"status-category:{status_category}"  # CRITICAL for search
+        f"status-category:{status_category}"
     ])
     
-    # ONE prominent flag only
     if status_category == 'active':
-        tags.append('ACTIVE-TICKET')  # Single searchable flag
+        tags.append('ACTIVE-TICKET')
     else:
-        tags.append('CLOSED-TICKET')  # Single searchable flag
-    # ============================================================
+        tags.append('CLOSED-TICKET')
     
-    # Priority
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
     if 'urgent' in priority:
         tags.append('urgent-attention')
     
-    # Category
     category = comprehensive_fields.get('category', 'general')
     if category and category != 'General':
         tags.append(f"category:{category.lower().replace(' ', '-')}")
     
-    # Technician
     technician = comprehensive_fields.get('technician', 'Unassigned')
     if technician and technician.lower() not in ['unassigned', 'unknown', '']:
         tech_tag = technician.lower().replace(' ', '-').replace('.', '-')
@@ -899,41 +822,34 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     else:
         tags.append('unassigned')
     
-    # Requester
     requester = comprehensive_fields.get('requester', '')
     if requester:
         req_tag = requester.lower().replace(' ', '-').replace('.', '-')
         tags.append(f"requester:{req_tag}")
     
-    # AI Intelligence
     tags.extend([
         f"complexity:{complexity}",
         f"sentiment:{sentiment}",
         f"sla-risk:{sla_risk}"
     ])
     
-    # Overdue
     if comprehensive_fields.get('is_overdue'):
         tags.append('overdue')
     
-    # Conversations
     conv_count = len(conversations)
     if conv_count == 0:
         tags.append('no-conversation')
     elif conv_count > 10:
         tags.append('high-conversation-volume')
     
-    # Awaiting
     awaiting = response_status.get('awaiting_response')
     tags.append(f"awaiting:{awaiting}")
     
-    # Module type detail
     if comprehensive_fields.get('is_service_request'):
         tags.append('service-request')
     else:
         tags.append('request')
     
-    # Remove duplicates
     tags = list(dict.fromkeys([tag.strip() for tag in tags if tag and tag.strip()]))
     return tags
 
@@ -1010,8 +926,12 @@ def generate_ticket_document(ticket: Dict, conversations: List[Dict],
     
     return document
 
-def upload_to_dust(document: Dict) -> bool:
-    """Upload document to Dust"""
+# ============================================================
+# UPLOAD WITH RATE LIMITING
+# ============================================================
+
+def upload_to_dust(document: Dict) -> Tuple[bool, str]:
+    """Upload document to Dust - WITH RATE LIMITING"""
     headers = {
         "Authorization": f"Bearer {DUST_API_KEY}",
         "Content-Type": "application/json"
@@ -1022,17 +942,19 @@ def upload_to_dust(document: Dict) -> bool:
     try:
         response = session.post(url, headers=headers, json=document, timeout=30)
         response.raise_for_status()
-        return True
+        time.sleep(UPLOAD_DELAY)  # RATE LIMITING
+        return True, document['document_id']
     except Exception:
-        return False
+        return False, document['document_id']
 
-def upload_documents_parallel(documents: List[Dict]) -> tuple:
-    """Upload documents in parallel"""
+def upload_documents_parallel(documents: List[Dict]) -> Tuple[int, int, List[str]]:
+    """Upload documents in parallel - WITH FAILED TRACKING"""
     if not documents:
-        return 0, 0
+        return 0, 0, []
     
     successful = 0
     failed = 0
+    failed_ids = []
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
         future_to_doc = {
@@ -1041,12 +963,14 @@ def upload_documents_parallel(documents: List[Dict]) -> tuple:
         }
         
         for future in as_completed(future_to_doc):
-            if future.result():
+            success, doc_id = future.result()
+            if success:
                 successful += 1
             else:
                 failed += 1
+                failed_ids.append(doc_id)
     
-    return successful, failed
+    return successful, failed, failed_ids
 
 def process_single_ticket(ticket: Dict, conversations_map: Dict[str, List[Dict]]) -> Optional[Dict]:
     """Process single ticket"""
@@ -1083,12 +1007,14 @@ def process_single_ticket(ticket: Dict, conversations_map: Dict[str, List[Dict]]
         METRICS['skipped'] += 1
         return None
 
-def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int) -> tuple:
-    """Process batch of tickets"""
+def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int, 
+                        retry_attempt: int = 0) -> Tuple[List[Dict], int, int, List[str]]:
+    """Process batch of tickets - WITH RETRY SUPPORT"""
     batch_start = (batch_num - 1) * BATCH_SIZE + 1
     batch_end = min(batch_start + len(tickets) - 1, total_tickets)
     
-    logger.info(f"\n[Batch {batch_num}] Processing tickets {batch_start}-{batch_end}...")
+    retry_prefix = f"[RETRY {retry_attempt}] " if retry_attempt > 0 else ""
+    logger.info(f"\n{retry_prefix}[Batch {batch_num}] Processing tickets {batch_start}-{batch_end}...")
     
     ticket_ids = [str(t.get('id')) for t in tickets]
     conversations_map = fetch_conversations_parallel(ticket_ids)
@@ -1100,16 +1026,18 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int
             documents.append(doc)
     
     if documents:
-        successful, failed = upload_documents_parallel(documents)
+        successful, failed, failed_ids = upload_documents_parallel(documents)
         logger.info(f"  ✓ Batch complete: {successful} uploaded, {failed} failed")
-        return documents, successful, failed
+        return documents, successful, failed, failed_ids
     
-    return [], 0, 0
+    return [], 0, 0, []
 
 def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
-    """Process all tickets in batches"""
+    """Process all tickets in batches - WITH SMART RETRY"""
     total_tickets = len(tickets)
     logger.info(f"\n📋 Processing {total_tickets} tickets in batches of {BATCH_SIZE}...")
+    logger.info(f"⚡ Rate limiting: {UPLOAD_DELAY}s delay between uploads")
+    logger.info(f"🔄 Smart retry: Batches with >{FAILURE_THRESHOLD*100:.0f}% failures will retry in sub-batches of {SUB_BATCH_SIZE}\n")
     
     stats = {'total': total_tickets, 'successful': 0, 'failed': 0, 'skipped': 0}
     
@@ -1117,13 +1045,46 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
         batch = tickets[i:i+BATCH_SIZE]
         batch_num = (i // BATCH_SIZE) + 1
         
-        documents, successful, failed = process_ticket_batch(batch, batch_num, total_tickets)
+        documents, successful, failed, failed_ids = process_ticket_batch(batch, batch_num, total_tickets)
         
         stats['successful'] += successful
         stats['failed'] += failed
+        
+        # SMART RETRY LOGIC (Option 3)
+        if failed > 0:
+            failure_rate = failed / len(batch)
+            
+            if failure_rate > FAILURE_THRESHOLD:
+                logger.warning(f"  ⚠️  High failure rate ({failure_rate*100:.1f}%) - Retrying failed tickets in smaller batches...")
+                METRICS['batches_retried'] += 1
+                
+                # Find failed tickets
+                failed_tickets = [t for t in batch if f"ticket-{t.get('display_id')}" in failed_ids]
+                
+                # Retry in sub-batches
+                for j in range(0, len(failed_tickets), SUB_BATCH_SIZE):
+                    sub_batch = failed_tickets[j:j+SUB_BATCH_SIZE]
+                    logger.info(f"  🔄 Retrying sub-batch ({j+1}-{j+len(sub_batch)} of {len(failed_tickets)} failed)...")
+                    
+                    _, retry_success, retry_failed, _ = process_ticket_batch(
+                        sub_batch, batch_num, total_tickets, retry_attempt=1
+                    )
+                    
+                    stats['successful'] += retry_success
+                    stats['failed'] -= retry_success  # Remove from failed count
+                    METRICS['retried'] += retry_success
+                    
+                    time.sleep(1)  # Extra delay between retries
     
     stats['skipped'] = METRICS['skipped']
-    logger.info(f"\n✓ Processing complete: {stats['successful']} successful, {stats['failed']} failed, {stats['skipped']} skipped\n")
+    METRICS['failed_after_retry'] = stats['failed']
+    
+    logger.info(f"\n✓ Processing complete:")
+    logger.info(f"  Successful: {stats['successful']}")
+    logger.info(f"  Failed: {stats['failed']}")
+    logger.info(f"  Retried: {METRICS['retried']}")
+    logger.info(f"  Batches retried: {METRICS['batches_retried']}")
+    logger.info(f"  Skipped: {stats['skipped']}\n")
     
     return stats
 
@@ -1136,7 +1097,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.11: Streamlined tagging (no bloat)")
+    logger.info("✨ v3.1.12: Rate limiting + Smart retry")
     logger.info("")
     
     try:
@@ -1172,14 +1133,19 @@ def main():
         save_last_sync_time(sync_start_time)
         save_checkpoint(sync_start_time.isoformat(), METRICS)
         
+        success_rate = (stats['successful'] / stats['total'] * 100) if stats['total'] > 0 else 0
+        
         logger.info("=" * 60)
         logger.info(f"✓ SYNC COMPLETE (v{VERSION})")
         logger.info("=" * 60)
         logger.info(f"  Total Processed: {METRICS['total_processed']}")
+        logger.info(f"  Successful: {stats['successful']} ({success_rate:.1f}%)")
+        logger.info(f"  Failed: {stats['failed']}")
+        logger.info(f"  Retried: {METRICS['retried']}")
+        logger.info(f"  Batches Retried: {METRICS['batches_retried']}")
         logger.info(f"  Active Tickets: {METRICS['active_tickets']}")
         logger.info(f"  Service Requests: {METRICS['service_requests']}")
         logger.info(f"  Requests: {METRICS['requests']}")
-        logger.info(f"  Skipped: {METRICS['skipped']}")
         logger.info("=" * 60)
         
         return 0
