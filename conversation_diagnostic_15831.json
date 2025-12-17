@@ -1,0 +1,390 @@
+{
+  "response_status": [
+    {
+      "status_code": 2000,
+      "status": "success"
+    }
+  ],
+  "list_info": {
+    "has_more_rows": true,
+    "sort_field": "created_time",
+    "row_count": 10
+  },
+  "conversations": [
+    {
+      "created_time": {
+        "display_value": "Nov 27, 2025 04:22 AM",
+        "value": "1764238938336"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": true,
+      "id": "150534000029187027",
+      "type": "RequesterAck_E-Mail",
+      "is_merged": false,
+      "created_by": {
+        "email_id": null,
+        "is_technician": false,
+        "sms_mail": null,
+        "mobile": null,
+        "last_name": "",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": null,
+        "site": null,
+        "phone": null,
+        "employee_id": "",
+        "name": "System",
+        "id": "150534000000006619",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=-1&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": null,
+        "first_name": "System",
+        "job_title": ""
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Nov 27, 2025 04:22 AM",
+        "value": "1764238938402"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": false,
+      "id": "150534000029171019",
+      "type": "Technician_E-Mail",
+      "is_merged": false,
+      "created_by": {
+        "email_id": null,
+        "is_technician": false,
+        "sms_mail": null,
+        "mobile": null,
+        "last_name": "",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": null,
+        "site": null,
+        "phone": null,
+        "employee_id": "",
+        "name": "System",
+        "id": "150534000000006619",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=-1&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": null,
+        "first_name": "System",
+        "job_title": ""
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Nov 27, 2025 04:22 AM",
+        "value": "1764238938429"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": false,
+      "id": "150534000029183007",
+      "type": "TechIntimation_E-Mail",
+      "is_merged": false,
+      "created_by": {
+        "email_id": null,
+        "is_technician": false,
+        "sms_mail": null,
+        "mobile": null,
+        "last_name": "",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": null,
+        "site": null,
+        "phone": null,
+        "employee_id": "",
+        "name": "System",
+        "id": "150534000000006619",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=-1&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": null,
+        "first_name": "System",
+        "job_title": ""
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Nov 30, 2025 09:23 AM",
+        "value": "1764516218293"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": true,
+      "id": "150534000029294319",
+      "type": "REQREPLY",
+      "is_merged": false,
+      "created_by": {
+        "email_id": "dudu.r@motorad.com",
+        "is_technician": true,
+        "sms_mail": null,
+        "mobile": "+972548056070",
+        "last_name": "Raz",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": "0",
+        "site": {
+          "deleted": false,
+          "name": "Motorad Israel",
+          "id": "150534000000319026",
+          "is_default": false
+        },
+        "phone": null,
+        "employee_id": null,
+        "name": "Dudu Raz",
+        "id": "150534000000646115",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=763129477&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": {
+          "site": {
+            "id": "150534000000319026"
+          },
+          "name": "IT",
+          "id": "150534000004260839"
+        },
+        "first_name": "Dudu",
+        "job_title": "Applications Manager"
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Dec 1, 2025 06:32 AM",
+        "value": "1764592364348"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": true,
+      "id": "150534000029293065",
+      "type": "CONVERSATION",
+      "is_merged": false,
+      "created_by": {
+        "email_id": "oleksii.b@motorad-eu.de",
+        "is_technician": false,
+        "sms_mail": null,
+        "mobile": null,
+        "last_name": "Bartashevych",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": null,
+        "site": {
+          "deleted": false,
+          "name": "Motorad Germany",
+          "id": "150534000000407076",
+          "is_default": false
+        },
+        "phone": null,
+        "employee_id": null,
+        "name": "Oleksii Bartashevych",
+        "id": "150534000012552007",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=-1&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": {
+          "site": {
+            "id": "150534000000407076"
+          },
+          "name": "Motorad Germany",
+          "id": "150534000004267168"
+        },
+        "first_name": "Oleksii",
+        "job_title": null
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Dec 1, 2025 06:33 AM",
+        "value": "1764592388539"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": false,
+      "id": "150534000029304365",
+      "type": "Technician_Thread_E-Mail",
+      "is_merged": false,
+      "created_by": {
+        "email_id": null,
+        "is_technician": false,
+        "sms_mail": null,
+        "mobile": null,
+        "last_name": "",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": null,
+        "site": null,
+        "phone": null,
+        "employee_id": "",
+        "name": "System",
+        "id": "150534000000006619",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=-1&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": null,
+        "first_name": "System",
+        "job_title": ""
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Dec 2, 2025 04:22 AM",
+        "value": "1764670929719"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": false,
+      "id": "150534000029259287",
+      "type": "WFNotification_EMAIL",
+      "is_merged": false,
+      "created_by": {
+        "email_id": null,
+        "is_technician": false,
+        "sms_mail": null,
+        "mobile": null,
+        "last_name": "",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": null,
+        "site": null,
+        "phone": null,
+        "employee_id": "",
+        "name": "System",
+        "id": "150534000000006619",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=-1&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": null,
+        "first_name": "System",
+        "job_title": ""
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Dec 3, 2025 06:05 AM",
+        "value": "1764763553668"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": true,
+      "id": "150534000029287121",
+      "type": "REQREPLY",
+      "is_merged": false,
+      "created_by": {
+        "email_id": "dudu.r@motorad.com",
+        "is_technician": true,
+        "sms_mail": null,
+        "mobile": "+972548056070",
+        "last_name": "Raz",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": "0",
+        "site": {
+          "deleted": false,
+          "name": "Motorad Israel",
+          "id": "150534000000319026",
+          "is_default": false
+        },
+        "phone": null,
+        "employee_id": null,
+        "name": "Dudu Raz",
+        "id": "150534000000646115",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=763129477&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": {
+          "site": {
+            "id": "150534000000319026"
+          },
+          "name": "IT",
+          "id": "150534000004260839"
+        },
+        "first_name": "Dudu",
+        "job_title": "Applications Manager"
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Dec 7, 2025 03:50 AM",
+        "value": "1765101024104"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": true,
+      "id": "150534000029461053",
+      "type": "REQREPLY",
+      "is_merged": false,
+      "created_by": {
+        "email_id": "dudu.r@motorad.com",
+        "is_technician": true,
+        "sms_mail": null,
+        "mobile": "+972548056070",
+        "last_name": "Raz",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": "0",
+        "site": {
+          "deleted": false,
+          "name": "Motorad Israel",
+          "id": "150534000000319026",
+          "is_default": false
+        },
+        "phone": null,
+        "employee_id": null,
+        "name": "Dudu Raz",
+        "id": "150534000000646115",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=763129477&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": {
+          "site": {
+            "id": "150534000000319026"
+          },
+          "name": "IT",
+          "id": "150534000004260839"
+        },
+        "first_name": "Dudu",
+        "job_title": "Applications Manager"
+      }
+    },
+    {
+      "created_time": {
+        "display_value": "Dec 14, 2025 03:31 AM",
+        "value": "1765704718146"
+      },
+      "parent_notification_id": null,
+      "number_of_attachments": 0,
+      "show_to_requester": true,
+      "id": "150534000029571429",
+      "type": "REQREPLY",
+      "is_merged": false,
+      "created_by": {
+        "email_id": "dudu.r@motorad.com",
+        "is_technician": true,
+        "sms_mail": null,
+        "mobile": "+972548056070",
+        "last_name": "Raz",
+        "user_scope": "internal_user",
+        "sms_mail_id": null,
+        "cost_per_hour": "0",
+        "site": {
+          "deleted": false,
+          "name": "Motorad Israel",
+          "id": "150534000000319026",
+          "is_default": false
+        },
+        "phone": null,
+        "employee_id": null,
+        "name": "Dudu Raz",
+        "id": "150534000000646115",
+        "photo_url": "https://profile.zoho.com/file?exp=10&ID=763129477&t=user&height=60&width=60",
+        "is_vip_user": false,
+        "department": {
+          "site": {
+            "id": "150534000000319026"
+          },
+          "name": "IT",
+          "id": "150534000004260839"
+        },
+        "first_name": "Dudu",
+        "job_title": "Applications Manager"
+      }
+    }
+  ]
+}
