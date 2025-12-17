@@ -442,7 +442,7 @@ def should_run_cleanup() -> bool:
         age = datetime.now(timezone.utc) - last_cleanup_time
         
         if age.days > 7:
-            logger.info(f"🧹 Last cleanup was {age.days} days ago - cleanup recommended")
+            logger.info(f"🧹 Last cleanup was {age.days} ago - cleanup recommended")
             return True
     except Exception as e:
         logger.warning(f"Could not determine cleanup age: {e}")
@@ -885,7 +885,6 @@ def analyze_response_status(conversations: List[Dict], comprehensive_fields: Dic
         'awaiting_response': awaiting,
         'last_responder': last_sender,
         'response_time_indicator': 'normal',
-        'has_unan',
         'has_unanswered_questions': False
     }
 
