@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.20-DEBUG2
+ServiceDesk Intelligence Suite v3.1.21-DEBUG3
 =============================================
 
-DEBUG2: Dump complete API response to find conversation text
-- Process only 3 tickets
-- Show FULL JSON response from conversation list endpoint
-- Determine if text is available and under what field name
+DEBUG3: Check if conversation text comes with ticket DETAIL endpoint
+- Maybe conversations are included in the main ticket response
+- Try different 'include' parameters
+- Dump complete ticket detail response
 """
 
 import os
@@ -24,7 +24,7 @@ from urllib3.util.retry import Retry
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.20-DEBUG2"
+VERSION = "3.1.21-DEBUG3"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -211,8 +211,8 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100) -> Dict:
         logger.error(f"API request failed: {e}")
         raise
 
-def fetch_ticket_conversations(ticket_id: str, display_id: str) -> List[Dict]:
-    """Fetch conversation list - DUMP FULL RESPONSE"""
+def fetch_ticket_detail_with_includes(ticket_id: str, display_id: str) -> Dict:
+    """Fetch COMPLETE ticket detail - try multiple include combinations"""
     access_token = token_manager.get_token()
     
     headers = {
@@ -220,93 +220,134 @@ def fetch_ticket_conversations(ticket_id: str, display_id: str) -> List[Dict]:
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    url = f"{SDP_BASE_URL}/api/v3/requests/{ticket_id}/conversations"
+    url = f"{SDP_BASE_URL}/api/v3/requests/{ticket_id}"
     
     logger.info(f"\n{'='*70}")
-    logger.info(f"📋 TICKET #{display_id} - Fetching Conversations")
+    logger.info(f"📋 TICKET #{display_id} - Fetching COMPLETE Detail")
     logger.info(f"{'='*70}")
-    logger.info(f"URL: {url}")
     
-    try:
-        response = session.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+    # Try multiple combinations of include parameters
+    include_combinations = [
+        ["conversations"],
+        ["conversations", "notes"],
+        ["conversations", "notes", "resolution"],
+        ["conversations", "notes", "resolution", "worklogs"],
+        ["conversations", "notes", "resolution", "worklogs", "tasks"],
+        None  # No include parameter
+    ]
+    
+    for i, include_params in enumerate(include_combinations, 1):
+        logger.info(f"\n--- Attempt {i}/{len(include_combinations)} ---")
         
-        # DUMP THE ENTIRE RESPONSE
-        logger.info(f"\n{'#'*70}")
-        logger.info(f"FULL API RESPONSE:")
-        logger.info(f"{'#'*70}")
-        logger.info(json.dumps(data, indent=2))
-        logger.info(f"{'#'*70}\n")
+        if include_params:
+            input_data = {"include": include_params}
+            params = {'input_data': json.dumps(input_data)}
+            logger.info(f"Include parameters: {include_params}")
+        else:
+            params = {}
+            logger.info("No include parameters (default)")
         
-        conversations = data.get('conversations', [])
+        logger.info(f"URL: {url}")
         
-        logger.info(f"✓ Found {len(conversations)} conversations")
-        
-        if conversations and len(conversations) > 0:
-            # Show first conversation in EXTREME detail
-            first_conv = conversations[0]
-            conv_id = first_conv.get('id', 'unknown')
+        try:
+            response = session.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
             
-            logger.info(f"\n{'='*70}")
-            logger.info(f"FIRST CONVERSATION (ID: {conv_id}) - DETAILED VIEW:")
-            logger.info(f"{'='*70}")
-            logger.info(f"All available keys: {list(first_conv.keys())}")
-            logger.info(f"\nField-by-field breakdown:")
-            logger.info(f"{'-'*70}")
+            # Check if we got the ticket
+            request_data = data.get('request', {})
             
-            for key, value in first_conv.items():
-                value_type = type(value).__name__
+            if not request_data:
+                logger.warning("No 'request' key in response")
+                continue
+            
+            logger.info(f"\n{'#'*70}")
+            logger.info(f"RESPONSE STRUCTURE:")
+            logger.info(f"{'#'*70}")
+            logger.info(f"Top-level keys: {list(data.keys())}")
+            logger.info(f"Request keys: {list(request_data.keys())}")
+            
+            # Check for conversation-related keys
+            conversation_keys = [k for k in request_data.keys() if 'conv' in k.lower() or 'note' in k.lower() or 'comment' in k.lower()]
+            
+            if conversation_keys:
+                logger.info(f"\n✓ FOUND conversation-related keys: {conversation_keys}")
                 
-                if value is None:
-                    logger.info(f"  {key}: None (type: {value_type})")
-                elif isinstance(value, str):
-                    if len(value) > 200:
-                        logger.info(f"  {key}: '{value[:200]}...' (truncated, full length: {len(value)} chars)")
-                        logger.info(f"           [TYPE: {value_type}]")
+                for key in conversation_keys:
+                    value = request_data[key]
+                    logger.info(f"\n{'='*70}")
+                    logger.info(f"KEY: '{key}'")
+                    logger.info(f"{'='*70}")
+                    logger.info(f"Type: {type(value).__name__}")
+                    
+                    if isinstance(value, list):
+                        logger.info(f"List length: {len(value)}")
+                        if len(value) > 0:
+                            logger.info(f"First item keys: {list(value[0].keys()) if isinstance(value[0], dict) else 'Not a dict'}")
+                            logger.info(f"First item sample:")
+                            logger.info(json.dumps(value[0], indent=2)[:1000])
+                    elif isinstance(value, dict):
+                        logger.info(f"Dict keys: {list(value.keys())}")
+                        logger.info(f"Content sample:")
+                        logger.info(json.dumps(value, indent=2)[:1000])
                     else:
-                        logger.info(f"  {key}: '{value}'")
-                        logger.info(f"           [TYPE: {value_type}, LENGTH: {len(value)} chars]")
-                elif isinstance(value, dict):
-                    logger.info(f"  {key}: {json.dumps(value, indent=4)}")
-                    logger.info(f"           [TYPE: {value_type}, KEYS: {list(value.keys())}]")
-                elif isinstance(value, list):
-                    logger.info(f"  {key}: {value}")
-                    logger.info(f"           [TYPE: {value_type}, LENGTH: {len(value)} items]")
-                else:
-                    logger.info(f"  {key}: {value}")
-                    logger.info(f"           [TYPE: {value_type}]")
+                        logger.info(f"Value: {value}")
             
-            logger.info(f"{'='*70}\n")
+            # Dump first 10000 chars of full response
+            logger.info(f"\n{'#'*70}")
+            logger.info(f"FULL RESPONSE (first 10000 chars):")
+            logger.info(f"{'#'*70}")
+            full_json = json.dumps(data, indent=2)
+            logger.info(full_json[:10000])
+            if len(full_json) > 10000:
+                logger.info(f"\n... (truncated, total length: {len(full_json)} chars)")
+            logger.info(f"{'#'*70}")
             
-            # Check for ANY field that might contain text
-            logger.info(f"🔍 Searching for TEXT content in any field...")
-            text_fields = ['text', 'description', 'message', 'content', 'body', 
-                          'comment', 'reply', 'note', 'details', 'html']
-            found_text = False
+            # Search for ANY field containing "text", "message", "description", "comment", "note"
+            logger.info(f"\n🔍 Searching entire response for text content...")
+            text_found = False
             
-            for field in text_fields:
-                if field in first_conv:
-                    value = first_conv[field]
-                    if value:
-                        logger.info(f"   ✓ FOUND: '{field}' field exists and has content!")
-                        logger.info(f"      Content length: {len(str(value))} chars")
-                        logger.info(f"      Preview: {str(value)[:100]}...")
-                        found_text = True
+            def search_for_text(obj, path=""):
+                nonlocal text_found
+                if isinstance(obj, dict):
+                    for key, value in obj.items():
+                        new_path = f"{path}.{key}" if path else key
+                        
+                        # Check if key name suggests text content
+                        if any(keyword in key.lower() for keyword in ['text', 'message', 'description', 'comment', 'note', 'body', 'content', 'reply']):
+                            if isinstance(value, str) and len(value) > 20:
+                                logger.info(f"   ✓ FOUND TEXT at '{new_path}': {len(value)} chars")
+                                logger.info(f"      Preview: {value[:200]}...")
+                                text_found = True
+                        
+                        search_for_text(value, new_path)
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj):
+                        search_for_text(item, f"{path}[{i}]")
             
-            if not found_text:
-                logger.warning(f"   ⚠️  NO TEXT FIELDS FOUND in conversation data")
-                logger.warning(f"   Available fields: {list(first_conv.keys())}")
-        
-        return conversations
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch conversations for ticket #{display_id}: {e}")
-        return []
+            search_for_text(data)
+            
+            if not text_found:
+                logger.warning(f"   ⚠️  No text content found in response")
+            
+            # If this attempt found conversations, we're done
+            if conversation_keys and text_found:
+                logger.info(f"\n✓ SUCCESS with include={include_params}")
+                return data
+            
+            # Small delay between attempts
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"   ❌ Error with include={include_params}: {e}")
+            continue
+    
+    logger.warning(f"\n⚠️  No conversations found in any attempt")
+    return {}
 
 def fetch_all_tickets() -> List[Dict]:
     """Fetch first 3 tickets"""
-    logger.info(f"📊 DEBUG2: Fetching first 3 tickets")
+    logger.info(f"📊 DEBUG3: Fetching first 3 tickets")
     
     try:
         data = fetch_tickets_from_sdp(start_index=1, row_count=100)
@@ -328,14 +369,14 @@ def fetch_all_tickets() -> List[Dict]:
 # ============================================================
 
 def main():
-    """Main execution - DEBUG2 MODE"""
+    """Main execution - DEBUG3 MODE"""
     logger.info("=" * 70)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 70)
-    logger.info("🐛 DEBUG2 MODE: Dumping full conversation API response")
+    logger.info("🐛 DEBUG3 MODE: Checking if conversations in ticket DETAIL endpoint")
     logger.info("   - Processing only 3 tickets")
-    logger.info("   - Showing COMPLETE JSON response")
-    logger.info("   - Analyzing all fields for text content")
+    logger.info("   - Trying multiple 'include' parameter combinations")
+    logger.info("   - Searching entire response for text content")
     logger.info("")
     
     try:
@@ -359,25 +400,22 @@ def main():
             logger.info(f"Subject: {subject}")
             logger.info(f"{'*'*70}")
             
-            conversations = fetch_ticket_conversations(ticket_id, display_id)
-            
-            if not conversations:
-                logger.warning(f"No conversations found for ticket #{display_id}")
+            detail = fetch_ticket_detail_with_includes(ticket_id, display_id)
             
             # Pause between tickets for readability
             if i < len(tickets):
                 logger.info(f"\n{'~'*70}")
-                logger.info("Pausing 2 seconds before next ticket...")
+                logger.info("Pausing 3 seconds before next ticket...")
                 logger.info(f"{'~'*70}\n")
-                time.sleep(2)
+                time.sleep(3)
         
         logger.info("\n" + "=" * 70)
-        logger.info(f"✓ DEBUG2 TEST COMPLETE (v{VERSION})")
+        logger.info(f"✓ DEBUG3 TEST COMPLETE (v{VERSION})")
         logger.info("=" * 70)
         logger.info("\nREVIEW THE LOGS ABOVE TO DETERMINE:")
-        logger.info("  1. Is 'text' field present in conversation data?")
-        logger.info("  2. If not, what fields ARE available?")
-        logger.info("  3. Is conversation text available via this API at all?")
+        logger.info("  1. Does ticket detail endpoint include conversation text?")
+        logger.info("  2. Which 'include' parameters work?")
+        logger.info("  3. What field names contain the conversation text?")
         logger.info("=" * 70)
         
         return 0
