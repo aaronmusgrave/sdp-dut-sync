@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.17
+ServiceDesk Intelligence Suite v3.1.18
 =====================================
 
-New in v3.1.17:
-- FIXED: Nested ThreadPoolExecutor issue causing connection pool warnings
-- Inner pool reduced from 20 to 5 workers (per ticket conversation detail fetch)
-- Outer pool size increased to 100 to handle 20 outer × 5 inner = 100 max concurrent
-- Result: ZERO connection pool warnings!
+New in v3.1.18:
+- Enhanced upload error logging to diagnose failures
+- Track error types (429 rate limit, timeout, server errors, etc.)
+- Display error summary after each batch and in final report
 
-Retained from v3.1.16/15/14:
-- Individual conversation detail fetching (actual text content)
+Retained from v3.1.17:
+- Fixed nested ThreadPool (zero connection pool warnings)
+- Individual conversation detail fetching
 - Always retry failed tickets
-- Parallel processing for performance
-- Rate limiting
-- Smart sub-batch retry logic
 """
 
 import os
@@ -36,7 +33,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.17"
+VERSION = "3.1.18"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -148,7 +145,8 @@ METRICS = {
     'batches_retried': 0,
     'conversation_details_fetched': 0,
     'conversations_with_text': 0,
-    'conversations_empty': 0
+    'conversations_empty': 0,
+    'upload_errors': {}
 }
 
 SKIPPED_TICKETS = []
@@ -965,11 +963,11 @@ def generate_ticket_document(ticket: Dict, conversations: List[Dict],
     return document
 
 # ============================================================
-# UPLOAD WITH RATE LIMITING
+# UPLOAD WITH ERROR TRACKING (v3.1.18)
 # ============================================================
 
-def upload_to_dust(document: Dict) -> Tuple[bool, str]:
-    """Upload document to Dust"""
+def upload_to_dust(document: Dict) -> Tuple[bool, str, Optional[str]]:
+    """Upload document to Dust - returns (success, doc_id, error_msg)"""
     headers = {
         "Authorization": f"Bearer {DUST_API_KEY}",
         "Content-Type": "application/json"
@@ -981,18 +979,29 @@ def upload_to_dust(document: Dict) -> Tuple[bool, str]:
         response = session.post(url, headers=headers, json=document, timeout=30)
         response.raise_for_status()
         time.sleep(UPLOAD_DELAY)
-        return True, document['document_id']
-    except Exception:
-        return False, document['document_id']
+        return True, document['document_id'], None
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response else 'unknown'
+        error_msg = f"HTTP {status_code}"
+        if status_code == 429:
+            error_msg = "Rate Limited (429)"
+        elif status_code >= 500:
+            error_msg = f"Server Error ({status_code})"
+        return False, document['document_id'], error_msg
+    except requests.exceptions.Timeout:
+        return False, document['document_id'], "Timeout"
+    except Exception as e:
+        return False, document['document_id'], str(e)[:50]
 
-def upload_documents_parallel(documents: List[Dict]) -> Tuple[int, int, List[str]]:
-    """Upload documents in parallel"""
+def upload_documents_parallel(documents: List[Dict]) -> Tuple[int, int, List[str], Dict[str, int]]:
+    """Upload documents in parallel - returns (success, failed, failed_ids, error_types)"""
     if not documents:
-        return 0, 0, []
+        return 0, 0, [], {}
     
     successful = 0
     failed = 0
     failed_ids = []
+    error_types = {}
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
         future_to_doc = {
@@ -1001,14 +1010,17 @@ def upload_documents_parallel(documents: List[Dict]) -> Tuple[int, int, List[str
         }
         
         for future in as_completed(future_to_doc):
-            success, doc_id = future.result()
+            success, doc_id, error_msg = future.result()
             if success:
                 successful += 1
             else:
                 failed += 1
                 failed_ids.append(doc_id)
+                if error_msg:
+                    error_types[error_msg] = error_types.get(error_msg, 0) + 1
+                    METRICS['upload_errors'][error_msg] = METRICS['upload_errors'].get(error_msg, 0) + 1
     
-    return successful, failed, failed_ids
+    return successful, failed, failed_ids, error_types
 
 def process_single_ticket(ticket: Dict, conversations_map: Dict[str, List[Dict]]) -> Optional[Dict]:
     """Process single ticket"""
@@ -1046,7 +1058,7 @@ def process_single_ticket(ticket: Dict, conversations_map: Dict[str, List[Dict]]
         return None
 
 def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int, 
-                        retry_attempt: int = 0) -> Tuple[List[Dict], int, int, List[str]]:
+                        retry_attempt: int = 0) -> Tuple[List[Dict], int, int, List[str], Dict[str, int]]:
     """Process batch of tickets"""
     batch_start = (batch_num - 1) * BATCH_SIZE + 1
     batch_end = min(batch_start + len(tickets) - 1, total_tickets)
@@ -1064,11 +1076,16 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int
             documents.append(doc)
     
     if documents:
-        successful, failed, failed_ids = upload_documents_parallel(documents)
-        logger.info(f"  ✓ Batch complete: {successful} uploaded, {failed} failed")
-        return documents, successful, failed, failed_ids
+        successful, failed, failed_ids, error_types = upload_documents_parallel(documents)
+        
+        error_summary = ""
+        if error_types:
+            error_summary = " | Errors: " + ", ".join([f"{err}({cnt})" for err, cnt in error_types.items()])
+        
+        logger.info(f"  ✓ Batch complete: {successful} uploaded, {failed} failed{error_summary}")
+        return documents, successful, failed, failed_ids, error_types
     
-    return [], 0, 0, []
+    return [], 0, 0, [], {}
 
 def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
     """Process all tickets in batches - ALWAYS RETRY FAILURES"""
@@ -1076,7 +1093,7 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
     logger.info(f"\n📋 Processing {total_tickets} tickets in batches of {BATCH_SIZE}...")
     logger.info(f"⚡ Rate limiting: {UPLOAD_DELAY}s delay between uploads")
     logger.info(f"🔄 Always retry: ANY failures will retry in sub-batches of {SUB_BATCH_SIZE}")
-    logger.info(f"💬 v3.1.17: Fixed nested ThreadPool - no warnings!\n")
+    logger.info(f"💬 v3.1.18: Upload error tracking enabled\n")
     
     stats = {'total': total_tickets, 'successful': 0, 'failed': 0, 'skipped': 0}
     
@@ -1084,7 +1101,7 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
         batch = tickets[i:i+BATCH_SIZE]
         batch_num = (i // BATCH_SIZE) + 1
         
-        documents, successful, failed, failed_ids = process_ticket_batch(batch, batch_num, total_tickets)
+        documents, successful, failed, failed_ids, error_types = process_ticket_batch(batch, batch_num, total_tickets)
         
         stats['successful'] += successful
         stats['failed'] += failed
@@ -1100,7 +1117,7 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
                 sub_batch = failed_tickets[j:j+SUB_BATCH_SIZE]
                 logger.info(f"  🔄 Retrying sub-batch ({j+1}-{j+len(sub_batch)} of {len(failed_tickets)} failed)...")
                 
-                _, retry_success, retry_failed, _ = process_ticket_batch(
+                _, retry_success, retry_failed, _, retry_errors = process_ticket_batch(
                     sub_batch, batch_num, total_tickets, retry_attempt=1
                 )
                 
@@ -1134,7 +1151,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.17: Fixed nested pool issue - clean logs!")
+    logger.info("✨ v3.1.18: Upload error tracking enabled!")
     logger.info("")
     
     try:
@@ -1190,6 +1207,13 @@ def main():
         logger.info(f"     Details Fetched: {METRICS['conversation_details_fetched']}")
         logger.info(f"     With Text: {METRICS['conversations_with_text']} ({text_rate:.1f}%)")
         logger.info(f"     Empty: {METRICS['conversations_empty']}")
+        logger.info("")
+        
+        if METRICS['upload_errors']:
+            logger.info(f"  ⚠️  Upload Error Summary:")
+            for error_type, count in sorted(METRICS['upload_errors'].items(), key=lambda x: x[1], reverse=True):
+                logger.info(f"     {error_type}: {count}")
+        
         logger.info("=" * 60)
         
         return 0
