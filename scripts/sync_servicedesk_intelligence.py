@@ -12,6 +12,7 @@ New in v3.1.10:
 - Status-specific tags (STATUS-OPEN, CURRENTLY-OPEN, etc.)
 - Robust environment variable validation with character cleaning
 - Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
+- Enhanced OAuth error debugging
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -217,7 +218,7 @@ METRICS = {
 SKIPPED_TICKETS = []
 
 # ============================================================
-# TOKEN MANAGER - CORRECTED FOR SERVICEDESK PLUS CLOUD
+# TOKEN MANAGER - WITH ENHANCED OAUTH DEBUGGING
 # ============================================================
 
 class TokenManager:
@@ -247,11 +248,15 @@ class TokenManager:
             logger.info("🔄 Token expiring soon, refreshing...")
         
         # ServiceDesk Plus Cloud uses Zoho's OAuth endpoint
-        # NOT the SDP domain endpoint
         token_url = ZOHO_OAUTH_URL
         
         logger.info(f"  Token URL: {token_url}")
         logger.info(f"  Using Zoho OAuth endpoint (ServiceDesk Plus Cloud)")
+        
+        # Show credential info (masked for security)
+        logger.info(f"  Client ID: {SDP_CLIENT_ID[:10]}...{SDP_CLIENT_ID[-4:] if len(SDP_CLIENT_ID) > 14 else ''}")
+        logger.info(f"  Client Secret: {SDP_CLIENT_SECRET[:4]}...{SDP_CLIENT_SECRET[-4:] if len(SDP_CLIENT_SECRET) > 8 else ''}")
+        logger.info(f"  Refresh Token: {SDP_REFRESH_TOKEN[:10]}...{SDP_REFRESH_TOKEN[-4:] if len(SDP_REFRESH_TOKEN) > 14 else ''}")
         
         payload = {
             'client_id': SDP_CLIENT_ID,
@@ -262,6 +267,33 @@ class TokenManager:
         
         try:
             response = requests.post(token_url, data=payload, timeout=30)
+            
+            # Log full response for debugging
+            logger.info(f"  Response status: {response.status_code}")
+            
+            if response.status_code == 400:
+                # Parse error message
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', 'unknown')
+                    
+                    logger.error(f"\n  ❌ OAuth Error: {error_msg}")
+                    
+                    if error_msg == 'invalid_client':
+                        logger.error("  💡 SOLUTION: Client ID or Client Secret is incorrect")
+                        logger.error("     • Check SDP_CLIENT_ID in GitHub secrets")
+                        logger.error("     • Check SDP_CLIENT_SECRET in GitHub secrets")
+                    elif error_msg == 'invalid_grant':
+                        logger.error("  💡 SOLUTION: Refresh Token is invalid or expired")
+                        logger.error("     • Generate a new refresh token in ServiceDesk Plus")
+                        logger.error("     • Admin → Developer Space → OAuth → Generate Token")
+                        logger.error("     • Update SDP_REFRESH_TOKEN in GitHub secrets")
+                    else:
+                        logger.error(f"  💡 Unknown OAuth error: {error_msg}")
+                        logger.error(f"  Full response: {response.text[:500]}")
+                except:
+                    logger.error(f"  Response body: {response.text[:500]}")
+            
             response.raise_for_status()
             
             token_data = response.json()
@@ -272,27 +304,22 @@ class TokenManager:
             logger.info(f"✓ Token refreshed successfully (expires in {expires_in/60:.0f} minutes)")
             
         except requests.exceptions.HTTPError as e:
-            logger.error(f"❌ Failed to refresh token: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"  Response status: {e.response.status_code}")
-                logger.error(f"  Response body: {e.response.text[:500]}")
-                
-                # Provide helpful error messages
-                if e.response.status_code == 401:
-                    logger.error("\n  💡 HINT: 401 Unauthorized suggests:")
-                    logger.error("     - SDP_CLIENT_ID might be incorrect")
-                    logger.error("     - SDP_CLIENT_SECRET might be incorrect")
-                    logger.error("     - SDP_REFRESH_TOKEN might be expired")
-                    logger.error("\n     Generate a new refresh token in ServiceDesk Plus:")
-                    logger.error("     Admin → OAuth → Your App → Generate Token")
-                elif e.response.status_code == 404:
-                    logger.error("\n  💡 HINT: 404 Not Found suggests:")
-                    logger.error("     - OAuth endpoint might be different for your region")
-                    logger.error("     - Try setting ZOHO_OAUTH_URL to:")
-                    logger.error("       US: https://accounts.zoho.com/oauth/v2/token")
-                    logger.error("       EU: https://accounts.zoho.eu/oauth/v2/token")
-                    logger.error("       IN: https://accounts.zoho.in/oauth/v2/token")
-                    logger.error("       AU: https://accounts.zoho.com.au/oauth/v2/token")
+            logger.error(f"\n❌ Failed to refresh token: {e}")
+            
+            logger.error("\n" + "=" * 60)
+            logger.error("TROUBLESHOOTING STEPS:")
+            logger.error("=" * 60)
+            logger.error("1. Log into ServiceDesk Plus as admin")
+            logger.error("2. Go to: Admin → Developer Space → OAuth")
+            logger.error("3. Find your OAuth app (or create new one)")
+            logger.error("4. Click 'Generate Token'")
+            logger.error("5. Copy these values to GitHub secrets:")
+            logger.error("   • Client ID → SDP_CLIENT_ID")
+            logger.error("   • Client Secret → SDP_CLIENT_SECRET")
+            logger.error("   • Refresh Token → SDP_REFRESH_TOKEN")
+            logger.error("6. Re-run this workflow")
+            logger.error("=" * 60)
+            
             raise
         except Exception as e:
             logger.error(f"❌ Failed to refresh token: {e}")
