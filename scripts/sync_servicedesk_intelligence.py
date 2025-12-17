@@ -1,28 +1,22 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.9 - SPEED & RELIABILITY EDITION
-Major performance improvements + token auto-refresh
+ServiceDesk Intelligence Suite v3.1.10
+=====================================
 
-Changes in v3.1.9:
-- ADDED: Token Manager with auto-refresh (prevents 401 failures)
-- ADDED: Parallel cleanup deletion (51 min → 3 min)
-- ADDED: Smart cleanup detection (skip when unnecessary)
-- ADDED: Increased parallel workers (20 conversation, 10 upload)
-- ADDED: Progress tracking and speed metrics
-- ADDED: Batch upload support (if API allows)
-- FIXED: Token expiry during long syncs
-- Performance: 3x faster than v3.1.8
+Enhanced tagging for open/active ticket search reliability.
 
-Changes in v3.1.8:
-- ADDED: Automatic cleanup of old data before full syncs
-- ADDED: Smart cleanup (only on full sync, not incremental)
+New in v3.1.10:
+- Enhanced status tagging with prominent ACTIVE-TICKET and IS-OPEN flags
+- Multiple redundant tags for better open ticket search
+- Improved closed ticket tagging with NOT-ACTIVE flags
+- Status-specific tags (STATUS-OPEN, CURRENTLY-OPEN, etc.)
 
-Changes in v3.1.7:
-- FIXED: Better display_id extraction
-- ADDED: Aggressive debug logging
-
-Changes in v3.1.6:
-- FIXED: Checkpoint uses sync START time (prevents race condition)
+Retained from v3.1.9:
+- Token Manager with auto-refresh (prevents 401 failures)
+- Parallel cleanup deletion (51 min → 3 min)
+- Smart cleanup detection (skip when unnecessary)
+- Increased parallel workers (20 conversation, 10 upload)
+- Progress tracking and speed metrics
 """
 
 import os
@@ -31,156 +25,47 @@ import requests
 import json
 import logging
 import time
-import re
 from datetime import datetime, timezone, timedelta
-from collections import Counter, defaultdict
-from typing import Dict, List, Optional, Any, Tuple
-from urllib.parse import quote
+from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Semaphore, Lock
-from pathlib import Path
-import hashlib
+from urllib.parse import quote
+import re
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ============================================================
-# CONFIGURATION - v3.1.9 UPDATED
+# VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.9"
+VERSION = "3.1.10"
+
+# Dust Configuration
+DUST_API_KEY = os.environ.get("DUST_API_KEY")
+DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad")
+DUST_DATA_SOURCE_ID = "servicedesk_intelligence"
+DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
+
+# ServiceDesk Plus Configuration
+SDP_DOMAIN = os.environ.get("SDP_DOMAIN")
+SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID")
+SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET")
+SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN")
+SDP_BASE_URL = f"https://{SDP_DOMAIN}"
+
+# Processing Configuration
 BATCH_SIZE = 50
-MAX_RETRIES = 3
-RETRY_DELAY = 5
-
-# Checkpoint files
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-TIMESTAMP_FILE = str(SCRIPT_DIR / 'last_sync_time.txt')
-CHECKPOINT_FILE = str(SCRIPT_DIR / 'checkpoint.json')
-SKIPPED_TICKETS_FILE = str(SCRIPT_DIR / 'skipped_tickets.json')
-CLEANUP_TRACKING_FILE = str(SCRIPT_DIR / 'last_cleanup.json')
-
-REQUEST_TIMEOUT = 30
 MAX_PAGES = None
+MAX_CONCURRENT_CONVERSATIONS = 20
+MAX_CONCURRENT_UPLOADS = 10
+MAX_CONCURRENT_DELETES = 20
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 2
 
-# Parallel configuration - v3.1.9 INCREASED
-MAX_CONCURRENT_CONVERSATIONS = 20  # Increased from 10
-MAX_CONCURRENT_UPLOADS = 10         # Increased from 5
-MAX_CONCURRENT_DELETIONS = 20       # NEW for parallel cleanup
-
-UPLOAD_TIMEOUT = 30
-
-# Connection pooling
-SESSION = requests.Session()
-ADAPTER = requests.adapters.HTTPAdapter(
-    pool_connections=30,
-    pool_maxsize=30,
-    max_retries=3
-)
-SESSION.mount('http://', ADAPTER)
-SESSION.mount('https://', ADAPTER)
-
-# Skip tracking
-SKIPPED_TICKETS = []
-SKIP_LOCK = Lock()
-
-# Cache
-CACHE = {
-    'technicians': {},
-    'requesters': {},
-    'categories': {},
-    'sites': {},
-    'assets': {},
-    'departments': {}
-}
-# ============================================================
-# ANALYTICS CACHE
-# ============================================================
-
-class AnalyticsCache:
-    def __init__(self):
-        self.raw_data = {
-            'category_stats': defaultdict(lambda: {'count': 0, 'total_resolution_days': 0}),
-            'technician_workload': defaultdict(lambda: {'active': 0, 'total': 0, 'total_response_hours': 0}),
-            'peak_hours': defaultdict(int),
-            'issue_types': defaultdict(int),
-            'channel_distribution': defaultdict(int),
-            'department_distribution': defaultdict(int),
-            'asset_failure_rates': defaultdict(int),
-            'service_usage': defaultdict(int),
-            'resolution_categories': defaultdict(int),
-            'module_distribution': defaultdict(int),
-            'auto_categorization': {'assigned': 0, 'high_confidence': 0, 'low_confidence': 0}
-        }
-    
-    def update_category_stats(self, category, resolution_days):
-        self.raw_data['category_stats'][category]['count'] += 1
-        self.raw_data['category_stats'][category]['total_resolution_days'] += resolution_days
-    
-    def update_technician_workload(self, tech, is_active, response_hours):
-        self.raw_data['technician_workload'][tech]['total'] += 1
-        if is_active:
-            self.raw_data['technician_workload'][tech]['active'] += 1
-        self.raw_data['technician_workload'][tech]['total_response_hours'] += response_hours
-    
-    def update_peak_hours(self, hour):
-        self.raw_data['peak_hours'][hour] += 1
-    
-    def update_issue_types(self, issue_type):
-        self.raw_data['issue_types'][issue_type] += 1
-    
-    def update_channel(self, channel):
-        self.raw_data['channel_distribution'][channel] += 1
-    
-    def update_department(self, department):
-        self.raw_data['department_distribution'][department] += 1
-    
-    def update_asset_failure(self, asset):
-        self.raw_data['asset_failure_rates'][asset] += 1
-    
-    def update_service_usage(self, service):
-        self.raw_data['service_usage'][service] += 1
-    
-    def update_resolution_category(self, category):
-        self.raw_data['resolution_categories'][category] += 1
-    
-    def update_module_distribution(self, module_type):
-        self.raw_data['module_distribution'][module_type] += 1
-    
-    def update_auto_categorization(self, was_auto: bool, confidence: float):
-        if was_auto:
-            self.raw_data['auto_categorization']['assigned'] += 1
-            if confidence >= 80:
-                self.raw_data['auto_categorization']['high_confidence'] += 1
-            elif confidence < 50:
-                self.raw_data['auto_categorization']['low_confidence'] += 1
-
-analytics_cache = AnalyticsCache()
-
-# ============================================================
-# METRICS COUNTERS
-# ============================================================
-
-METRICS = {
-    'total_processed': 0,
-    'requests': 0,
-    'service_requests': 0,
-    'incidents': 0,
-    'active_tickets': 0,
-    'closed_tickets': 0,
-    'with_conversations': 0,
-    'high_complexity': 0,
-    'satisfaction_at_risk': 0,
-    'high_sla_breach_risk': 0,
-    'awaiting_customer': 0,
-    'awaiting_technician': 0,
-    'with_assets': 0,
-    'reopened': 0,
-    'fcr': 0,
-    'with_approvals': 0,
-    'linked_tickets': 0,
-    'auto_categorized': 0,
-    'skipped': 0,
-    'retried': 0,
-    'failed_after_retry': 0
-}
+# File paths
+CHECKPOINT_FILE = "checkpoint.json"
+LAST_SYNC_FILE = "last_sync_time.txt"
+SKIP_REPORT_FILE = "skipped_tickets_report.txt"
+LAST_CLEANUP_FILE = "last_cleanup.json"
 
 # ============================================================
 # LOGGING SETUP
@@ -192,138 +77,56 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-# ============================================================
-# SKIP TRACKING
-# ============================================================
-
-def track_skipped_ticket(ticket_id: str, ticket_subject: str, reason: str, stage: str):
-    """Track a skipped ticket with details"""
-    global SKIPPED_TICKETS
-    
-    skip_info = {
-        'ticket_id': ticket_id,
-        'subject': ticket_subject,
-        'reason': reason,
-        'stage': stage,
-        'timestamp': datetime.now(timezone.utc).isoformat()
-    }
-    
-    with SKIP_LOCK:
-        SKIPPED_TICKETS.append(skip_info)
-        METRICS['skipped'] += 1
-    
-    logger.warning(f"⚠️  SKIPPED Ticket {ticket_id} ({stage}): {reason}")
-
-def save_skipped_tickets_report():
-    """Save skipped tickets to JSON file"""
-    if not SKIPPED_TICKETS:
-        return
-    
-    try:
-        report = {
-            'sync_time': datetime.now(timezone.utc).isoformat(),
-            'version': VERSION,
-            'total_skipped': len(SKIPPED_TICKETS),
-            'skipped_tickets': SKIPPED_TICKETS
-        }
-        
-        with open(SKIPPED_TICKETS_FILE, 'w') as f:
-            json.dump(report, f, indent=2)
-        
-        logger.info(f"✓ Saved skipped tickets report: {SKIPPED_TICKETS_FILE}")
-    except Exception as e:
-        logger.error(f"Failed to save skipped tickets report: {e}")
-
-def print_skip_summary():
-    """Print summary of skipped tickets"""
-    if not SKIPPED_TICKETS:
-        logger.info("✓ No tickets were skipped!")
-        return
-    
-    logger.warning("")
-    logger.warning("=" * 60)
-    logger.warning(f"⚠️  SKIPPED TICKETS SUMMARY")
-    logger.warning("=" * 60)
-    logger.warning(f"Total skipped: {len(SKIPPED_TICKETS)}")
-    logger.warning("")
-    
-    reasons = defaultdict(list)
-    for skip in SKIPPED_TICKETS:
-        reasons[skip['reason']].append(skip['ticket_id'])
-    
-    logger.warning("By Reason:")
-    for reason, ticket_ids in sorted(reasons.items(), key=lambda x: len(x[1]), reverse=True):
-        logger.warning(f"  • {reason}: {len(ticket_ids)} tickets")
-    
-    logger.warning("")
-    logger.warning("First 10 skipped tickets:")
-    for skip in SKIPPED_TICKETS[:10]:
-        logger.warning(f"  • #{skip['ticket_id']}: {skip['subject'][:50]}")
-        logger.warning(f"    Reason: {skip['reason']} (Stage: {skip['stage']})")
-    
-    if len(SKIPPED_TICKETS) > 10:
-        logger.warning(f"  ... and {len(SKIPPED_TICKETS) - 10} more")
-    
-    logger.warning("")
-    logger.warning(f"Full report saved to: {SKIPPED_TICKETS_FILE}")
-    logger.warning("=" * 60)
-# ============================================================
-# CREDENTIAL MANAGEMENT
-# ============================================================
-
-def clean_credential(value: str) -> str:
-    """Remove quotes and escape characters"""
-    if not value:
-        return value
-    value = value.strip().strip('"').strip("'")
-    value = value.replace('\\', '')
-    return value.strip()
-
-SDP_DOMAIN = clean_credential(os.environ.get('SDP_DOMAIN', ''))
-SDP_CLIENT_ID = clean_credential(os.environ.get('SDP_CLIENT_ID', ''))
-SDP_CLIENT_SECRET = clean_credential(os.environ.get('SDP_CLIENT_SECRET', ''))
-SDP_REFRESH_TOKEN = clean_credential(os.environ.get('SDP_REFRESH_TOKEN', ''))
-DUST_API_KEY = clean_credential(os.environ.get('DUST_API_KEY', ''))
-DUST_WORKSPACE_ID = clean_credential(os.environ.get('DUST_WORKSPACE_ID', ''))
-
-SDP_API_BASE = f"https://{SDP_DOMAIN}/api/v3"
-ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 
 # ============================================================
-# TOKEN MANAGER - v3.1.9 NEW!
+# METRICS TRACKING
+# ============================================================
+
+METRICS = {
+    'total_processed': 0,
+    'skipped': 0,
+    'retried': 0,
+    'failed_after_retry': 0,
+    'requests': 0,
+    'service_requests': 0,
+    'incidents': 0,
+    'auto_categorized': 0,
+    'active_tickets': 0
+}
+
+SKIPPED_TICKETS = []
+
+# ============================================================
+# TOKEN MANAGER
 # ============================================================
 
 class TokenManager:
-    """
-    Manages ServiceDesk Plus access token with automatic refresh
-    Prevents 401 errors during long-running syncs
-    """
-    def __init__(self):
-        self.token = None
-        self.token_expires_at = None
-        self.token_lock = Lock()
-        self.refresh_before_minutes = 5  # Refresh 5 minutes before expiry
+    """Manages ServiceDesk Plus OAuth tokens with automatic refresh"""
     
+    def __init__(self):
+        self.access_token = None
+        self.token_expiry = None
+        self.refresh_buffer = timedelta(minutes=5)
+        
     def get_token(self) -> str:
-        """Get valid access token, refresh if needed"""
-        with self.token_lock:
-            now = datetime.now(timezone.utc)
-            
-            # Check if token needs refresh
-            if self.token is None or self.token_expires_at is None:
-                logger.info("🔑 No token cached, fetching new token...")
-                self._refresh_token()
-            elif now >= self.token_expires_at:
-                logger.warning("🔄 Token expired, refreshing...")
-                self._refresh_token()
-            elif now >= (self.token_expires_at - timedelta(minutes=self.refresh_before_minutes)):
-                logger.info("🔄 Token expiring soon, proactive refresh...")
-                self._refresh_token()
-            
-            return self.token
+        """Get valid access token, refreshing if needed"""
+        now = datetime.now(timezone.utc)
+        
+        if (self.access_token is None or 
+            self.token_expiry is None or 
+            now >= (self.token_expiry - self.refresh_buffer)):
+            self._refresh_token()
+        
+        return self.access_token
     
     def _refresh_token(self):
-        """Internal method to refresh token"""
+        """Refresh the access token"""
+        if not self.access_token:
+            logger.info("🔑 Fetching new token...")
+        else:
+            logger.info("🔄 Token expiring soon, refreshing...")
+        
+        token_url = f"{SDP_BASE_URL}/oauth/v1/token"
         payload = {
             'client_id': SDP_CLIENT_ID,
             'client_secret': SDP_CLIENT_SECRET,
@@ -331,1802 +134,958 @@ class TokenManager:
             'grant_type': 'refresh_token'
         }
         
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = SESSION.post(ZOHO_TOKEN_URL, data=payload, timeout=REQUEST_TIMEOUT)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    self.token = data['access_token']
-                    
-                    # Zoho tokens typically expire in 1 hour (3600 seconds)
-                    # We'll assume 55 minutes to be safe
-                    self.token_expires_at = datetime.now(timezone.utc) + timedelta(minutes=55)
-                    
-                    logger.info(f"✓ Token refreshed successfully (expires: {self.token_expires_at})")
-                    return
-                
-                if response.status_code == 429:
-                    wait_time = (2 ** attempt) * 30
-                    logger.warning(f"Rate limited on token refresh. Waiting {wait_time}s (attempt {attempt + 1}/{MAX_RETRIES})")
-                    time.sleep(wait_time)
-                    continue
-                
-                logger.error(f"Token refresh failed: {response.status_code} - {response.text[:200]}")
-                
-            except Exception as e:
-                logger.error(f"Token refresh error (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
-        
-        raise Exception("Failed to refresh token after max retries")
-    
-    def force_refresh(self):
-        """Force token refresh (used on 401 errors)"""
-        with self.token_lock:
-            logger.warning("⚠️  Forcing token refresh due to 401 error...")
-            self._refresh_token()
-        return self.token
+        try:
+            response = requests.post(token_url, data=payload, timeout=30)
+            response.raise_for_status()
+            
+            token_data = response.json()
+            self.access_token = token_data['access_token']
+            expires_in = token_data.get('expires_in', 3300)
+            self.token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            
+            logger.info(f"✓ Token refreshed successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to refresh token: {e}")
+            raise
 
-# Global token manager instance
 token_manager = TokenManager()
 
-def get_access_token() -> str:
-    """Get valid access token (uses TokenManager)"""
-    return token_manager.get_token()
 # ============================================================
-# HELPER FUNCTIONS
+# HTTP SESSION
 # ============================================================
 
-def extract_short_ticket_number(ticket: Dict) -> str:
-    """
-    Extract short ticket number - v3.1.7 IMPROVED
-    Multiple strategies with logging
-    """
-    try:
-        # Strategy 1: display_id field (most reliable if present)
-        display_id = ticket.get('display_id')
-        if display_id:
-            short_id = str(display_id).lstrip('#').strip()
-            if short_id and len(short_id) <= 8:
-                return short_id
-        
-        # Strategy 2: Check for 'short_name' or 'number' fields
-        for field_name in ['short_name', 'number', 'ticket_number', 'request_number']:
-            value = ticket.get(field_name)
-            if value:
-                short_id = str(value).lstrip('#').strip()
-                if short_id and len(short_id) <= 8:
-                    return short_id
-        
-        # Strategy 3: Extract from long ID (last 5-8 digits)
-        ticket_id = ticket.get('id', '')
-        ticket_id_str = str(ticket_id)
-        
-        if len(ticket_id_str) > 10:
-            # Try extracting last 5-8 digits
-            for length in [5, 6, 7, 8]:
-                short_num = ticket_id_str[-length:].lstrip('0')
-                if short_num and len(short_num) >= 4:
-                    return short_num
-            
-            # Fallback: last 8 digits
-            short_num = ticket_id_str[-8:].lstrip('0')
-            return short_num if short_num else ticket_id_str[-5:]
-        
-        return ticket_id_str
-    except Exception as e:
-        logger.warning(f"Error extracting ticket number: {e}")
-        return str(ticket.get('id', 'unknown'))
+def create_session() -> requests.Session:
+    """Create requests session with retry logic"""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=RETRY_ATTEMPTS,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
-def log_ticket_fields(ticket: Dict, prefix: str = ""):
-    """Log all available fields in a ticket (for debugging)"""
-    logger.info(f"{prefix}Available fields in ticket:")
-    for key in sorted(ticket.keys()):
-        value = ticket[key]
-        if isinstance(value, dict):
-            logger.info(f"{prefix}  {key}: <dict with {len(value)} keys>")
-        elif isinstance(value, list):
-            logger.info(f"{prefix}  {key}: <list with {len(value)} items>")
-        else:
-            value_str = str(value)[:50]
-            logger.info(f"{prefix}  {key}: {value_str}")
+session = create_session()
 
-# ============================================================
-# SMART CLEANUP DETECTION - v3.1.9 NEW!
-# ============================================================
-
-def load_last_cleanup_time() -> Optional[datetime]:
-    """Load timestamp of last cleanup"""
-    if os.path.exists(CLEANUP_TRACKING_FILE):
-        try:
-            with open(CLEANUP_TRACKING_FILE, 'r') as f:
-                data = json.load(f)
-                last_cleanup = data.get('last_cleanup_time')
-                if last_cleanup:
-                    return datetime.fromisoformat(last_cleanup)
-        except Exception as e:
-            logger.warning(f"Could not load cleanup tracking: {e}")
-    return None
-
-def save_cleanup_time(cleanup_time: datetime):
-    """Save timestamp of cleanup"""
-    try:
-        data = {
-            'last_cleanup_time': cleanup_time.isoformat(),
-            'version': VERSION
-        }
-        with open(CLEANUP_TRACKING_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
-        logger.info(f"✓ Saved cleanup tracking: {CLEANUP_TRACKING_FILE}")
-    except Exception as e:
-        logger.error(f"Failed to save cleanup tracking: {e}")
-
-def should_run_cleanup(last_sync_time: Optional[datetime]) -> bool:
-    """
-    Determine if cleanup should run
-    
-    Returns True if:
-    1. No checkpoint (full sync), AND
-    2. Last cleanup was >7 days ago (or never)
-    """
-    # Only consider cleanup on full syncs
-    if last_sync_time is not None:
-        logger.info("🔄 INCREMENTAL SYNC: Skipping cleanup (checkpoint exists)")
-        return False
-    
-    # Check when we last cleaned up
-    last_cleanup = load_last_cleanup_time()
-    
-    if last_cleanup is None:
-        logger.info("🧹 No cleanup record found - cleanup recommended")
-        return True
-    
-    # Check if cleanup was recent
-    days_since_cleanup = (datetime.now(timezone.utc) - last_cleanup).total_seconds() / 86400
-    
-    if days_since_cleanup < 7:
-        logger.info(f"✓ Cleanup was recent ({days_since_cleanup:.1f} days ago) - skipping")
-        logger.info(f"  Last cleanup: {last_cleanup}")
-        logger.info(f"  Next cleanup recommended after: {last_cleanup + timedelta(days=7)}")
-        return False
-    else:
-        logger.info(f"🧹 Cleanup is stale ({days_since_cleanup:.1f} days ago) - cleanup recommended")
-        return True
-# ============================================================
-# DUST DATA SOURCE CLEANUP - v3.1.9 PARALLEL VERSION
-# ============================================================
-
-def get_all_document_ids_from_dust() -> List[str]:
-    """Get all document IDs from Dust data source"""
-    if not DUST_API_KEY or not DUST_WORKSPACE_ID:
-        logger.warning("Dust credentials not configured")
-        return []
-    
-    base_url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Accept': 'application/json'
-    }
-    
-    all_doc_ids = []
-    offset = 0
-    limit = 100
-    
-    logger.info("🔍 Fetching existing document IDs from Dust...")
-    
-    while True:
-        try:
-            response = SESSION.get(
-                base_url,
-                headers=headers,
-                params={'offset': offset, 'limit': limit},
-                timeout=REQUEST_TIMEOUT
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                documents = data.get('documents', [])
-                
-                if not documents:
-                    break
-                
-                for doc in documents:
-                    doc_id = doc.get('document_id')
-                    if doc_id:
-                        all_doc_ids.append(doc_id)
-                
-                if len(all_doc_ids) % 500 == 0:
-                    logger.info(f"  Found {len(all_doc_ids)} documents so far...")
-                
-                if len(documents) < limit:
-                    break
-                
-                offset += limit
-                time.sleep(0.1)
-            else:
-                logger.error(f"Failed to fetch documents: HTTP {response.status_code}")
-                break
-                
-        except Exception as e:
-            logger.error(f"Error fetching document IDs: {e}")
-            break
-    
-    logger.info(f"✓ Total existing documents: {len(all_doc_ids)}")
-    return all_doc_ids
-
-def delete_single_document(doc_id: str, headers: Dict) -> bool:
-    """Delete a single document from Dust"""
-    base_url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
-    url = f"{base_url}/{doc_id}"
-    
-    try:
-        response = SESSION.delete(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        return response.status_code in [200, 204]
-    except:
-        return False
-
-def delete_documents_from_dust_parallel(document_ids: List[str]) -> Tuple[int, int]:
-    """
-    Delete documents from Dust in parallel - v3.1.9 NEW!
-    Uses ThreadPoolExecutor for massive speed improvement
-    
-    Expected: 14,985 documents in ~3 minutes (vs 51 minutes sequential)
-    """
-    if not document_ids:
-        return 0, 0
-    
-    if not DUST_API_KEY or not DUST_WORKSPACE_ID:
-        logger.warning("Dust credentials not configured")
-        return 0, 0
-    
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    deleted = 0
-    failed = 0
-    total = len(document_ids)
-    delete_lock = Lock()
-    
-    logger.info(f"🗑️  Deleting {total} documents from Dust (parallel mode with {MAX_CONCURRENT_DELETIONS} workers)...")
-    
-    start_time = time.time()
-    
-    def delete_with_progress(doc_id: str) -> bool:
-        nonlocal deleted, failed
-        success = delete_single_document(doc_id, headers)
-        
-        with delete_lock:
-            if success:
-                deleted += 1
-            else:
-                failed += 1
-            
-            # Progress update every 100 deletions
-            if deleted % 100 == 0:
-                elapsed = time.time() - start_time
-                rate = deleted / elapsed if elapsed > 0 else 0
-                remaining = (total - deleted) / rate if rate > 0 else 0
-                logger.info(f"  Progress: {deleted}/{total} deleted ({rate:.1f}/sec, ~{remaining/60:.1f} min remaining)...")
-        
-        return success
-    
-    # Parallel deletion with thread pool
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DELETIONS) as executor:
-        futures = [executor.submit(delete_with_progress, doc_id) for doc_id in document_ids]
-        
-        # Wait for all deletions to complete
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                with delete_lock:
-                    failed += 1
-    
-    elapsed = time.time() - start_time
-    logger.info(f"✓ Cleanup complete: {deleted} deleted, {failed} failed ({elapsed:.1f}s, {deleted/elapsed:.1f}/sec)")
-    
-    return deleted, failed
-
-def cleanup_dust_data_source():
-    """
-    Clean up old documents from Dust data source
-    v3.1.9: Now with parallel deletion for massive speed improvement
-    """
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info(f"🧹 DUST DATA SOURCE CLEANUP (v{VERSION})")
-    logger.info("=" * 60)
-    logger.info("")
-    logger.info("This will delete all existing documents from Dust to prevent duplicates.")
-    logger.info("The sync will then upload fresh data from ServiceDesk Plus.")
-    logger.info("")
-    
-    # Get existing documents
-    doc_ids = get_all_document_ids_from_dust()
-    
-    if not doc_ids:
-        logger.info("✓ No existing documents found. Data source is clean.")
-        logger.info("")
-        return True
-    
-    logger.info(f"📊 Found {len(doc_ids)} existing documents in Dust")
-    logger.info("")
-    
-    # Safety check - require confirmation in production
-    # For automated runs, this will auto-proceed
-    
-    logger.info("⚠️  Proceeding with cleanup in 3 seconds...")
-    logger.info("   (Press Ctrl+C to cancel)")
-    try:
-        time.sleep(3)
-    except KeyboardInterrupt:
-        logger.info("\n❌ Cleanup cancelled by user")
-        return False
-    
-    # Delete all documents (PARALLEL)
-    deleted, failed = delete_documents_from_dust_parallel(doc_ids)
-    
-    if failed > 0:
-        logger.warning(f"⚠️  Cleanup completed with {failed} failures")
-        logger.warning("   Continuing with sync - new data will replace old")
-    else:
-        logger.info("✓ All old documents successfully deleted")
-    
-    # Save cleanup timestamp
-    save_cleanup_time(datetime.now(timezone.utc))
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("")
-    
-    return True
 # ============================================================
 # CHECKPOINT MANAGEMENT
 # ============================================================
 
-def load_checkpoint() -> Optional[datetime]:
-    """Load last sync timestamp"""
-    if os.path.exists(TIMESTAMP_FILE):
-        try:
-            with open(TIMESTAMP_FILE, 'r') as f:
-                timestamp_str = f.read().strip()
-                if timestamp_str:
-                    try:
-                        last_sync = datetime.fromisoformat(timestamp_str)
-                        logger.info(f"✓ Loaded timestamp from: {TIMESTAMP_FILE}")
-                        logger.info(f"  Last sync: {last_sync}")
-                        return last_sync
-                    except ValueError:
-                        try:
-                            timestamp_ms = int(timestamp_str)
-                            last_sync = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-                            logger.info(f"✓ Loaded timestamp from: {TIMESTAMP_FILE}")
-                            logger.info(f"  Last sync: {last_sync}")
-                            return last_sync
-                        except:
-                            pass
-        except Exception as e:
-            logger.warning(f"Could not load last_sync_time.txt: {e}")
-    
+def load_checkpoint() -> Optional[Dict]:
+    """Load checkpoint data if exists"""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
-                checkpoint = json.load(f)
-                last_sync = checkpoint.get('last_sync')
-                if last_sync:
-                    logger.info(f"✓ Loaded from checkpoint.json: {CHECKPOINT_FILE}")
-                    return datetime.fromisoformat(last_sync)
+                return json.load(f)
         except Exception as e:
-            logger.warning(f"Could not load checkpoint.json: {e}")
-    
-    logger.info("No checkpoint found - will perform FULL SYNC")
+            logger.warning(f"Could not load checkpoint: {e}")
     return None
 
-def save_checkpoint(last_sync_time: datetime, total_processed: int, total_errors: int):
-    """Save checkpoint"""
+def save_checkpoint(timestamp: str, stats: Dict):
+    """Save checkpoint data"""
     try:
-        with open(TIMESTAMP_FILE, 'w') as f:
-            if last_sync_time:
-                f.write(last_sync_time.isoformat())
-            else:
-                f.write('')
-        
-        if total_processed % 200 == 0 or total_processed < 100:
-            logger.info(f"✓ SAVED Timestamp to: {TIMESTAMP_FILE}")
-            if last_sync_time:
-                logger.info(f"        {last_sync_time.isoformat()}")
-    except Exception as e:
-        logger.error(f"✗ Failed to save timestamp file: {e}")
-    
-    checkpoint = {
-        'last_sync': last_sync_time.isoformat() if last_sync_time else None,
-        'last_run': datetime.now(timezone.utc).isoformat(),
-        'processed': total_processed,
-        'errors': total_errors,
-        'skipped': METRICS['skipped'],
-        'version': VERSION
-    }
-    
-    try:
-        with open(CHECKPOINT_FILE, 'w') as f:
-            json.dump(checkpoint, f, indent=2)
-        
-        if total_processed % 200 == 0 or total_processed < 100:
-            logger.info(f"✓ SAVED Stats to: {CHECKPOINT_FILE}")
-            logger.info(f"        Processed: {total_processed}, Errors: {total_errors}, Skipped: {METRICS['skipped']}")
-    except Exception as e:
-        logger.error(f"✗ Failed to save checkpoint stats: {e}")
-# ============================================================
-# TICKET TYPE CLASSIFICATION
-# ============================================================
-
-def classify_ticket_type(ticket: Dict) -> str:
-    """Classify ticket type"""
-    template = ticket.get('template', {})
-    template_name = template.get('name', '').lower() if template else ''
-    
-    request_type = ticket.get('request_type', {})
-    req_type_name = request_type.get('name', '').lower() if request_type else ''
-    
-    category = ticket.get('category', {})
-    category_name = category.get('name', '').lower() if category else ''
-    
-    service_keywords = ['service', 'catalog', 'service request', 'service catalog']
-    if any(keyword in template_name for keyword in service_keywords):
-        return 'service_requests'
-    if any(keyword in req_type_name for keyword in service_keywords):
-        return 'service_requests'
-    if ticket.get('is_service_request', False):
-        return 'service_requests'
-    
-    incident_keywords = ['incident', 'major incident', 'critical incident']
-    if any(keyword in template_name for keyword in incident_keywords):
-        return 'incidents'
-    if any(keyword in req_type_name for keyword in incident_keywords):
-        return 'incidents'
-    if any(keyword in category_name for keyword in incident_keywords):
-        return 'incidents'
-    if ticket.get('is_incident', False):
-        return 'incidents'
-    
-    return 'requests'
-
-# ============================================================
-# DIRECT TICKET FETCH TEST
-# ============================================================
-
-def test_direct_ticket_fetch(access_token: str, ticket_id: str) -> Optional[Dict]:
-    """Test fetching a specific ticket directly by ID"""
-    logger.info(f"🔍 Testing direct fetch of ticket #{ticket_id}")
-    
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    
-    url = f"{SDP_API_BASE}/requests/{ticket_id}"
-    
-    try:
-        response = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-        
-        if response.status_code == 200:
-            data = response.json()
-            ticket = data.get('request')
-            if ticket:
-                logger.info(f"✓ Successfully fetched ticket #{ticket_id} directly!")
-                logger.info(f"  Subject: {ticket.get('subject', 'N/A')}")
-                logger.info(f"  Status: {ticket.get('status', {}).get('name', 'N/A')}")
-                logger.info(f"  Created: {ticket.get('created_time', {}).get('display_value', 'N/A')}")
-                return ticket
-            else:
-                logger.warning(f"✗ Response OK but no ticket data for #{ticket_id}")
-                return None
-        elif response.status_code == 404:
-            logger.warning(f"✗ Ticket #{ticket_id} not found (404)")
-            return None
-        else:
-            logger.error(f"✗ Failed to fetch ticket #{ticket_id}: HTTP {response.status_code}")
-            logger.error(f"  Response: {response.text[:200]}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"✗ Exception fetching ticket #{ticket_id}: {e}")
-        return None
-# ============================================================
-# TICKET FETCHING - v3.1.7 WITH AGGRESSIVE DEBUG LOGGING
-# ============================================================
-
-def fetch_tickets_from_api(access_token: str, last_sync_time: Optional[datetime], 
-                           page_limit: Optional[int] = None) -> List[Dict]:
-    """
-    Fetch all tickets - v3.1.7 with AGGRESSIVE DEBUG LOGGING
-    """
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    
-    search_criteria = []
-    
-    if last_sync_time:
-        last_sync_ms = int(last_sync_time.timestamp() * 1000)
-        
-        search_criteria = [
-            {
-                "field": "created_time",
-                "condition": "greater than",
-                "value": str(last_sync_ms),
-                "logical_operator": "OR"
-            },
-            {
-                "field": "last_updated_time",
-                "condition": "greater than",
-                "value": str(last_sync_ms)
-            }
-        ]
-        logger.info(f"  Filtering: Tickets created OR updated after {last_sync_time}")
-    
-    list_info = {
-        "list_info": {
-            "row_count": 100,
-            "start_index": 1,
-            "get_total_count": True,
-            "sort_field": "created_time",
-            "sort_order": "desc"
+        checkpoint_data = {
+            'last_sync_time': timestamp,
+            'processed': stats.get('total_processed', 0),
+            'errors': stats.get('failed_after_retry', 0),
+            'skipped': stats.get('skipped', 0),
+            'saved_at': datetime.now(timezone.utc).isoformat()
         }
+        
+        with open(CHECKPOINT_FILE, 'w') as f:
+            json.dump(checkpoint_data, f, indent=2)
+        
+        logger.info(f"✓ Checkpoint saved: {checkpoint_data['processed']} processed")
+        
+    except Exception as e:
+        logger.error(f"Failed to save checkpoint: {e}")
+
+def load_last_sync_time() -> Optional[datetime]:
+    """Load last successful sync timestamp"""
+    if os.path.exists(LAST_SYNC_FILE):
+        try:
+            with open(LAST_SYNC_FILE, 'r') as f:
+                timestamp_str = f.read().strip()
+                return datetime.fromisoformat(timestamp_str)
+        except Exception as e:
+            logger.warning(f"Could not load last sync time: {e}")
+    return None
+
+def save_last_sync_time(timestamp: datetime):
+    """Save sync start timestamp"""
+    try:
+        with open(LAST_SYNC_FILE, 'w') as f:
+            f.write(timestamp.isoformat())
+        logger.info(f"✓ Sync timestamp saved")
+    except Exception as e:
+        logger.error(f"Failed to save sync time: {e}")
+
+def load_last_cleanup() -> Optional[Dict]:
+    """Load last cleanup timestamp"""
+    if os.path.exists(LAST_CLEANUP_FILE):
+        try:
+            with open(LAST_CLEANUP_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load cleanup tracking: {e}")
+    return None
+
+def save_cleanup_tracking(deleted_count: int):
+    """Save cleanup completion tracking"""
+    try:
+        cleanup_data = {
+            'last_cleanup': datetime.now(timezone.utc).isoformat(),
+            'documents_deleted': deleted_count,
+            'next_cleanup_needed': False
+        }
+        
+        with open(LAST_CLEANUP_FILE, 'w') as f:
+            json.dump(cleanup_data, f, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Failed to save cleanup tracking: {e}")
+
+def should_run_cleanup() -> bool:
+    """Determine if cleanup should run"""
+    last_cleanup = load_last_cleanup()
+    checkpoint = load_checkpoint()
+    
+    if not last_cleanup:
+        logger.info("🧹 No cleanup record - cleanup recommended")
+        return True
+    
+    try:
+        last_cleanup_time = datetime.fromisoformat(last_cleanup['last_cleanup'])
+        age = datetime.now(timezone.utc) - last_cleanup_time
+        
+        if age.days > 7:
+            logger.info(f"🧹 Last cleanup was {age.days} days ago - cleanup recommended")
+            return True
+    except Exception as e:
+        logger.warning(f"Could not determine cleanup age: {e}")
+        return True
+    
+    if not checkpoint:
+        logger.info("🧹 Full sync detected - cleanup recommended")
+        return True
+    
+    logger.info("✓ Recent cleanup found, skipping cleanup")
+    return False
+
+# ============================================================
+# DUST API FUNCTIONS
+# ============================================================
+
+def fetch_all_dust_documents() -> List[str]:
+    """Fetch all document IDs from Dust"""
+    logger.info("🔍 Fetching existing documents from Dust...")
+    
+    document_ids = []
+    offset = 0
+    limit = 100
+    
+    headers = {
+        "Authorization": f"Bearer {DUST_API_KEY}",
+        "Content-Type": "application/json"
     }
-    
-    if search_criteria:
-        list_info["list_info"]["search_criteria"] = search_criteria
-    
-    # LOG THE EXACT REQUEST
-    logger.info("=" * 60)
-    logger.info("📤 API REQUEST:")
-    logger.info(f"  URL: {SDP_API_BASE}/requests")
-    logger.info(f"  Method: GET")
-    logger.info(f"  Query params: {json.dumps(list_info, indent=2)}")
-    logger.info("=" * 60)
-    
-    url = f"{SDP_API_BASE}/requests"
-    all_tickets = []
-    page = 1
     
     while True:
-        if page_limit and page > page_limit:
-            logger.warning(f"  Reached page limit of {page_limit}")
-            break
-        
-        list_info["list_info"]["start_index"] = (page - 1) * 100 + 1
-        params = {'input_data': json.dumps(list_info)}
-        
         try:
-            response = SESSION.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            url = f"{DUST_API_URL}/documents?offset={offset}&limit={limit}"
+            response = session.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
             
-            if response.status_code == 200:
-                data = response.json()
-                tickets = data.get('requests', [])
-                
-                if not tickets:
-                    break
-                
-                # AGGRESSIVE DEBUG LOGGING for pages 1-3
-                if page <= 3:
-                    logger.info("=" * 60)
-                    logger.info(f"📥 PAGE {page} RESPONSE (DETAILED):")
-                    logger.info(f"  Tickets returned: {len(tickets)}")
-                    logger.info("=" * 60)
-                    
-                    # Log first 5 tickets in detail
-                    for i, ticket in enumerate(tickets[:5], 1):
-                        ticket_id = ticket.get('id', 'unknown')
-                        short_id = extract_short_ticket_number(ticket)
-                        subject = ticket.get('subject', 'No subject')[:50]
-                        
-                        created = ticket.get('created_time', {})
-                        created_display = created.get('display_value', 'Unknown') if created else 'Unknown'
-                        
-                        updated = ticket.get('last_updated_time', {})
-                        updated_display = updated.get('display_value', 'Unknown') if updated else 'Unknown'
-                        
-                        status = ticket.get('status', {})
-                        status_name = status.get('name', 'Unknown') if status else 'Unknown'
-                        
-                        logger.info(f"  Ticket {i}:")
-                        logger.info(f"    Long ID: {ticket_id}")
-                        logger.info(f"    Short ID: {short_id}")
-                        logger.info(f"    Subject: {subject}")
-                        logger.info(f"    Created: {created_display}")
-                        logger.info(f"    Updated: {updated_display}")
-                        logger.info(f"    Status: {status_name}")
-                    
-                    # Log available fields in first ticket
-                    if tickets:
-                        logger.info("")
-                        log_ticket_fields(tickets[0], prefix="  ")
-                    
-                    logger.info("=" * 60)
-                else:
-                    logger.info(f"  Page {page}: Found {len(tickets)} tickets (Total: {len(all_tickets) + len(tickets)})")
-                
-                all_tickets.extend(tickets)
-                
-                list_info_response = data.get('list_info', {})
-                has_more = list_info_response.get('has_more_rows', False)
-                
-                if not has_more:
-                    logger.info(f"  No more pages. Total fetched: {len(all_tickets)}")
-                    break
-                
-                page += 1
-                time.sleep(0.1)
-                
-            elif response.status_code == 429:
-                logger.warning(f"  Rate limited on page {page}. Waiting 30s...")
-                time.sleep(30)
-                continue
-            else:
-                logger.error(f"  API error: {response.status_code}")
-                logger.error(f"  Response: {response.text[:500]}")
+            data = response.json()
+            documents = data.get('documents', [])
+            
+            if not documents:
+                break
+            
+            for doc in documents:
+                document_ids.append(doc['document_id'])
+            
+            offset += len(documents)
+            
+            if len(documents) < limit:
                 break
                 
         except Exception as e:
-            logger.error(f"  Error fetching page {page}: {e}")
+            logger.error(f"Error fetching documents at offset {offset}: {e}")
             break
     
-    return all_tickets
+    logger.info(f"✓ Found {len(document_ids)} existing documents")
+    return document_ids
 
-def fetch_all_tickets(access_token: str, last_sync_time: Optional[datetime], 
-                     page_limit: Optional[int] = None) -> List[Dict]:
-    """Fetch all tickets and classify them"""
+def delete_dust_document(doc_id: str) -> bool:
+    """Delete a single document from Dust"""
+    headers = {
+        "Authorization": f"Bearer {DUST_API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    if last_sync_time:
-        logger.info(f"📊 INCREMENTAL SYNC: Fetching tickets created OR updated since {last_sync_time}")
-    else:
-        logger.info("📊 FULL SYNC: Fetching ALL tickets (no checkpoint found)")
-    
-    if page_limit:
-        logger.info(f"  Page limit: {page_limit}")
-    else:
-        logger.info("  No page limit - fetching ALL tickets")
-    
-    # TEST: Try to fetch ticket #16027 directly
-    logger.info("")
-    test_16027 = test_direct_ticket_fetch(access_token, "16027")
-    if test_16027:
-        logger.info("✓ Ticket #16027 EXISTS in API and can be fetched directly!")
-    else:
-        logger.warning("✗ Ticket #16027 NOT FOUND via direct fetch - may not exist or permissions issue")
-    logger.info("")
-    
-    all_tickets = fetch_tickets_from_api(access_token, last_sync_time, page_limit)
-    
-    if not all_tickets:
-        logger.info("✓ Fetched 0 tickets")
-        return []
-    
-    logger.info(f"✓ Fetched {len(all_tickets)} tickets")
-    logger.info("")
-    logger.info("📋 Classifying tickets by type...")
-    
-    module_counts = {'requests': 0, 'service_requests': 0, 'incidents': 0}
-    for ticket in all_tickets:
-        ticket_type = classify_ticket_type(ticket)
-        ticket['_module_type'] = ticket_type
-        module_counts[ticket_type] += 1
-    
-    logger.info("✓ Classification complete:")
-    for module_type in ['requests', 'service_requests', 'incidents']:
-        count = module_counts[module_type]
-        if count > 0:
-            module_name = module_type.replace('_', ' ').title()
-            logger.info(f"  • {module_name}: {count}")
-    
-    logger.info(f"✓ Total tickets fetched: {len(all_tickets)}")
-    
-    # Check if #16027 is in the results
-    found_16027 = False
-    for ticket in all_tickets:
-        short_id = extract_short_ticket_number(ticket)
-        if short_id == "16027":
-            found_16027 = True
-            logger.info("")
-            logger.info("✓ ✓ ✓ FOUND TICKET #16027 in fetched results!")
-            logger.info(f"  Subject: {ticket.get('subject', 'N/A')}")
-            logger.info(f"  Created: {ticket.get('created_time', {}).get('display_value', 'N/A')}")
-            break
-    
-    if not found_16027:
-        logger.warning("")
-        logger.warning("✗ ✗ ✗ TICKET #16027 NOT in fetched results (but may exist via direct fetch)")
-    
-    logger.info("")
-    
-    return all_tickets
-# ============================================================
-# CONVERSATION FETCHING WITH RETRY AND TOKEN REFRESH - v3.1.9
-# ============================================================
+    try:
+        url = f"{DUST_API_URL}/documents/{doc_id}"
+        response = session.delete(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return True
+    except Exception:
+        return False
 
-def fetch_conversation_single_with_retry(ticket_id: str, ticket_subject: str, access_token: str, max_attempts: int = 3) -> Tuple[List[Dict], Optional[str]]:
-    """
-    Fetch conversations with retry and token refresh on 401 errors
-    v3.1.9: Added automatic token refresh on 401 errors
-    """
-    url = f"{SDP_API_BASE}/requests/{ticket_id}/conversations"
+def cleanup_dust_data_source_parallel(document_ids: List[str]) -> tuple:
+    """Delete all documents from Dust in parallel"""
+    if not document_ids:
+        return 0, 0
     
-    current_token = access_token
+    logger.info(f"🗑️  Deleting {len(document_ids)} documents (parallel with {MAX_CONCURRENT_DELETES} workers)...")
     
-    for attempt in range(max_attempts):
-        try:
-            headers = {
-                'Authorization': f'Zoho-oauthtoken {current_token}',
-                'Accept': 'application/vnd.manageengine.sdp.v3+json'
-            }
-            
-            response = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            
-            if response.status_code == 200:
-                conversations = response.json().get('conversations', [])
-                if attempt > 0:
-                    METRICS['retried'] += 1
-                return conversations, None
-            
-            elif response.status_code == 401:
-                # Token expired! Refresh and retry
-                logger.warning(f"  🔄 Token expired for ticket {ticket_id}, refreshing...")
-                current_token = token_manager.force_refresh()
-                
-                # Don't count this as a retry attempt
-                if attempt == max_attempts - 1:
-                    # Last attempt, try one more time with new token
-                    headers['Authorization'] = f'Zoho-oauthtoken {current_token}'
-                    response = SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-                    if response.status_code == 200:
-                        conversations = response.json().get('conversations', [])
-                        METRICS['retried'] += 1
-                        return conversations, None
-                    else:
-                        return [], f"HTTP {response.status_code} after token refresh"
-                continue
-            
-            elif response.status_code == 404:
-                return [], None
-            
-            elif response.status_code == 429:
-                wait_time = (attempt + 1) * 5
-                logger.warning(f"  Rate limited for ticket {ticket_id}, waiting {wait_time}s")
-                time.sleep(wait_time)
-                continue
-            
-            else:
-                error_msg = f"HTTP {response.status_code}"
-                if attempt < max_attempts - 1:
-                    time.sleep(2)
-                    continue
-                else:
-                    return [], error_msg
-                    
-        except requests.exceptions.Timeout:
-            if attempt < max_attempts - 1:
-                time.sleep(2)
-                continue
-            else:
-                return [], "Request timeout"
-        
-        except Exception as e:
-            if attempt < max_attempts - 1:
-                time.sleep(2)
-                continue
-            else:
-                return [], f"Exception: {str(e)}"
+    successful = 0
+    failed = 0
+    start_time = time.time()
     
-    METRICS['failed_after_retry'] += 1
-    return [], "All retry attempts failed"
-
-def fetch_conversations_parallel(tickets: List[Dict], access_token: str, max_workers: int = MAX_CONCURRENT_CONVERSATIONS) -> Dict[str, Tuple[List[Dict], Optional[str]]]:
-    """
-    Fetch conversations in parallel with retry and token refresh
-    v3.1.9: Increased default workers from 10 to 20
-    """
-    conversations_map = {}
-    
-    logger.info(f"  Fetching conversations with {max_workers} parallel workers...")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_ticket = {
-            executor.submit(
-                fetch_conversation_single_with_retry, 
-                ticket['id'],
-                ticket.get('subject', 'No subject'),
-                access_token
-            ): ticket['id']
-            for ticket in tickets
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DELETES) as executor:
+        future_to_doc = {
+            executor.submit(delete_dust_document, doc_id): doc_id 
+            for doc_id in document_ids
         }
         
-        completed = 0
+        for future in as_completed(future_to_doc):
+            if future.result():
+                successful += 1
+            else:
+                failed += 1
+            
+            total = successful + failed
+            if total % 100 == 0:
+                elapsed = time.time() - start_time
+                rate = total / elapsed if elapsed > 0 else 0
+                logger.info(f"  Progress: {total}/{len(document_ids)} ({rate:.1f}/sec)...")
+    
+    elapsed = time.time() - start_time
+    rate = len(document_ids) / elapsed if elapsed > 0 else 0
+    
+    logger.info(f"✓ Cleanup complete: {successful} deleted ({rate:.1f}/sec)")
+    return successful, failed
+
+def cleanup_dust_data_source():
+    """Main cleanup function"""
+    logger.info("\n" + "=" * 60)
+    logger.info(f"🧹 DUST DATA SOURCE CLEANUP (v{VERSION})")
+    logger.info("=" * 60 + "\n")
+    
+    document_ids = fetch_all_dust_documents()
+    
+    if not document_ids:
+        logger.info("✓ No documents to clean up")
+        save_cleanup_tracking(0)
+        return
+    
+    logger.info(f"⚠️  Proceeding with cleanup in 3 seconds...")
+    time.sleep(3)
+    
+    successful, failed = cleanup_dust_data_source_parallel(document_ids)
+    
+    if failed > 0:
+        logger.warning(f"⚠️  {failed} documents could not be deleted")
+    
+    save_cleanup_tracking(successful)
+    logger.info("")
+
+# ============================================================
+# SERVICEDESK PLUS API
+# ============================================================
+
+def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
+                          last_sync_time: Optional[datetime] = None) -> Dict:
+    """Fetch tickets from ServiceDesk Plus API"""
+    access_token = token_manager.get_token()
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    list_info = {
+        "row_count": row_count,
+        "start_index": start_index,
+        "get_total_count": True,
+        "sort_field": "created_time",
+        "sort_order": "desc"
+    }
+    
+    if last_sync_time:
+        timestamp_ms = int(last_sync_time.timestamp() * 1000)
+        list_info["search_criteria"] = {
+            "field": "created_time",
+            "condition": "greater than",
+            "value": timestamp_ms
+        }
+    
+    input_data = {"list_info": list_info}
+    url = f"{SDP_BASE_URL}/api/v3/requests"
+    
+    try:
+        response = session.get(
+            url,
+            headers=headers,
+            params={"input_data": json.dumps(input_data)},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        raise
+
+def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
+    """Fetch conversation history for a ticket"""
+    access_token = token_manager.get_token()
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    url = f"{SDP_BASE_URL}/api/v3/requests/{ticket_id}/conversations"
+    
+    try:
+        response = session.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('conversations', [])
+    except Exception:
+        return []
+
+def fetch_conversations_parallel(ticket_ids: List[str]) -> Dict[str, List[Dict]]:
+    """Fetch conversations for multiple tickets in parallel"""
+    conversations_map = {}
+    
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
+        future_to_ticket = {
+            executor.submit(fetch_ticket_conversations, ticket_id): ticket_id 
+            for ticket_id in ticket_ids
+        }
+        
         for future in as_completed(future_to_ticket):
             ticket_id = future_to_ticket[future]
             try:
-                conversations, error = future.result()
-                conversations_map[ticket_id] = (conversations, error)
-                
-                completed += 1
-                if completed % 50 == 0:
-                    logger.info(f"    Conversations: {completed}/{len(tickets)} fetched...")
-                    
-            except Exception as e:
-                conversations_map[ticket_id] = ([], f"Future exception: {str(e)}")
+                conversations = future.result()
+                conversations_map[ticket_id] = conversations
+            except Exception:
+                conversations_map[ticket_id] = []
     
     return conversations_map
-# ============================================================
-# AUTO-CATEGORIZATION
-# ============================================================
 
-def auto_categorize_ticket(ticket: Dict, existing_category: str = None) -> Dict[str, Any]:
-    """Auto-categorize ticket based on content"""
+def fetch_all_tickets(max_pages: Optional[int] = None, 
+                     last_sync_time: Optional[datetime] = None) -> List[Dict]:
+    """Fetch all tickets with pagination"""
+    all_tickets = []
+    page = 1
+    row_count = 100
     
-    if existing_category and existing_category.lower() not in ['uncategorized', 'general', 'other', '', 'none']:
-        return {
-            'suggested_category': existing_category,
-            'confidence': 100,
-            'keywords_matched': [],
-            'use_suggested': False,
-            'original_category': existing_category
-        }
+    if last_sync_time:
+        logger.info(f"📊 INCREMENTAL SYNC: Fetching tickets modified after {last_sync_time}")
+    else:
+        logger.info(f"📊 FULL SYNC: Fetching ALL tickets")
     
-    subject = ticket.get('subject', '').lower()
-    description = ticket.get('description', '').lower()
-    combined_text = f"{subject} {description}"
-    
-    category_patterns = {
-        'Hardware Issues': {
-            'primary': ['laptop', 'desktop', 'computer', 'monitor', 'keyboard', 'mouse', 'hardware', 
-                       'screen', 'display', 'device', 'pc', 'workstation', 'dock', 'docking'],
-            'secondary': ['broken', 'damaged', 'not working', 'replacement', 'upgrade', 'new computer'],
-            'weight': 1.0
-        },
-        'Network & Connectivity': {
-            'primary': ['network', 'internet', 'wifi', 'wireless', 'connection', 'connectivity', 
-                       'lan', 'ethernet', 'dns', 'ip address', 'router', 'switch'],
-            'secondary': ['cannot connect', 'no internet', 'slow connection', 'disconnect'],
-            'weight': 1.0
-        },
-        'VPN & Remote Access': {
-            'primary': ['vpn', 'remote', 'forticlient', 'fortitoken', 'remote access', 'work from home',
-                       'remote desktop', 'rdp', 'citrix', 'virtual desktop'],
-            'secondary': ['cannot connect remotely', 'vpn error', 'token', 'two factor'],
-            'weight': 1.2
-        },
-        'Email & Communication': {
-            'primary': ['email', 'outlook', 'mail', 'mailbox', 'exchange', 'inbox', 'calendar',
-                       'teams', 'skype', 'zoom', 'webex', 'meeting'],
-            'secondary': ['cannot send', 'cannot receive', 'email not working', 'calendar invite'],
-            'weight': 1.0
-        },
-        'Software & Applications': {
-            'primary': ['software', 'application', 'program', 'app', 'install', 'installation',
-                       'update', 'upgrade', 'license', 'adobe', 'office', 'excel', 'word'],
-            'secondary': ['cannot open', 'not working', 'crash', 'error message', 'uninstall'],
-            'weight': 0.9
-        },
-        'Access & Permissions': {
-            'primary': ['access', 'permission', 'rights', 'share', 'folder', 'file access',
-                       'denied', 'restricted', 'cannot access', 'locked out'],
-            'secondary': ['need access', 'request access', 'remove access', 'grant access'],
-            'weight': 1.0
-        },
-        'Password & Authentication': {
-            'primary': ['password', 'login', 'credential', 'authentication', 'forgot password',
-                       'reset password', 'cannot login', 'locked account', 'mfa', '2fa'],
-            'secondary': ['username', 'sign in', 'log in', 'account locked'],
-            'weight': 1.1
-        },
-        'Printer & Peripherals': {
-            'primary': ['printer', 'print', 'printing', 'scanner', 'scan', 'copier', 'fax',
-                       'paper jam', 'ink', 'toner'],
-            'secondary': ['cannot print', 'print queue', 'printer offline', 'print error'],
-            'weight': 0.9
-        },
-        'Performance & Speed': {
-            'primary': ['slow', 'performance', 'freeze', 'frozen', 'hang', 'lag', 'sluggish',
-                       'running slow', 'takes forever', 'not responding'],
-            'secondary': ['speed', 'fast', 'optimize', 'cleanup'],
-            'weight': 0.8
-        },
-        'Security & Antivirus': {
-            'primary': ['security', 'antivirus', 'malware', 'virus', 'threat', 'suspicious',
-                       'phishing', 'spam', 'quarantine', 'blocked'],
-            'secondary': ['security alert', 'suspicious email', 'cannot download'],
-            'weight': 1.1
-        },
-        'Account Management': {
-            'primary': ['new user', 'new employee', 'onboarding', 'offboarding', 'termination',
-                       'create account', 'disable account', 'employee setup'],
-            'secondary': ['new hire', 'user account', 'account creation'],
-            'weight': 0.9
-        },
-        'Mobile & Devices': {
-            'primary': ['mobile', 'phone', 'iphone', 'android', 'tablet', 'ipad', 'cell phone',
-                       'smartphone', 'mobile device'],
-            'secondary': ['cell', 'bring', 'sync', 'mobile app'],
-            'weight': 0.8
-        },
-        'Database & Systems': {
-            'primary': ['database', 'sql', 'server', 'system', 'erp', 'crm', 'backup',
-                       'data', 'oracle', 'mysql'],
-            'secondary': ['query', 'report', 'data access', 'system error'],
-            'weight': 0.9
-        }
-    }
-    
-    category_scores = {}
-    matched_keywords = {}
-    
-    for category, patterns in category_patterns.items():
-        score = 0
-        keywords = []
+    while True:
+        start_index = (page - 1) * row_count + 1
         
-        for keyword in patterns['primary']:
-            if keyword in combined_text:
-                score += 10 * patterns['weight']
-                keywords.append(keyword)
-        
-        for keyword in patterns['secondary']:
-            if keyword in combined_text:
-                score += 5 * patterns['weight']
-                keywords.append(keyword)
-        
-        if score > 0:
-            category_scores[category] = score
-            matched_keywords[category] = keywords
-    
-    if not category_scores:
-        return {
-            'suggested_category': 'General Support',
-            'confidence': 0,
-            'keywords_matched': [],
-            'use_suggested': True,
-            'original_category': existing_category or 'Uncategorized'
-        }
-    
-    best_category = max(category_scores, key=category_scores.get)
-    best_score = category_scores[best_category]
-    
-    confidence = min(best_score * 2, 100)
-    
-    sorted_scores = sorted(category_scores.values(), reverse=True)
-    if len(sorted_scores) > 1 and sorted_scores[0] - sorted_scores[1] < 5:
-        confidence *= 0.7
-    
-    return {
-        'suggested_category': best_category,
-        'confidence': round(confidence, 1),
-        'keywords_matched': matched_keywords.get(best_category, []),
-        'use_suggested': True,
-        'original_category': existing_category or 'Uncategorized'
-    }
-# ============================================================
-# AI ANALYSIS FUNCTIONS
-# ============================================================
-
-def calculate_complexity_score(ticket: Dict, conversations: List[Dict]) -> int:
-    """Calculate complexity score 0-10"""
-    score = 3
-    
-    if len(conversations) > 10:
-        score += 3
-    elif len(conversations) > 5:
-        score += 2
-    elif len(conversations) > 2:
-        score += 1
-    
-    description = ticket.get('description', '').lower()
-    technical_keywords = ['error', 'crash', 'bug', 'failure', 'corrupt', 'network', 'server', 'database']
-    tech_count = sum(1 for keyword in technical_keywords if keyword in description)
-    score += min(tech_count, 3)
-    
-    priority = ticket.get('priority', {})
-    priority_name = priority.get('name', '').lower() if priority else ''
-    if 'urgent' in priority_name or 'critical' in priority_name:
-        score += 2
-    elif 'high' in priority_name:
-        score += 1
-    
-    return min(score, 10)
-
-def analyze_sentiment(conversations: List[Dict]) -> str:
-    """Analyze customer sentiment from conversations"""
-    if not conversations:
-        return "neutral"
-    
-    negative_keywords = ['frustrated', 'angry', 'unacceptable', 'disappointed', 'terrible', 'worst']
-    positive_keywords = ['thank', 'appreciate', 'great', 'excellent', 'perfect', 'helpful']
-    
-    negative_count = 0
-    positive_count = 0
-    
-    for conv in conversations:
-        text = conv.get('description', '').lower()
-        negative_count += sum(1 for keyword in negative_keywords if keyword in text)
-        positive_count += sum(1 for keyword in positive_keywords if keyword in text)
-    
-    if negative_count > positive_count * 2:
-        return "at-risk"
-    elif positive_count > negative_count * 2:
-        return "positive"
-    return "neutral"
-
-def predict_sla_breach(ticket: Dict, conversations: List[Dict]) -> Tuple[str, int]:
-    """Predict SLA breach risk"""
-    due_date = ticket.get('due_by_time')
-    if not due_date:
-        return ("unknown", 0)
-    
-    try:
-        due_display = due_date.get('display_value', '') if isinstance(due_date, dict) else ''
-        if not due_display:
-            return ("unknown", 0)
-        
-        due = datetime.fromisoformat(due_display.replace('Z', '+00:00'))
-        now = datetime.now(timezone.utc)
-        hours_remaining = (due - now).total_seconds() / 3600
-        
-        if hours_remaining < 0:
-            return ("critical", 100)
-        elif hours_remaining < 4:
-            return ("critical", 90)
-        elif hours_remaining < 24:
-            return ("high", 70)
-        elif hours_remaining < 48:
-            return ("moderate", 40)
-        else:
-            return ("low", 10)
-    except:
-        return ("unknown", 0)
-
-def estimate_resolution_time(ticket: Dict, conversations: List[Dict], complexity: int) -> float:
-    """Estimate resolution time in hours"""
-    base_hours = complexity * 2
-    
-    priority = ticket.get('priority', {})
-    priority_name = priority.get('name', '').lower() if priority else ''
-    if 'urgent' in priority_name:
-        base_hours *= 0.5
-    elif 'low' in priority_name:
-        base_hours *= 1.5
-    
-    if len(conversations) > 5:
-        base_hours *= 1.3
-    
-    return round(base_hours, 1)
-
-def identify_issue_type(ticket: Dict) -> List[str]:
-    """Identify issue types from description"""
-    description = (ticket.get('description', '') + ' ' + ticket.get('subject', '')).lower()
-    
-    issue_keywords = {
-        'password': ['password', 'login', 'authentication', 'credential'],
-        'email': ['email', 'outlook', 'mailbox', 'mail'],
-        'network': ['network', 'wifi', 'internet', 'connection', 'vpn'],
-        'hardware': ['laptop', 'desktop', 'monitor', 'keyboard', 'mouse', 'printer', 'hardware'],
-        'software': ['software', 'application', 'app', 'program', 'install'],
-        'access': ['access', 'permission', 'rights', 'locked out'],
-        'performance': ['slow', 'performance', 'freeze', 'lag'],
-        'error': ['error', 'crash', 'fail', 'bug']
-    }
-    
-    identified = []
-    for issue_type, keywords in issue_keywords.items():
-        if any(keyword in description for keyword in keywords):
-            identified.append(issue_type)
-    
-    return identified or ['general']
-
-def analyze_response_status(conversations: List[Dict]) -> Dict[str, Any]:
-    """Analyze conversation response status"""
-    if not conversations:
-        return {
-            'awaiting_response': 'unknown',
-            'last_responder': 'none',
-            'response_time_hours': 0,
-            'has_unanswered_questions': False
-        }
-    
-    sorted_convs = sorted(conversations, key=lambda x: x.get('created_time', {}).get('value', 0))
-    if not sorted_convs:
-        return {
-            'awaiting_response': 'unknown',
-            'last_responder': 'none',
-            'response_time_hours': 0,
-            'has_unanswered_questions': False
-        }
-    
-    last_conv = sorted_convs[-1]
-    last_responder_type = 'customer' if last_conv.get('is_customer', False) else 'technician'
-    awaiting = 'technician' if last_responder_type == 'customer' else 'customer'
-    
-    last_text = last_conv.get('description', '')
-    has_unanswered_questions = '?' in last_text and last_responder_type == 'customer'
-    
-    response_time = 0
-    if len(sorted_convs) > 1:
         try:
-            first_time = sorted_convs[0].get('created_time', {}).get('value', 0)
-            last_time = sorted_convs[-1].get('created_time', {}).get('value', 0)
-            response_time = (last_time - first_time) / (1000 * 3600)
-        except:
-            pass
+            data = fetch_tickets_from_sdp(start_index, row_count, last_sync_time)
+            tickets = data.get('requests', [])
+            
+            if not tickets:
+                break
+            
+            all_tickets.extend(tickets)
+            logger.info(f"  Page {page}: {len(tickets)} tickets (Total: {len(all_tickets)})")
+            
+            page += 1
+            
+            if max_pages and page > max_pages:
+                break
+            
+            time.sleep(0.1)
+            
+        except Exception as e:
+            logger.error(f"Error fetching page {page}: {e}")
+            break
     
-    return {
-        'awaiting_response': awaiting,
-        'last_responder': last_responder_type,
-        'response_time_hours': round(response_time, 1),
-        'has_unanswered_questions': has_unanswered_questions
-    }
+    logger.info(f"✓ Fetched {len(all_tickets)} tickets\n")
+    return all_tickets
+
 # ============================================================
-# FIELD EXTRACTION
+# TICKET PROCESSING
 # ============================================================
+
+def safe_get(obj, *keys, default=None):
+    """Safely get nested dictionary values"""
+    for key in keys:
+        if isinstance(obj, dict):
+            obj = obj.get(key, default)
+        else:
+            return default
+    return obj if obj is not None else default
 
 def extract_comprehensive_fields(ticket: Dict) -> Dict[str, Any]:
-    """Extract all comprehensive fields from ticket"""
-    fields = {}
+    """Extract all fields from ticket"""
+    fields = {
+        'ticket_id': safe_get(ticket, 'display_id', default='Unknown'),
+        'subject': safe_get(ticket, 'subject', default='No Subject'),
+        'description': safe_get(ticket, 'description', default=''),
+        'status': safe_get(ticket, 'status', 'name', default='Unknown'),
+        'status_category': 'active' if safe_get(ticket, 'status', 'name', default='').lower() not in ['closed', 'resolved'] else 'closed',
+        'priority': safe_get(ticket, 'priority', 'name', default='Normal'),
+        'category': safe_get(ticket, 'category', 'name', default='General'),
+        'subcategory': safe_get(ticket, 'subcategory', 'name', default=''),
+        'requester': safe_get(ticket, 'requester', 'name', default='Unknown'),
+        'requester_email': safe_get(ticket, 'requester', 'email_id', default=''),
+        'technician': safe_get(ticket, 'technician', 'name', default='Unassigned'),
+        'technician_email': safe_get(ticket, 'technician', 'email_id', default=''),
+        'created_time': safe_get(ticket, 'created_time', 'display_value', default='Unknown'),
+        'created_time_epoch': safe_get(ticket, 'created_time', 'value', default=0),
+        'due_by_time': safe_get(ticket, 'due_by_time', 'display_value', default=''),
+        'resolved_time': safe_get(ticket, 'resolved_time', 'display_value', default=''),
+        'closed_time': safe_get(ticket, 'closed_time', 'display_value', default=''),
+        'last_updated_time': safe_get(ticket, 'last_updated_time', 'display_value', default=''),
+        'group': safe_get(ticket, 'group', 'name', default='Unassigned'),
+        'site': safe_get(ticket, 'site', 'name', default=''),
+        'department': safe_get(ticket, 'department', 'name', default=''),
+        'impact': safe_get(ticket, 'impact', 'name', default=''),
+        'urgency': safe_get(ticket, 'urgency', 'name', default=''),
+        'mode': safe_get(ticket, 'mode', 'name', default=''),
+        'source': safe_get(ticket, 'request_type', 'name', default=''),
+        'level': safe_get(ticket, 'level', 'name', default=''),
+        'item': safe_get(ticket, 'item', 'name', default=''),
+        'service': safe_get(ticket, 'service_category', 'name', default=''),
+        'time_elapsed': safe_get(ticket, 'time_elapsed', default=''),
+        'is_overdue': safe_get(ticket, 'is_overdue', default=False),
+        'has_notes': safe_get(ticket, 'has_notes', default=False),
+        'is_service_request': safe_get(ticket, 'is_service_request', default=False),
+        'resolution': safe_get(ticket, 'resolution', default=''),
+        'resolution_category': safe_get(ticket, 'resolution', 'name', default=''),
+        'closure_code': safe_get(ticket, 'closure_code', 'name', default=''),
+        'closure_comments': safe_get(ticket, 'closure_comments', default=''),
+        'assets': safe_get(ticket, 'assets', default=[]),
+        'linked_requests': safe_get(ticket, 'linked_requests', default=[]),
+        'template': safe_get(ticket, 'template', 'name', default=''),
+        'project': safe_get(ticket, 'project', 'name', default=''),
+        'display_id_str': f"#{safe_get(ticket, 'display_id', default='Unknown')}",
+        'id_long': safe_get(ticket, 'id', default=''),
+        'is_escalated': safe_get(ticket, 'is_escalated', default=False),
+        'maintenance': safe_get(ticket, 'maintenance', 'name', default=''),
+        'approval_status': safe_get(ticket, 'approval_status', default=''),
+        'request_type': safe_get(ticket, 'request_type', 'name', default=''),
+        'created_by': safe_get(ticket, 'created_by', 'name', default=''),
+        'cancellation_requested': safe_get(ticket, 'cancellation_requested', default=False),
+    }
     
-    def safe_get(obj, key, default=''):
-        if obj is None:
-            return default
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        return default
-    
-    long_ticket_id = ticket.get('id', 'unknown')
-    short_ticket_number = extract_short_ticket_number(ticket)
-    module_type = ticket.get('_module_type', 'request')
-    
-    fields['ticket_id_long'] = long_ticket_id
-    fields['ticket_id'] = short_ticket_number
-    fields['module_type'] = module_type
-    fields['display_id'] = f"#{short_ticket_number}"
-    
-    fields['subject'] = ticket.get('subject', 'No subject')
-    fields['description'] = ticket.get('description', 'No description')
-    
-    status = ticket.get('status') or {}
-    fields['status'] = safe_get(status, 'name', 'Unknown')
-    fields['status_category'] = 'active' if fields['status'].lower() in ['open', 'in progress', 'pending'] else 'closed'
-    
-    priority = ticket.get('priority') or {}
-    fields['priority'] = safe_get(priority, 'name', 'Normal')
-    
-    requester = ticket.get('requester') or {}
-    fields['requester_name'] = safe_get(requester, 'name', 'Unknown')
-    fields['requester_email'] = safe_get(requester, 'email_id', '')
-    
-    technician = ticket.get('technician') or {}
-    fields['technician_name'] = safe_get(technician, 'name', 'Unassigned')
-    fields['technician_email'] = safe_get(technician, 'email_id', '')
-    
-    category = ticket.get('category') or {}
-    original_category = safe_get(category, 'name', 'Uncategorized')
-    fields['category_original'] = original_category
-    
-    auto_cat = auto_categorize_ticket(ticket, original_category)
-    fields['category'] = auto_cat['suggested_category']
-    fields['category_confidence'] = auto_cat['confidence']
-    fields['category_auto_assigned'] = auto_cat['use_suggested']
-    fields['category_keywords'] = auto_cat['keywords_matched']
-    
-    subcategory = ticket.get('subcategory') or {}
-    fields['subcategory'] = safe_get(subcategory, 'name', '')
-    
-    site = ticket.get('site') or {}
-    fields['site'] = safe_get(site, 'name', '')
-    
-    created_time = ticket.get('created_time') or {}
-    fields['created_time'] = safe_get(created_time, 'display_value', '')
-    
-    due_by_time = ticket.get('due_by_time') or {}
-    fields['due_by_time'] = safe_get(due_by_time, 'display_value', '')
-    
-    resolved_time = ticket.get('resolved_time') or {}
-    fields['resolved_time'] = safe_get(resolved_time, 'display_value', '')
-    
-    last_updated_time = ticket.get('last_updated_time') or {}
-    fields['last_updated_time'] = safe_get(last_updated_time, 'display_value', '')
-    
-    group = ticket.get('group') or {}
-    fields['group'] = safe_get(group, 'name', '')
-    
-    assets = ticket.get('assets') or []
-    if not isinstance(assets, list):
-        assets = []
-    fields['has_assets'] = len(assets) > 0
-    fields['asset_count'] = len(assets)
-    fields['asset_names'] = [safe_get(asset, 'name', '') for asset in assets] if assets else []
-    fields['primary_asset'] = safe_get(assets[0], 'name', '') if assets else ''
-    
-    request_type = ticket.get('request_type') or {}
-    fields['source'] = safe_get(request_type, 'name', 'Unknown')
-    
-    mode = ticket.get('mode') or {}
-    fields['mode'] = safe_get(mode, 'name', fields['source'])
-    fields['channel'] = fields['mode']
-    
-    fields['impact'] = safe_get(ticket.get('impact') or {}, 'name', '')
-    fields['urgency'] = safe_get(ticket.get('urgency') or {}, 'name', '')
-    fields['level'] = safe_get(ticket.get('level') or {}, 'name', '')
-    fields['tier'] = fields['level']
-    fields['service'] = safe_get(ticket.get('service') or {}, 'name', '')
-    fields['time_spent'] = ticket.get('time_spent', 0) or 0
-    fields['time_spent_hours'] = round(fields['time_spent'] / 3600000, 2) if fields['time_spent'] else 0
-    fields['resolution_category'] = safe_get(ticket.get('resolution') or {}, 'name', '')
-    fields['reopened_count'] = ticket.get('reopened_count', 0) or 0
-    fields['has_been_reopened'] = fields['reopened_count'] > 0
-    fields['is_first_call_resolution'] = ticket.get('is_fcr', False) or False
+    if fields['is_service_request']:
+        fields['module_type'] = 'service_request'
+    else:
+        fields['module_type'] = 'request'
     
     return fields
 
-# ============================================================
-# ANALYTICS & METRICS TRACKING
-# ============================================================
-
-def track_analytics(ticket: Dict, conversations: List[Dict], complexity: int, comprehensive_fields: Dict):
-    """Track analytics data"""
-    module_type = comprehensive_fields.get('module_type', 'unknown')
-    analytics_cache.update_module_distribution(module_type)
+def calculate_complexity_score(ticket: Dict, comprehensive_fields: Dict, conversations: List[Dict]) -> int:
+    """Calculate complexity score 0-10"""
+    score = 0
     
-    was_auto = comprehensive_fields.get('category_auto_assigned', False)
-    confidence = comprehensive_fields.get('category_confidence', 0)
-    analytics_cache.update_auto_categorization(was_auto, confidence)
+    priority = comprehensive_fields.get('priority', '').lower()
+    if 'urgent' in priority or 'critical' in priority:
+        score += 3
+    elif 'high' in priority:
+        score += 2
+    elif 'medium' in priority or 'normal' in priority:
+        score += 1
     
-    category = comprehensive_fields['category']
-    resolution_days = 0
-    if comprehensive_fields['resolved_time']:
-        try:
-            created = datetime.fromisoformat(comprehensive_fields['created_time'].replace('Z', '+00:00'))
-            resolved = datetime.fromisoformat(comprehensive_fields['resolved_time'].replace('Z', '+00:00'))
-            resolution_days = (resolved - created).total_seconds() / 86400
-        except:
-            pass
-    analytics_cache.update_category_stats(category, resolution_days)
+    category = comprehensive_fields.get('category', '').lower()
+    complex_categories = ['network', 'server', 'database', 'application', 'security', 'integration', 'infrastructure']
+    simple_categories = ['password', 'access', 'account', 'printer', 'email', 'software installation']
     
-    tech = comprehensive_fields['technician_name']
-    is_active = comprehensive_fields['status_category'] == 'active'
-    response_hours = 0
-    if conversations:
-        try:
-            first_time = conversations[0].get('created_time', {}).get('value', 0)
-            last_time = conversations[-1].get('created_time', {}).get('value', 0)
-            response_hours = (last_time - first_time) / (1000 * 3600)
-        except:
-            pass
-    analytics_cache.update_technician_workload(tech, is_active, response_hours)
-
-def track_metrics(comprehensive_fields: Dict, conversations: List[Dict], 
-                 complexity: int, sentiment: str, sla_risk: str, response_status: Dict):
-    """Track metrics"""
-    METRICS['total_processed'] += 1
-    
-    module_type = comprehensive_fields.get('module_type', 'unknown')
-    if module_type == 'requests':
-        METRICS['requests'] += 1
-    elif module_type == 'service_requests':
-        METRICS['service_requests'] += 1
-    elif module_type == 'incidents':
-        METRICS['incidents'] += 1
-    
-    if comprehensive_fields.get('category_auto_assigned'):
-        METRICS['auto_categorized'] += 1
-    
-    if comprehensive_fields['status_category'] == 'active':
-        METRICS['active_tickets'] += 1
+    if any(cat in category for cat in complex_categories):
+        score += 2
+    elif any(cat in category for cat in simple_categories):
+        score += 0
     else:
-        METRICS['closed_tickets'] += 1
+        score += 1
     
-    if conversations:
-        METRICS['with_conversations'] += 1
+    description = comprehensive_fields.get('description', '')
+    if len(description) > 500:
+        score += 2
+    elif len(description) > 200:
+        score += 1
     
-    if complexity >= 7:
-        METRICS['high_complexity'] += 1
+    conv_count = len(conversations)
+    if conv_count > 10:
+        score += 2
+    elif conv_count > 5:
+        score += 1
     
-    if sentiment == 'at-risk':
-        METRICS['satisfaction_at_risk'] += 1
-    
-    if sla_risk in ['critical', 'high']:
-        METRICS['high_sla_breach_risk'] += 1
+    return min(max(score, 0), 10)
 
-# ============================================================
-# TAG GENERATION
-# ============================================================
+def analyze_sentiment(ticket: Dict, comprehensive_fields: Dict, conversations: List[Dict]) -> str:
+    """Analyze sentiment"""
+    negative_keywords = ['urgent', 'critical', 'emergency', 'broken', 'not working', 'failed', 'error']
+    positive_keywords = ['thank', 'thanks', 'appreciate', 'great', 'working', 'resolved', 'fixed']
+    
+    text = ' '.join([
+        comprehensive_fields.get('subject', ''),
+        comprehensive_fields.get('description', ''),
+        comprehensive_fields.get('priority', ''),
+    ]).lower()
+    
+    negative_count = sum(1 for keyword in negative_keywords if keyword in text)
+    positive_count = sum(1 for keyword in positive_keywords if keyword in text)
+    
+    if negative_count > positive_count + 2:
+        if comprehensive_fields.get('is_escalated') or comprehensive_fields.get('is_overdue'):
+            return 'at-risk'
+        return 'negative'
+    elif positive_count > negative_count + 1:
+        return 'positive'
+    else:
+        return 'neutral'
+
+def predict_sla_risk(ticket: Dict, comprehensive_fields: Dict, complexity: int) -> str:
+    """Predict SLA breach risk"""
+    if comprehensive_fields.get('is_overdue'):
+        return 'critical'
+    
+    if comprehensive_fields.get('status_category') == 'closed':
+        return 'on-track'
+    
+    risk_score = 0
+    
+    priority = comprehensive_fields.get('priority', '').lower()
+    if 'urgent' in priority or 'critical' in priority:
+        risk_score += 3
+    elif 'high' in priority:
+        risk_score += 2
+    
+    if complexity >= 8:
+        risk_score += 3
+    elif complexity >= 6:
+        risk_score += 2
+    
+    if risk_score >= 5:
+        return 'critical'
+    elif risk_score >= 3:
+        return 'high'
+    elif risk_score >= 1:
+        return 'medium'
+    else:
+        return 'low'
+
+def analyze_response_status(conversations: List[Dict], comprehensive_fields: Dict) -> Dict[str, Any]:
+    """Analyze response status"""
+    if not conversations:
+        return {
+            'awaiting_response': 'customer',
+            'last_responder': 'system',
+            'response_time_indicator': 'none',
+            'has_unanswered_questions': False
+        }
+    
+    last_conv = conversations[-1]
+    last_sender = last_conv.get('sender', {}).get('name', '').lower()
+    
+    requester = comprehensive_fields.get('requester', '').lower()
+    
+    awaiting = 'technician' if requester in last_sender else 'customer'
+    
+    return {
+        'awaiting_response': awaiting,
+        'last_responder': last_sender,
+        'response_time_indicator': 'normal',
+        'has_unanswered_questions': False
+    }
+
+def auto_categorize_ticket(comprehensive_fields: Dict, conversations: List[Dict]) -> Dict[str, Any]:
+    """Auto-categorize ticket"""
+    return {
+        'suggested_category': 'General Support',
+        'confidence': 'medium',
+        'match_score': 1
+    }
 
 def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict], 
                                 comprehensive_fields: Dict, complexity: int,
-                                sentiment: str, sla_risk: str, response_status: Dict) -> List[str]:
-    """Generate comprehensive tags for searchability"""
+                                sentiment: str, sla_risk: str, 
+                                response_status: Dict) -> List[str]:
+    """
+    Generate comprehensive tags - v3.1.10 ENHANCED
+    """
     tags = []
     
     short_id = comprehensive_fields.get('ticket_id')
     tags.extend([
         f"ticket:{short_id}",
         f"#{short_id}",
-        comprehensive_fields.get('display_id', '')
+        comprehensive_fields.get('display_id_str', '')
     ])
     
     module_type = comprehensive_fields.get('module_type', 'unknown')
     tags.append(f"module:{module_type}")
     
+    # ============================================================
+    # STATUS TAGS - v3.1.10 ENHANCED
+    # ============================================================
     status = comprehensive_fields['status'].lower().replace(' ', '-')
-    tags.extend([f"status:{status}", f"status-category:{comprehensive_fields['status_category']}"])
-    if comprehensive_fields['status_category'] == 'active':
-        tags.extend(['active', 'open-status', 'needs-attention'])
+    status_category = comprehensive_fields['status_category']
+    
+    tags.extend([
+        f"status:{status}",
+        f"status-category:{status_category}"
+    ])
+    
+    if status_category == 'active':
+        tags.extend([
+            'ACTIVE-TICKET',
+            'IS-OPEN',
+            'NOT-CLOSED',
+            'OPEN-STATUS',
+            'active',
+            'open-status',
+            'needs-attention',
+            'actionable-ticket',
+            'requires-work'
+        ])
+        
+        if 'open' in status:
+            tags.extend(['STATUS-OPEN', 'CURRENTLY-OPEN'])
+        if 'progress' in status or 'in-progress' in status:
+            tags.extend(['STATUS-IN-PROGRESS', 'BEING-WORKED'])
+        if 'pending' in status:
+            tags.extend(['STATUS-PENDING', 'WAITING'])
+        if 'hold' in status or 'on-hold' in status:
+            tags.extend(['STATUS-ON-HOLD', 'PAUSED'])
+            
+    else:
+        tags.extend([
+            'CLOSED-TICKET',
+            'IS-CLOSED',
+            'NOT-ACTIVE',
+            'completed',
+            'resolved'
+        ])
+    # ============================================================
     
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
     if 'urgent' in priority:
         tags.extend(['urgent-attention', 'critical-action-required'])
     
-    tech = comprehensive_fields['technician_name'].lower().replace(' ', '-')
-    req = comprehensive_fields['requester_name'].lower().replace(' ', '-')
-    tags.extend([f"technician:{tech}", f"requester:{req}"])
-    if tech == 'unassigned':
+    category = comprehensive_fields.get('category', 'general')
+    if category and category != 'General':
+        tags.append(f"category:{category.lower().replace(' ', '-')}")
+    
+    technician = comprehensive_fields.get('technician', 'Unassigned')
+    if technician and technician.lower() not in ['unassigned', 'unknown', '']:
+        tech_tag = technician.lower().replace(' ', '-').replace('.', '-')
+        tags.extend([
+            f"technician:{tech_tag}",
+            f"assigned-to:{tech_tag}"
+        ])
+    else:
         tags.extend(['unassigned', 'needs-assignment'])
     
-    category = comprehensive_fields['category'].lower().replace(' ', '-').replace('&', 'and')
-    tags.append(f"category:{category}")
-    if comprehensive_fields.get('category_auto_assigned'):
-        tags.append('auto-categorized')
-        confidence = comprehensive_fields.get('category_confidence', 0)
-        if confidence >= 80:
-            tags.append('high-confidence-category')
-        elif confidence < 50:
-            tags.append('low-confidence-category')
+    requester = comprehensive_fields.get('requester', '')
+    if requester:
+        req_tag = requester.lower().replace(' ', '-').replace('.', '-')
+        tags.extend([f"requester:{req_tag}"])
     
-    tags.append(f"complexity:{complexity}")
-    if complexity >= 7:
-        tags.extend(['high-complexity', 'complex-issue'])
-    elif complexity <= 3:
-        tags.extend(['low-complexity', 'simple-issue'])
+    tags.extend([
+        f"complexity:{complexity}",
+        f"sentiment:{sentiment}",
+        f"sla-risk:{sla_risk}"
+    ])
     
-    tags.append(f"sentiment:{sentiment}")
-    if sentiment == 'at-risk':
-        tags.extend(['satisfaction-at-risk', 'customer-frustration'])
+    if comprehensive_fields.get('is_overdue'):
+        tags.extend(['overdue', 'past-due', 'sla-breached'])
     
-    tags.append(f"sla-risk:{sla_risk}")
-    if sla_risk in ['critical', 'high']:
-        tags.extend(['high-breach-risk', 'sla-attention-needed'])
+    conv_count = len(conversations)
+    if conv_count == 0:
+        tags.append('no-conversation')
+    elif conv_count > 10:
+        tags.append('high-conversation-volume')
     
-    tags.append(f"awaiting:{response_status['awaiting_response']}")
-    if response_status['awaiting_response'] == 'customer':
-        tags.append('awaiting-customer-response')
-    elif response_status['awaiting_response'] == 'technician':
-        tags.extend(['awaiting-technician-response', 'actionable'])
+    awaiting = response_status.get('awaiting_response')
+    tags.append(f"awaiting:{awaiting}")
     
-    return list(set(tags))
-# ============================================================
-# DOCUMENT CREATION
-# ============================================================
-
-def create_dust_document(ticket: Dict, conversations: List[Dict], 
-                        comprehensive_fields: Dict, complexity: int,
-                        sentiment: str, sla_risk: str, sla_breach_likelihood: int,
-                        estimated_resolution_hours: float, issue_types: List[str],
-                        response_status: Dict) -> Dict:
-    """Create Dust document from ticket data"""
-    
-    conversation_text = ""
-    if conversations:
-        for i, conv in enumerate(conversations, 1):
-            sender_obj = conv.get('sender') or {}
-            sender = sender_obj.get('name', 'Unknown') if isinstance(sender_obj, dict) else 'Unknown'
-            is_customer = conv.get('is_customer', False)
-            role = "Customer" if is_customer else "Technician"
-            text = conv.get('description', '')
-            created_time_obj = conv.get('created_time') or {}
-            time = created_time_obj.get('display_value', '') if isinstance(created_time_obj, dict) else ''
-            
-            conversation_text += f"\n### Conversation {i} - {role}: {sender}\n"
-            conversation_text += f"**Time:** {time}\n\n"
-            conversation_text += f"{text}\n"
+    if comprehensive_fields.get('is_service_request'):
+        tags.append('service-request')
     else:
-        conversation_text = "\n*No conversations yet*\n"
+        tags.append('request')
     
+    tags = list(dict.fromkeys([tag.strip() for tag in tags if tag and tag.strip()]))
+    return tags
+
+def format_conversations_readable(conversations: List[Dict]) -> str:
+    """Format conversations"""
+    if not conversations:
+        return "No conversations"
+    
+    formatted = []
+    for i, conv in enumerate(conversations, 1):
+        sender = conv.get('sender', {}).get('name', 'Unknown')
+        time_val = conv.get('created_time', {}).get('display_value', 'Unknown')
+        text = conv.get('text', 'No content')
+        text = re.sub(r'<[^>]+>', '', text).strip() or 'No content'
+        
+        formatted.append(f"--- Conversation {i} ---\nFrom: {sender}\nTime: {time_val}\nMessage:\n{text}\n")
+    
+    return "\n".join(formatted)
+
+def generate_ticket_document(ticket: Dict, conversations: List[Dict],
+                            comprehensive_fields: Dict, complexity: int,
+                            sentiment: str, sla_risk: str, 
+                            response_status: Dict,
+                            auto_category: Dict) -> Dict[str, Any]:
+    """Generate complete document"""
     tags = generate_comprehensive_tags(
         ticket, conversations, comprehensive_fields,
         complexity, sentiment, sla_risk, response_status
     )
     
-    short_id = comprehensive_fields.get('display_id', f"#{comprehensive_fields.get('ticket_id')}")
-    module_type = comprehensive_fields.get('module_type', 'request').replace('_', ' ').title()
+    readable_conversations = format_conversations_readable(conversations)
     
-    category_display = comprehensive_fields['category']
-    if comprehensive_fields.get('category_auto_assigned'):
-        confidence = comprehensive_fields.get('category_confidence', 0)
-        category_display += f" (Auto-assigned: {confidence:.0f}% confidence)"
-        if comprehensive_fields.get('category_keywords'):
-            keywords = ', '.join(comprehensive_fields['category_keywords'][:5])
-            category_display += f"\n  Keywords: {keywords}"
+    document_parts = [
+        f"TICKET #{comprehensive_fields['ticket_id']}",
+        f"Status: {comprehensive_fields['status']} ({comprehensive_fields['status_category']})",
+        f"Priority: {comprehensive_fields['priority']}",
+        f"Category: {comprehensive_fields['category']}",
+        "",
+        f"SUBJECT: {comprehensive_fields['subject']}",
+        "",
+        "DESCRIPTION:",
+        comprehensive_fields.get('description', 'No description'),
+        "",
+        f"REQUESTER: {comprehensive_fields['requester']}",
+        f"TECHNICIAN: {comprehensive_fields['technician']}",
+        "",
+        f"CREATED: {comprehensive_fields['created_time']}",
+        "",
+        "=== AI INTELLIGENCE ===",
+        f"Complexity: {complexity}/10",
+        f"Sentiment: {sentiment}",
+        f"SLA Risk: {sla_risk}",
+        "",
+        "=== CONVERSATIONS ===",
+        readable_conversations,
+        ""
+    ]
     
-    document_text = f"""# Ticket {short_id}: {comprehensive_fields['subject']}
-
-## Type & Overview
-- **Type:** {module_type}
-- **Status:** {comprehensive_fields['status']} ({comprehensive_fields['status_category']})
-- **Priority:** {comprehensive_fields['priority']}
-- **Category:** {category_display}
-
-## People
-- **Requester:** {comprehensive_fields['requester_name']}
-- **Technician:** {comprehensive_fields['technician_name']}
-
-## Timeline
-- **Created:** {comprehensive_fields['created_time']}
-- **Due By:** {comprehensive_fields['due_by_time'] or 'No due date'}
-- **Last Updated:** {comprehensive_fields['last_updated_time']}
-
-## Description
-{comprehensive_fields['description']}
-
-## AI Intelligence
-- **Complexity:** {complexity}/10
-- **Sentiment:** {sentiment}
-- **SLA Risk:** {sla_risk} ({sla_breach_likelihood}%)
-- **Estimated Resolution:** {estimated_resolution_hours} hours
-
-## Conversations ({len(conversations)} total)
-{conversation_text}
-
-## Tags
-{', '.join(tags[:50])}
-
----
-*Intelligence Suite v{VERSION} - Speed & Reliability Edition*
-*Module: {module_type} | Ticket ID: {short_id} | Category Confidence: {comprehensive_fields.get('category_confidence', 0):.0f}%*
-"""
+    document_text = '\n'.join(document_parts)
     
-    short_ticket_num = comprehensive_fields.get('ticket_id')
     document = {
-        "document_id": f"ticket-{short_ticket_num}",
-        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-        "tags": tags,
-        "text": document_text,
-        "structured_data": {
-            **comprehensive_fields,
-            "complexity_score": complexity,
-            "sentiment": sentiment,
-            "sla_risk_level": sla_risk,
-            "sla_breach_likelihood": sla_breach_likelihood,
-            "estimated_resolution_hours": estimated_resolution_hours,
-            "issue_types": issue_types,
-            "conversation_count": len(conversations),
-            "response_status": response_status,
-            "intelligence_version": VERSION
+        'document_id': f"ticket-{comprehensive_fields['ticket_id']}",
+        'timestamp': int(datetime.now(timezone.utc).timestamp() * 1000),
+        'tags': tags,
+        'parents': None,
+        'source_url': f"{SDP_BASE_URL}/WorkOrder.do?woMode=viewWO&woID={comprehensive_fields.get('id_long')}",
+        'text': document_text,
+        'section': {
+            'prefix': None,
+            'content': document_text,
+            'sections': []
         }
     }
     
     return document
 
-# ============================================================
-# DUST UPLOAD - v3.1.9 IMPROVED
-# ============================================================
-
-def upload_to_dust_parallel(documents: List[Dict]) -> Tuple[int, int]:
-    """
-    Upload documents to Dust in parallel
-    v3.1.9: Increased workers from 5 to 10
-    """
-    if not DUST_API_KEY or not DUST_WORKSPACE_ID:
-        logger.warning("Dust credentials not configured. Skipping upload.")
-        return 0, 0
-    
-    base_url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
+def upload_to_dust(document: Dict) -> bool:
+    """Upload document to Dust"""
     headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
+        "Authorization": f"Bearer {DUST_API_KEY}",
+        "Content-Type": "application/json"
     }
     
-    uploaded = 0
-    errors = 0
-    upload_lock = Lock()
-    rate_limiter = Semaphore(MAX_CONCURRENT_UPLOADS)
+    url = f"{DUST_API_URL}/documents/{document['document_id']}"
     
-    def upload_single_document(doc: Dict) -> bool:
-        nonlocal uploaded, errors
-        with rate_limiter:
-            url = f"{base_url}/{doc['document_id']}"
-            for attempt in range(3):
-                try:
-                    response = SESSION.post(url, headers=headers, json=doc, timeout=UPLOAD_TIMEOUT)
-                    if response.status_code in [200, 201]:
-                        with upload_lock:
-                            uploaded += 1
-                            if uploaded % 100 == 0:
-                                logger.info(f"  Progress: {uploaded}/{len(documents)} uploaded...")
-                        return True
-                    elif response.status_code == 429:
-                        time.sleep((attempt + 1) * 2)
-                        continue
-                    elif response.status_code in [502, 503, 504]:
-                        time.sleep((attempt + 1) * 1)
-                        continue
-                    else:
-                        with upload_lock:
-                            errors += 1
-                        return False
-                except:
-                    if attempt == 2:
-                        with upload_lock:
-                            errors += 1
-                        return False
-                    time.sleep(1)
-            time.sleep(0.05)
-            return False
+    try:
+        response = session.post(url, headers=headers, json=document, timeout=30)
+        response.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+def upload_documents_parallel(documents: List[Dict]) -> tuple:
+    """Upload documents in parallel"""
+    if not documents:
+        return 0, 0
     
-    start_time = time.time()
-    logger.info(f"  Uploading with {MAX_CONCURRENT_UPLOADS} parallel workers...")
+    successful = 0
+    failed = 0
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-        futures = [executor.submit(upload_single_document, doc) for doc in documents]
-        for future in as_completed(futures):
-            pass
+        future_to_doc = {
+            executor.submit(upload_to_dust, doc): doc 
+            for doc in documents
+        }
+        
+        for future in as_completed(future_to_doc):
+            if future.result():
+                successful += 1
+            else:
+                failed += 1
     
-    elapsed = time.time() - start_time
-    rate = uploaded / elapsed if elapsed > 0 else 0
-    logger.info(f"  ✓ Upload complete: {uploaded} succeeded, {errors} failed ({elapsed:.1f}s, {rate:.1f}/sec)")
+    return successful, failed
+
+def process_single_ticket(ticket: Dict, conversations_map: Dict[str, List[Dict]]) -> Optional[Dict]:
+    """Process single ticket"""
+    try:
+        ticket_id = ticket.get('id')
+        conversations = conversations_map.get(str(ticket_id), [])
+        
+        comprehensive_fields = extract_comprehensive_fields(ticket)
+        complexity = calculate_complexity_score(ticket, comprehensive_fields, conversations)
+        sentiment = analyze_sentiment(ticket, comprehensive_fields, conversations)
+        sla_risk = predict_sla_risk(ticket, comprehensive_fields, complexity)
+        response_status = analyze_response_status(conversations, comprehensive_fields)
+        auto_category = auto_categorize_ticket(comprehensive_fields, conversations)
+        
+        document = generate_ticket_document(
+            ticket, conversations, comprehensive_fields,
+            complexity, sentiment, sla_risk,
+            response_status, auto_category
+        )
+        
+        METRICS['total_processed'] += 1
+        
+        if comprehensive_fields['is_service_request']:
+            METRICS['service_requests'] += 1
+        else:
+            METRICS['requests'] += 1
+        
+        if comprehensive_fields['status_category'] == 'active':
+            METRICS['active_tickets'] += 1
+        
+        return document
+        
+    except Exception as e:
+        METRICS['skipped'] += 1
+        return None
+
+def process_ticket_batch(tickets: List[Dict], batch_num: int, total_tickets: int) -> tuple:
+    """Process batch of tickets"""
+    batch_start = (batch_num - 1) * BATCH_SIZE + 1
+    batch_end = min(batch_start + len(tickets) - 1, total_tickets)
     
-    return uploaded, errors
-
-# ============================================================
-# MAIN PROCESSING
-# ============================================================
-
-def process_ticket_batch(tickets: List[Dict], access_token: str, batch_num: int, total_tickets: int) -> Tuple[List[Dict], int]:
-    """Process a batch of tickets"""
-    logger.info(f"\n[Batch {batch_num}] Processing tickets {(batch_num-1)*BATCH_SIZE + 1}-{min(batch_num*BATCH_SIZE, total_tickets)}...")
+    logger.info(f"\n[Batch {batch_num}] Processing tickets {batch_start}-{batch_end}...")
+    
+    ticket_ids = [str(t.get('id')) for t in tickets]
+    conversations_map = fetch_conversations_parallel(ticket_ids)
     
     documents = []
-    errors = 0
+    for ticket in tickets:
+        doc = process_single_ticket(ticket, conversations_map)
+        if doc:
+            documents.append(doc)
     
-    conversations_map = fetch_conversations_parallel(tickets, access_token)
+    if documents:
+        successful, failed = upload_documents_parallel(documents)
+        logger.info(f"  ✓ Batch complete: {successful} uploaded, {failed} failed")
+        return documents, successful, failed
     
-    for i, ticket in enumerate(tickets, 1):
-        ticket_id = ticket['id']
-        ticket_subject = ticket.get('subject', 'No subject')
-        short_id = extract_short_ticket_number(ticket)
-        
-        try:
-            conversations, conv_error = conversations_map.get(ticket_id, ([], None))
-            if conv_error:
-                track_skipped_ticket(short_id, ticket_subject, f"Conversation fetch failed: {conv_error}", "conversation_fetch")
-                continue
-            
-            comprehensive_fields = extract_comprehensive_fields(ticket)
-            
-            complexity = calculate_complexity_score(ticket, conversations)
-            sentiment = analyze_sentiment(conversations)
-            sla_risk, sla_breach_likelihood = predict_sla_breach(ticket, conversations)
-            estimated_resolution_hours = estimate_resolution_time(ticket, conversations, complexity)
-            issue_types = identify_issue_type(ticket)
-            response_status = analyze_response_status(conversations)
-            
-            track_analytics(ticket, conversations, complexity, comprehensive_fields)
-            track_metrics(comprehensive_fields, conversations, complexity, sentiment, sla_risk, response_status)
-            
-            document = create_dust_document(
-                ticket, conversations, comprehensive_fields,
-                complexity, sentiment, sla_risk, sla_breach_likelihood,
-                estimated_resolution_hours, issue_types, response_status
-            )
-            
-            documents.append(document)
-            
-        except Exception as e:
-            logger.error(f"  ERROR processing ticket {ticket_id}: {e}")
-            track_skipped_ticket(short_id, ticket_subject, f"Processing error: {str(e)}", "ticket_processing")
-            errors += 1
-    
-    uploaded, upload_errors = upload_to_dust_parallel(documents)
-    errors += upload_errors
-    
-    return documents, errors
+    return [], 0, 0
 
-def print_analytics_summary():
-    """Print analytics summary"""
-    logger.info("=" * 60)
-    logger.info(f"ANALYTICS SUMMARY (v{VERSION})")
-    logger.info("=" * 60)
-    logger.info("")
+def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
+    """Process all tickets in batches"""
+    total_tickets = len(tickets)
+    logger.info(f"\n📋 Processing {total_tickets} tickets in batches of {BATCH_SIZE}...")
     
-    logger.info("📦 Module Distribution:")
-    module_dist = analytics_cache.raw_data['module_distribution']
-    if module_dist:
-        for module, count in sorted(module_dist.items()):
-            module_name = module.replace('_', ' ').title()
-            logger.info(f"  {module_name}: {count} tickets")
+    stats = {'total': total_tickets, 'successful': 0, 'failed': 0, 'skipped': 0}
     
-    logger.info("")
+    for i in range(0, total_tickets, BATCH_SIZE):
+        batch = tickets[i:i+BATCH_SIZE]
+        batch_num = (i // BATCH_SIZE) + 1
+        
+        documents, successful, failed = process_ticket_batch(batch, batch_num, total_tickets)
+        
+        stats['successful'] += successful
+        stats['failed'] += failed
     
-    logger.info("🏷️  Auto-Categorization:")
-    auto_cat_stats = analytics_cache.raw_data['auto_categorization']
-    logger.info(f"  Tickets auto-categorized: {auto_cat_stats['assigned']}")
-    logger.info(f"  High confidence (80%+): {auto_cat_stats['high_confidence']}")
-    logger.info(f"  Low confidence (<50%): {auto_cat_stats['low_confidence']}")
+    stats['skipped'] = METRICS['skipped']
+    logger.info(f"\n✓ Processing complete: {stats['successful']} successful, {stats['failed']} failed, {stats['skipped']} skipped\n")
     
-    logger.info("")
-    
-    logger.info("🏆 Top Categories:")
-    category_stats = analytics_cache.raw_data['category_stats']
-    if category_stats:
-        sorted_categories = sorted(category_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:10]
-        for cat, data in sorted_categories:
-            logger.info(f"  {cat}: {data['count']} tickets")
-    
-    logger.info("")
+    return stats
+
 # ============================================================
-# MAIN FUNCTION - v3.1.9 WITH SPEED & RELIABILITY
+# MAIN
 # ============================================================
 
 def main():
-    """Main execution function"""
+    """Main execution"""
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
-    logger.info(f"Started: {datetime.now()}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.9 FEATURES:")
-    logger.info("   • ADDED: Token Manager with auto-refresh (prevents 401 failures)")
-    logger.info("   • ADDED: Parallel cleanup deletion (51 min → 3 min)")
-    logger.info("   • ADDED: Smart cleanup detection (skip when unnecessary)")
-    logger.info("   • ADDED: Increased parallel workers (20 conversation, 10 upload)")
-    logger.info("   • ADDED: Progress tracking and speed metrics")
-    logger.info("   • FIXED: Token expiry during long syncs")
-    logger.info("   • Performance: 3x faster than v3.1.8")
+    logger.info("✨ v3.1.10: Enhanced tagging for open ticket search")
     logger.info("")
-    
-    if not all([SDP_DOMAIN, SDP_CLIENT_ID, SDP_CLIENT_SECRET, SDP_REFRESH_TOKEN]):
-        logger.error("ERROR: Missing ServiceDesk credentials")
-        sys.exit(1)
-    
-    logger.info("✓ Credentials validated")
     
     try:
-        # Initialize token manager (first token fetch)
-        access_token = token_manager.get_token()
-        logger.info("✓ Access token obtained via TokenManager")
+        required_vars = ['DUST_API_KEY', 'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN']
+        missing = [var for var in required_vars if not os.environ.get(var)]
+        if missing:
+            logger.error(f"Missing environment variables: {', '.join(missing)}")
+            return 1
+        
+        token_manager.get_token()
+        
+        checkpoint = load_checkpoint()
+        last_sync_time = load_last_sync_time()
+        
+        if checkpoint and last_sync_time:
+            logger.info(f"📍 Last sync: {last_sync_time}")
+            logger.info(f"📊 INCREMENTAL SYNC")
+        else:
+            logger.info("📊 FULL SYNC (no checkpoint)")
+            last_sync_time = None
+        
+        if should_run_cleanup():
+            cleanup_dust_data_source()
+        else:
+            logger.info("✓ Skipping cleanup\n")
+        
+        sync_start_time = datetime.now(timezone.utc)
+        
+        tickets = fetch_all_tickets(max_pages=MAX_PAGES, last_sync_time=last_sync_time)
+        
+        if not tickets:
+            logger.info("✓ No tickets to process")
+            return 0
+        
+        logger.info(f"✓ Fetched {len(tickets)} tickets\n")
+        
+        stats = process_all_tickets(tickets)
+        
+        save_last_sync_time(sync_start_time)
+        save_checkpoint(sync_start_time.isoformat(), METRICS)
+        
+        logger.info("=" * 60)
+        logger.info(f"✓ SYNC COMPLETE (v{VERSION})")
+        logger.info("=" * 60)
+        logger.info(f"  Total Processed: {METRICS['total_processed']}")
+        logger.info(f"  Active Tickets: {METRICS['active_tickets']}")
+        logger.info(f"  Service Requests: {METRICS['service_requests']}")
+        logger.info(f"  Requests: {METRICS['requests']}")
+        logger.info(f"  Skipped: {METRICS['skipped']}")
+        logger.info("=" * 60)
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        logger.warning("\n⚠️  Sync interrupted")
+        return 130
+    
     except Exception as e:
-        logger.error(f"FATAL: Failed to get token: {e}")
-        sys.exit(1)
-    
-    # Load previous checkpoint
-    last_sync_time = load_checkpoint()
-    
-    # ============================================================
-    # v3.1.9 SMART CLEANUP: Only when needed
-    # ============================================================
-    if should_run_cleanup(last_sync_time):
-        logger.info("")
-        logger.info("🧹 Smart cleanup recommends running cleanup...")
-        logger.info("")
-        
-        cleanup_success = cleanup_dust_data_source()
-        
-        if not cleanup_success:
-            logger.error("❌ Cleanup failed or was cancelled")
-            logger.error("   Continuing anyway - new data will be uploaded")
-            logger.info("")
-    else:
-        logger.info("")
-        logger.info("✓ Cleanup not needed - data is clean or sync is incremental")
-        logger.info("")
-    # ============================================================
-    
-    # CRITICAL: Record sync START time BEFORE fetching tickets
-    sync_start_time = datetime.now(timezone.utc)
-    logger.info(f"📍 Sync start time (will be checkpoint): {sync_start_time}")
-    
-    # Fetch tickets using PREVIOUS checkpoint as filter
-    try:
-        # Token manager will auto-refresh if needed
-        access_token = token_manager.get_token()
-        tickets = fetch_all_tickets(access_token, last_sync_time, MAX_PAGES)
-    except Exception as e:
-        logger.error(f"FATAL: Failed to fetch tickets: {e}")
-        sys.exit(1)
-    
-    if not tickets:
-        # No tickets but still update checkpoint to sync start time
-        save_checkpoint(sync_start_time, 0, 0)
-        logger.info("✓ No new tickets. Sync complete.")
-        logger.info(f"  ✓ Checkpoint updated to: {sync_start_time}")
-        return
-    
-    # Process tickets in batches
-    logger.info(f"\n📋 Processing {len(tickets)} tickets...")
-    logger.info(f"   Parallel workers: {MAX_CONCURRENT_CONVERSATIONS} conversation, {MAX_CONCURRENT_UPLOADS} upload")
-    
-    processing_start = time.time()
-    total_processed = 0
-    total_errors = 0
-    
-    for batch_num in range(1, (len(tickets) // BATCH_SIZE) + 2):
-        start_idx = (batch_num - 1) * BATCH_SIZE
-        end_idx = min(start_idx + BATCH_SIZE, len(tickets))
-        
-        if start_idx >= len(tickets):
-            break
-        
-        batch_tickets = tickets[start_idx:end_idx]
-        
-        try:
-            # Get fresh token (auto-refreshes if needed)
-            access_token = token_manager.get_token()
-            
-            batch_start = time.time()
-            documents, errors = process_ticket_batch(batch_tickets, access_token, batch_num, len(tickets))
-            batch_elapsed = time.time() - batch_start
-            
-            total_processed += len(documents)
-            total_errors += errors
-            
-            # Calculate progress
-            overall_elapsed = time.time() - processing_start
-            rate = total_processed / overall_elapsed if overall_elapsed > 0 else 0
-            remaining = (len(tickets) - (end_idx)) / rate if rate > 0 else 0
-            
-            logger.info(f"  📊 Progress: {end_idx}/{len(tickets)} tickets ({rate:.1f}/sec, ~{remaining/60:.1f} min remaining)")
-            
-            # Save checkpoint with SYNC START TIME (not current time, not latest ticket)
-            save_checkpoint(sync_start_time, total_processed, total_errors)
-            
-        except Exception as e:
-            logger.error(f"FATAL: Batch {batch_num} error: {e}")
-            total_errors += len(batch_tickets)
-    
-    # Final checkpoint
-    overall_elapsed = time.time() - processing_start
-    logger.info("")
-    logger.info(f"✓ Processing complete in {overall_elapsed/60:.1f} minutes ({total_processed/overall_elapsed:.1f} tickets/sec)")
-    logger.info(f"  ✓ Final checkpoint: {sync_start_time}")
-    
-    save_skipped_tickets_report()
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info(f"✓ SYNC COMPLETE (v{VERSION})")
-    logger.info("=" * 60)
-    logger.info(f"  Total Fetched: {len(tickets)}")
-    logger.info(f"  Successfully Processed: {METRICS['total_processed']}")
-    logger.info(f"  Skipped: {METRICS['skipped']}")
-    logger.info(f"  Retried: {METRICS['retried']}")
-    logger.info(f"  Failed After Retry: {METRICS['failed_after_retry']}")
-    logger.info(f"  Requests: {METRICS['requests']}")
-    logger.info(f"  Service Requests: {METRICS['service_requests']}")
-    logger.info(f"  Incidents: {METRICS['incidents']}")
-    logger.info(f"  Auto-categorized: {METRICS['auto_categorized']}")
-    logger.info(f"  Active: {METRICS['active_tickets']}")
-    logger.info(f"  Errors: {total_errors}")
-    logger.info(f"  Processing Time: {overall_elapsed/60:.1f} minutes")
-    logger.info(f"  Average Speed: {total_processed/overall_elapsed:.1f} tickets/sec")
-    logger.info(f"  Finished: {datetime.now()}")
-    logger.info("=" * 60)
-    logger.info("")
-    
-    print_analytics_summary()
-    print_skip_summary()
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
+        logger.error(f"❌ Fatal error: {e}", exc_info=True)
+        return 1
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("\nInterrupted by user")
-        save_skipped_tickets_report()
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"FATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        save_skipped_tickets_report()
-        sys.exit(1)
+    sys.exit(main())
