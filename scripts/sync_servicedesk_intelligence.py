@@ -155,7 +155,7 @@ print("")
 # Dust Configuration - WITH AUTO-CLEANING
 DUST_API_KEY = os.environ.get("DUST_API_KEY", "").strip().lstrip('\\').lstrip('/')
 DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad").strip().lstrip('\\').lstrip('/')
-DUST_DATA_SOURCE_ID = "servicedesk_intelligence"
+DUST_DATA_SOURCE_ID = "servicedesk"
 DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
 
 # ServiceDesk Plus Configuration - WITH AUTO-CLEANING
