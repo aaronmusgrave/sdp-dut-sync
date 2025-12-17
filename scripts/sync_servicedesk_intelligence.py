@@ -10,7 +10,7 @@ New in v3.1.10:
 - Multiple redundant tags for better open ticket search
 - Improved closed ticket tagging with NOT-ACTIVE flags
 - Status-specific tags (STATUS-OPEN, CURRENTLY-OPEN, etc.)
-- Environment variable validation with helpful error messages
+- Robust environment variable validation with character cleaning
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -83,39 +83,69 @@ def validate_required_env_vars():
         print("=" * 60)
         sys.exit(1)
     
-    # Validate SDP_DOMAIN format
+    # Validate and clean SDP_DOMAIN format
     sdp_domain = os.environ.get('SDP_DOMAIN', '').strip()
+    
     if sdp_domain:
-        # Remove https:// or http:// if present
-        sdp_domain = sdp_domain.replace('https://', '').replace('http://', '')
-        # Remove trailing slash if present
-        sdp_domain = sdp_domain.rstrip('/')
+        print(f"🔍 Raw SDP_DOMAIN: '{sdp_domain[:50]}'")
         
+        # Remove common invalid prefixes/suffixes
+        sdp_domain = sdp_domain.replace('https://', '')
+        sdp_domain = sdp_domain.replace('http://', '')
+        sdp_domain = sdp_domain.lstrip('\\')  # Remove leading backslash
+        sdp_domain = sdp_domain.lstrip('/')   # Remove leading forward slash
+        sdp_domain = sdp_domain.rstrip('/')   # Remove trailing slash
+        sdp_domain = sdp_domain.strip()       # Remove any whitespace
+        
+        print(f"🧹 Cleaned SDP_DOMAIN: '{sdp_domain}'")
+        
+        # Validate cleaned domain
         if not sdp_domain or sdp_domain == '***' or len(sdp_domain) < 5:
             print("=" * 60)
             print("❌ INVALID SDP_DOMAIN")
             print("=" * 60)
-            print(f"Current value appears invalid")
+            print(f"After cleaning: '{sdp_domain}'")
             print("\nSDP_DOMAIN should be just the domain name, for example:")
             print("  motorad.sdpondemand.com")
             print("\nDO NOT include:")
             print("  ❌ https://")
             print("  ❌ http://")
+            print("  ❌ Backslashes (\\)")
+            print("  ❌ Forward slashes (/)")
             print("  ❌ Trailing slashes")
+            print("=" * 60)
+            sys.exit(1)
+        
+        # Check for remaining invalid characters
+        invalid_chars = ['\\', ' ', '\t', '\n', '\r']
+        found_invalid = [char for char in invalid_chars if char in sdp_domain]
+        
+        if found_invalid:
+            print("=" * 60)
+            print("❌ INVALID CHARACTERS IN SDP_DOMAIN")
+            print("=" * 60)
+            print(f"Domain: '{sdp_domain}'")
+            print(f"Found invalid characters: {found_invalid}")
+            print("\nPlease update the SDP_DOMAIN secret to contain ONLY:")
+            print("  motorad.sdpondemand.com")
             print("=" * 60)
             sys.exit(1)
         
         # Update the environment variable with cleaned value
         os.environ['SDP_DOMAIN'] = sdp_domain
-        # Show first 20 chars for verification (security)
-        domain_display = sdp_domain[:20] + "..." if len(sdp_domain) > 20 else sdp_domain
+        
+        # Show first 30 chars for verification (security)
+        domain_display = sdp_domain[:30] + "..." if len(sdp_domain) > 30 else sdp_domain
         print(f"✓ SDP_DOMAIN validated: {domain_display}")
     
     return True
 
 # Validate before setting configuration
-print("Validating environment variables...")
+print("=" * 60)
+print("VALIDATING ENVIRONMENT VARIABLES")
+print("=" * 60)
 validate_required_env_vars()
+print("=" * 60)
 print("")
 
 # Dust Configuration
@@ -1106,7 +1136,7 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
         stats['failed'] += failed
     
     stats['skipped'] = METRICS['skipped']
-    logger.info(f"\nn✓ Processing complete: {stats['successful']} successful, {stats['failed']} failed, {stats['skipped']} skipped\n")
+    logger.info(f"\n✓ Processing complete: {stats['successful']} successful, {stats['failed']} failed, {stats['skipped']} skipped\n")
     
     return stats
 
