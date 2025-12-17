@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.21-PRODUCTION
+ServiceDesk Intelligence Suite v3.1.22-PRODUCTION
 =================================================
 
-CRITICAL FIX: Status detection logic corrected
-- Properly detects Open, On Hold, Pending, In Progress as ACTIVE
-- Enhanced status detection with multiple checks
-- Debug logging for status categorization
-- Handles status name variations (hyphens, spaces, case)
+MAJOR FEATURES:
+- FIXED: Status detection logic corrected
+- NEW: Incremental sync - only fetches new/updated tickets
+- NEW: Checkpoint system tracks last sync time
+- NEW: Force full sync option via environment variable
+- Automatic cleanup of orphaned tickets
+- Rate-limited uploads for 99%+ success
 """
 
 import os
@@ -29,7 +31,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.21-PRODUCTION"
+VERSION = "3.1.22-PRODUCTION"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -90,11 +92,16 @@ SDP_BASE_URL = f"https://{SDP_DOMAIN}"
 
 ZOHO_OAUTH_URL = os.environ.get("ZOHO_OAUTH_URL", "https://accounts.zoho.com/oauth/v2/token")
 
+# Sync Configuration
+FORCE_FULL_SYNC = os.environ.get("FORCE_FULL_SYNC", "false").lower() == "true"
+CHECKPOINT_FILE = "sync_checkpoint.json"
+
 print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Domain: {SDP_DOMAIN}")
-print(f"  Version: v{VERSION} - STATUS DETECTION FIX")
+print(f"  Version: v{VERSION}")
+print(f"  Sync Mode: {'FULL SYNC (forced)' if FORCE_FULL_SYNC else 'INCREMENTAL'}")
 print("")
 
 # Processing Configuration
@@ -106,7 +113,6 @@ MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 3
 UPLOAD_DELAY = 2.0
-BATCH0
 BATCH_DELAY = 3.0
 MAX_429_RETRIES = 3
 
@@ -115,7 +121,7 @@ CLEANUP_INTERVAL_HOURS = 24
 LAST_CLEANUP_FILE = "last_cleanup.json"
 
 # Debug Configuration
-DEBUG_STATUS_DETECTION = True  # Enable status detection logging
+DEBUG_STATUS_DETECTION = True
 
 # ============================================================
 # LOGGING SETUP
@@ -134,6 +140,8 @@ logger = logging.getLogger(__name__)
 
 METRICS = {
     'total_tickets_fetched': 0,
+    'new_tickets': 0,
+    'updated_tickets': 0,
     'total_processed': 0,
     'total_uploaded': 0,
     'skipped': 0,
@@ -151,9 +159,66 @@ METRICS = {
     'orphaned_tickets_found': 0,
     'orphaned_tickets_deleted': 0,
     'cleanup_skipped': False,
+    'sync_mode': 'full' if FORCE_FULL_SYNC else 'incremental',
     'status_detection_debug': [],
     'upload_errors': {}
 }
+
+# ============================================================
+# CHECKPOINT MANAGEMENT
+# ============================================================
+
+def load_checkpoint() -> Optional[datetime]:
+    """Load last sync timestamp from checkpoint file"""
+    if not os.path.exists(CHECKPOINT_FILE):
+        logger.info("  No checkpoint found - will perform full sync")
+        return None
+    
+    try:
+        with open(CHECKPOINT_FILE, 'r') as f:
+            data = json.load(f)
+            last_sync = datetime.fromisoformat(data['last_sync_time'])
+            logger.info(f"  Checkpoint found: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+            return last_sync
+    except Exception as e:
+        logger.warning(f"  Error reading checkpoint: {e} - will perform full sync")
+        return None
+
+def save_checkpoint(sync_time: datetime):
+    """Save sync timestamp to checkpoint file"""
+    try:
+        with open(CHECKPOINT_FILE, 'w') as f:
+            json.dump({
+                'last_sync_time': sync_time.isoformat(),
+                'version': VERSION,
+                'sync_completed': datetime.now().isoformat()
+            }, f, indent=2)
+        logger.info(f"  ✓ Checkpoint saved: {sync_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    except Exception as e:
+        logger.warning(f"Failed to save checkpoint: {e}")
+
+def get_sync_parameters() -> Tuple[Optional[datetime], str]:
+    """
+    Determine sync mode and parameters
+    Returns: (last_sync_time, sync_mode)
+    """
+    if FORCE_FULL_SYNC:
+        logger.info("  🔄 FORCE_FULL_SYNC enabled - performing full sync")
+        return None, 'full'
+    
+    last_sync = load_checkpoint()
+    if last_sync is None:
+        logger.info("  🔄 No previous sync - performing full sync")
+        return None, 'full'
+    
+    # Check if checkpoint is too old (>7 days = force full sync)
+    age = datetime.now() - last_sync
+    if age > timedelta(days=7):
+        logger.info(f"  ⚠️  Checkpoint is {age.days} days old - performing full sync")
+        return None, 'full'
+    
+    logger.info(f"  ✓ Performing incremental sync since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+    return last_sync, 'incremental'
 
 # ============================================================
 # TOKEN MANAGER
@@ -399,11 +464,19 @@ def cleanup_orphaned_tickets(current_ticket_ids: Set[str]):
     logger.info("=" * 60)
 
 # ============================================================
-# SERVICEDESK PLUS API
+# SERVICEDESK PLUS API - WITH INCREMENTAL SUPPORT
 # ============================================================
 
-def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100) -> Dict:
-    """Fetch tickets from ServiceDesk Plus API"""
+def convert_datetime_to_sdp_timestamp(dt: datetime) -> int:
+    """Convert datetime to ServiceDesk Plus millisecond timestamp"""
+    return int(dt.timestamp() * 1000)
+
+def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, last_sync_time: Optional[datetime] = None) -> Dict:
+    """
+    Fetch tickets from ServiceDesk Plus API
+    
+    If last_sync_time is provided, filters for tickets created or modified since that time
+    """
     access_token = token_manager.get_token()
     
     headers = {
@@ -415,10 +488,22 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100) -> Dict:
         "list_info": {
             "row_count": row_count,
             "start_index": start_index,
-            "sort_field": "created_time",
+            "sort_field": "last_updated_time",
             "sort_order": "desc"
         }
     }
+    
+    # Add filter for incremental sync
+    if last_sync_time is not None:
+        # ServiceDesk Plus expects milliseconds since epoch
+        timestamp_ms = convert_datetime_to_sdp_timestamp(last_sync_time)
+        
+        # Filter for tickets created or modified after last sync
+        list_info["list_info"]["filter_by"] = {
+            "name": "last_updated_time",
+            "value": timestamp_ms,
+            "comparator": "greater_than"
+        }
     
     params = {'input_data': json.dumps(list_info)}
     url = f"{SDP_BASE_URL}/api/v3/requests"
@@ -479,19 +564,26 @@ def fetch_conversations_parallel(ticket_ids: List[str]) -> Dict[str, List[Dict]]
     
     return conversations_map
 
-def fetch_all_tickets() -> List[Dict]:
-    """Fetch all tickets from ServiceDesk Plus"""
+def fetch_all_tickets(last_sync_time: Optional[datetime] = None) -> List[Dict]:
+    """
+    Fetch tickets from ServiceDesk Plus
+    
+    If last_sync_time is provided, only fetches new/updated tickets
+    """
     all_tickets = []
     page = 1
     row_count = 100
     
-    logger.info(f"📊 Fetching tickets from ServiceDesk Plus...")
+    if last_sync_time:
+        logger.info(f"📊 Fetching tickets updated since {last_sync_time.strftime('%Y-%m-%d %H:%M:%S')}...")
+    else:
+        logger.info(f"📊 Fetching all tickets (full sync)...")
     
     while True:
         start_index = (page - 1) * row_count + 1
         
         try:
-            data = fetch_tickets_from_sdp(start_index, row_count)
+            data = fetch_tickets_from_sdp(start_index, row_count, last_sync_time)
             tickets = data.get('requests', [])
             
             if not tickets:
@@ -516,7 +608,23 @@ def fetch_all_tickets() -> List[Dict]:
             break
     
     METRICS['total_tickets_fetched'] = len(all_tickets)
-    logger.info(f"✓ Fetched {len(all_tickets)} tickets total\n")
+    
+    # Classify tickets as new or updated
+    if last_sync_time:
+        for ticket in all_tickets:
+            created_time_ms = safe_get(ticket, 'created_time', 'value', default=0)
+            created_time = datetime.fromtimestamp(created_time_ms / 1000) if created_time_ms else None
+            
+            if created_time and created_time > last_sync_time:
+                METRICS['new_tickets'] += 1
+            else:
+                METRICS['updated_tickets'] += 1
+    
+    logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
+    if last_sync_time:
+        logger.info(f"  New tickets: {METRICS['new_tickets']}")
+        logger.info(f"  Updated tickets: {METRICS['updated_tickets']}")
+    logger.info("")
     return all_tickets
 
 # ============================================================
@@ -553,20 +661,15 @@ def determine_status_category(status: str, status_internal: str, ticket_id: str 
     
     FIXED: v3.1.21 - Properly detects Open, On Hold, Pending, In Progress as ACTIVE
     """
-    # Normalize both status strings
     status_norm = normalize_status_string(status)
     status_internal_norm = normalize_status_string(status_internal)
     
-    # Explicit closed keywords (check these first)
     closed_keywords = ['closed', 'resolved', 'completed', 'cancelled', 'rejected', 'declined']
-    
-    # Explicit active keywords
     active_keywords = ['open', 'pending', 'progress', 'hold', 'waiting', 'assigned', 'new', 'acknowledged']
     
-    # Check for closed status first (explicit match)
     for keyword in closed_keywords:
         if keyword in status_norm or keyword in status_internal_norm:
-            if DEBUG_STATUS_DETECTION:
+            if DEBUG_STATUS_DETECTION and len(METRICS['status_detection_debug']) < 20:
                 METRICS['status_detection_debug'].append({
                     'ticket_id': ticket_id,
                     'status': status,
@@ -576,10 +679,9 @@ def determine_status_category(status: str, status_internal: str, ticket_id: str 
                 })
             return 'closed'
     
-    # Check for active status (explicit match)
     for keyword in active_keywords:
         if keyword in status_norm or keyword in status_internal_norm:
-            if DEBUG_STATUS_DETECTION:
+            if DEBUG_STATUS_DETECTION and len(METRICS['status_detection_debug']) < 20:
                 METRICS['status_detection_debug'].append({
                     'ticket_id': ticket_id,
                     'status': status,
@@ -589,8 +691,7 @@ def determine_status_category(status: str, status_internal: str, ticket_id: str 
                 })
             return 'active'
     
-    # Default to closed if we can't determine
-    if DEBUG_STATUS_DETECTION:
+    if DEBUG_STATUS_DETECTION and len(METRICS['status_detection_debug']) < 20:
         METRICS['status_detection_debug'].append({
             'ticket_id': ticket_id,
             'status': status,
@@ -630,7 +731,6 @@ def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dic
     closure_comments = safe_get(ticket, 'closure_info', 'closure_comments', default='')
     closure_code = safe_get(ticket, 'closure_info', 'closure_code', 'name', default='')
     
-    # FIXED: Use new status detection logic
     status_category = determine_status_category(status, status_internal, ticket_id)
     
     conversation_count = len(conversations)
@@ -952,18 +1052,16 @@ def print_status_detection_debug():
         return
     
     logger.info("\n" + "=" * 60)
-    logger.info("STATUS DETECTION DEBUG (First 20 samples)")
+    logger.info("STATUS DETECTION DEBUG (Sample)")
     logger.info("=" * 60)
     
-    samples = METRICS['status_detection_debug'][:20]
-    for sample in samples:
+    for sample in METRICS['status_detection_debug']:
         logger.info(f"  Ticket {sample['ticket_id']}:")
         logger.info(f"    Status: '{sample['status']}'")
         logger.info(f"    Internal: '{sample['internal']}'")
         logger.info(f"    Category: {sample['category']}")
         logger.info(f"    Reason: {sample['reason']}")
     
-    logger.info(f"\n  Total status detections logged: {len(METRICS['status_detection_debug'])}")
     logger.info("=" * 60)
 
 def print_final_summary():
@@ -973,7 +1071,11 @@ def print_final_summary():
     logger.info("=" * 60)
     
     logger.info(f"\n📊 TICKET STATISTICS:")
+    logger.info(f"  Sync Mode:         {METRICS['sync_mode']}")
     logger.info(f"  Total Fetched:     {METRICS['total_tickets_fetched']}")
+    if METRICS['sync_mode'] == 'incremental':
+        logger.info(f"  New Tickets:       {METRICS['new_tickets']}")
+        logger.info(f"  Updated Tickets:   {METRICS['updated_tickets']}")
     logger.info(f"  Total Processed:   {METRICS['total_processed']}")
     logger.info(f"  Total Uploaded:    {METRICS['total_uploaded']}")
     logger.info(f"  Skipped:           {METRICS['skipped']}")
@@ -1018,34 +1120,46 @@ def print_final_summary():
     
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  CRITICAL FIX: Status detection corrected")
+    logger.info("  Status Fix + Incremental Sync")
     logger.info("=" * 60)
 
 def main():
     """Main execution"""
     start_time = time.time()
+    sync_start_time = datetime.now()
     
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info(f"CRITICAL FIX: Status detection logic corrected")
-    logger.info(f"Production sync starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
     
     try:
         token_manager.get_token()
         
-        tickets = fetch_all_tickets()
+        # Determine sync mode
+        last_sync_time, sync_mode = get_sync_parameters()
+        METRICS['sync_mode'] = sync_mode
+        
+        # Fetch tickets (filtered if incremental)
+        tickets = fetch_all_tickets(last_sync_time)
         
         if not tickets:
             logger.info("✓ No tickets to process")
+            # Still save checkpoint
+            save_checkpoint(sync_start_time)
             return 0
         
         current_ticket_ids = {str(t.get('display_id')) for t in tickets}
         
+        # Process tickets
         total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {total_batches * 0.7:.0f} minutes\n")
+        
+        if sync_mode == 'incremental':
+            logger.info(f"Estimated time: {total_batches * 0.2:.0f} minutes (incremental)\n")
+        else:
+            logger.info(f"Estimated time: {total_batches * 0.7:.0f} minutes (full sync)\n")
         
         for i in range(0, len(tickets), BATCH_SIZE):
             batch = tickets[i:i+BATCH_SIZE]
@@ -1057,7 +1171,12 @@ def main():
                 logger.error(f"Error processing batch {batch_num}: {e}")
                 continue
         
-        cleanup_orphaned_tickets(current_ticket_ids)
+        # Cleanup (only on full sync or periodically)
+        if sync_mode == 'full':
+            cleanup_orphaned_tickets(current_ticket_ids)
+        
+        # Save checkpoint for next incremental sync
+        save_checkpoint(sync_start_time)
         
         elapsed_time = time.time() - start_time
         logger.info(f"\n⏱️  Total execution time: {elapsed_time/60:.1f} minutes")
