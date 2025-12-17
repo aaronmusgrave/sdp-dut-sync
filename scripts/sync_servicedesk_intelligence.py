@@ -13,6 +13,7 @@ New in v3.1.10:
 - Robust environment variable validation with character cleaning
 - Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
 - Enhanced OAuth error debugging
+- Auto-cleans OAuth credentials (removes backslashes)
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -156,11 +157,11 @@ DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad")
 DUST_DATA_SOURCE_ID = "servicedesk_intelligence"
 DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
 
-# ServiceDesk Plus Configuration
-SDP_DOMAIN = os.environ.get("SDP_DOMAIN").strip()
-SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID")
-SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET")
-SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN")
+# ServiceDesk Plus Configuration - WITH AUTO-CLEANING
+SDP_DOMAIN = os.environ.get("SDP_DOMAIN", "").strip()
+SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID", "").strip().lstrip('\\').lstrip('/')
+SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET", "").strip().lstrip('\\').lstrip('/')
+SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN", "").strip().lstrip('\\').lstrip('/')
 SDP_BASE_URL = f"https://{SDP_DOMAIN}"
 
 # Zoho OAuth Configuration (ServiceDesk Plus Cloud uses Zoho OAuth)
@@ -171,6 +172,7 @@ print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Base URL: {SDP_BASE_URL}")
 print(f"  OAuth URL: {ZOHO_OAUTH_URL}")
+print(f"  ✓ OAuth credentials auto-cleaned (backslashes removed)")
 print("")
 
 # Processing Configuration
@@ -317,7 +319,8 @@ class TokenManager:
             logger.error("   • Client ID → SDP_CLIENT_ID")
             logger.error("   • Client Secret → SDP_CLIENT_SECRET")
             logger.error("   • Refresh Token → SDP_REFRESH_TOKEN")
-            logger.error("6. Re-run this workflow")
+            logger.error("6. Make sure to NOT include any backslashes!")
+            logger.error("7. Re-run this workflow")
             logger.error("=" * 60)
             
             raise
@@ -882,6 +885,7 @@ def analyze_response_status(conversations: List[Dict], comprehensive_fields: Dic
         'awaiting_response': awaiting,
         'last_responder': last_sender,
         'response_time_indicator': 'normal',
+        'has_unan',
         'has_unanswered_questions': False
     }
 
