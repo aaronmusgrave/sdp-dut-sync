@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.19-RATE-LIMITED
-===================================================
+ServiceDesk Intelligence Suite v3.1.20-PRODUCTION
+=================================================
 
-Optimized for 99%+ upload success with aggressive rate limiting.
-- Reduced concurrent uploads (5 instead of 10)
-- Longer delays between requests
-- Exponential backoff on 429 errors
-- Automatic retry logic
-- Slower but more reliable
+Production release with automatic cleanup of orphaned tickets.
+- Removes tickets from Dust that no longer exist in ServiceDesk Plus
+- Periodic cleanup (once per day by default)
+- Preserves all legitimate tickets
+- Rate-limited uploads for 99%+ success
 """
 
 import os
@@ -18,7 +17,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 import re
@@ -30,7 +29,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.19-RATE-LIMITED"
+VERSION = "3.1.20-PRODUCTION"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -95,19 +94,24 @@ print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Domain: {SDP_DOMAIN}")
-print(f"  Mode: RATE-LIMITED (slower but more reliable)")
+print(f"  Mode: RATE-LIMITED with AUTO-CLEANUP")
 print("")
 
-# Processing Configuration - RATE LIMITED
-BATCH_SIZE = 50  # Smaller batches (was 100)
+# Processing Configuration
+BATCH_SIZE = 50
 SUB_BATCH_SIZE = 10
-MAX_CONCURRENT_CONVERSATIONS = 8  # Reduced (was 10)
-MAX_CONCURRENT_UPLOADS = 3  # Much reduced (was 10)
-RETRY_ATTEMPTS = 5  # More retries (was 3)
-RETRY_DELAY = 3  # Longer delay (was 2)
-UPLOAD_DELAY = 2.0  # Much longer (was 0.5)
-BATCH_DELAY = 3.0  # Delay between batches
-MAX_429_RETRIES = 3  # Specific retries for rate limits
+MAX_CONCURRENT_CONVERSATIONS = 8
+MAX_CONCURRENT_UPLOADS = 3
+MAX_CONCURRENT_DELETES = 20
+RETRY_ATTEMPTS = 5
+RETRY_DELAY = 3
+UPLOAD_DELAY = 2.0
+BATCH_DELAY = 3.0
+MAX_429_RETRIES = 3
+
+# Cleanup Configuration
+CLEANUP_INTERVAL_HOURS = 24  # Run cleanup once per day
+LAST_CLEANUP_FILE = "last_cleanup.json"
 
 # ============================================================
 # LOGGING SETUP
@@ -139,6 +143,10 @@ METRICS = {
     'incidents': 0,
     'total_conversations': 0,
     'api_calls': 0,
+    'dust_documents_found': 0,
+    'orphaned_tickets_found': 0,
+    'orphaned_tickets_deleted': 0,
+    'cleanup_skipped': False,
     'upload_errors': {}
 }
 
@@ -205,7 +213,7 @@ def create_session() -> requests.Session:
     session = requests.Session()
     retry_strategy = Retry(
         total=RETRY_ATTEMPTS,
-        backoff_factor=2,  # Longer backoff
+        backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE"]
     )
@@ -219,6 +227,175 @@ def create_session() -> requests.Session:
     return session
 
 session = create_session()
+
+# ============================================================
+# CLEANUP TRACKING
+# ============================================================
+
+def should_run_cleanup() -> bool:
+    """Check if cleanup should run based on last cleanup time"""
+    if not os.path.exists(LAST_CLEANUP_FILE):
+        return True
+    
+    try:
+        with open(LAST_CLEANUP_FILE, 'r') as f:
+            data = json.load(f)
+            last_cleanup = datetime.fromisoformat(data['last_cleanup'])
+            hours_since = (datetime.now() - last_cleanup).total_seconds() / 3600
+            
+            if hours_since >= CLEANUP_INTERVAL_HOURS:
+                logger.info(f"  Last cleanup was {hours_since:.1f} hours ago - running cleanup")
+                return True
+            else:
+                logger.info(f"  Last cleanup was {hours_since:.1f} hours ago - skipping cleanup")
+                METRICS['cleanup_skipped'] = True
+                return False
+    except Exception as e:
+        logger.warning(f"  Error reading cleanup file: {e} - running cleanup")
+        return True
+
+def save_cleanup_time():
+    """Save current time as last cleanup time"""
+    try:
+        with open(LAST_CLEANUP_FILE, 'w') as f:
+            json.dump({
+                'last_cleanup': datetime.now().isoformat(),
+                'version': VERSION
+            }, f)
+    except Exception as e:
+        logger.warning(f"Failed to save cleanup time: {e}")
+
+# ============================================================
+# DUST API - FETCH & DELETE
+# ============================================================
+
+def fetch_dust_documents(limit: int = 1000, offset: int = 0) -> List[str]:
+    """Fetch document IDs from Dust data source"""
+    headers = {
+        'Authorization': f'Bearer {DUST_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    
+    url = f"{DUST_API_URL}/documents"
+    params = {
+        'limit': limit,
+        'offset': offset
+    }
+    
+    try:
+        response = session.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        documents = data.get('documents', [])
+        doc_ids = [doc.get('document_id') for doc in documents if doc.get('document_id')]
+        
+        return doc_ids
+    except Exception as e:
+        logger.error(f"Failed to fetch Dust documents: {e}")
+        return []
+
+def fetch_all_dust_documents() -> Set[str]:
+    """Fetch all document IDs from Dust"""
+    all_doc_ids = set()
+    offset = 0
+    limit = 1000
+    
+    logger.info("  Fetching existing documents from Dust...")
+    
+    while True:
+        doc_ids = fetch_dust_documents(limit=limit, offset=offset)
+        
+        if not doc_ids:
+            break
+        
+        all_doc_ids.update(doc_ids)
+        logger.info(f"    Fetched {len(doc_ids)} documents (total: {len(all_doc_ids)})")
+        
+        if len(doc_ids) < limit:
+            break
+        
+        offset += limit
+        time.sleep(0.5)
+    
+    METRICS['dust_documents_found'] = len(all_doc_ids)
+    logger.info(f"  ✓ Found {len(all_doc_ids)} documents in Dust")
+    return all_doc_ids
+
+def delete_dust_document(doc_id: str) -> bool:
+    """Delete a document from Dust"""
+    headers = {
+        'Authorization': f'Bearer {DUST_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    
+    url = f"{DUST_API_URL}/documents/{doc_id}"
+    
+    try:
+        response = session.delete(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete document {doc_id}: {e}")
+        return False
+
+def delete_orphaned_tickets(orphaned_ids: Set[str]) -> int:
+    """Delete orphaned tickets from Dust in parallel"""
+    if not orphaned_ids:
+        return 0
+    
+    logger.info(f"  Deleting {len(orphaned_ids)} orphaned tickets...")
+    deleted_count = 0
+    
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DELETES) as executor:
+        futures = {executor.submit(delete_dust_document, doc_id): doc_id for doc_id in orphaned_ids}
+        
+        for future in as_completed(futures):
+            try:
+                if future.result():
+                    deleted_count += 1
+                    if deleted_count % 50 == 0:
+                        logger.info(f"    Deleted {deleted_count}/{len(orphaned_ids)} orphaned tickets...")
+            except Exception as e:
+                logger.error(f"Exception deleting document: {e}")
+    
+    METRICS['orphaned_tickets_deleted'] = deleted_count
+    logger.info(f"  ✓ Deleted {deleted_count}/{len(orphaned_ids)} orphaned tickets")
+    return deleted_count
+
+# ============================================================
+# CLEANUP ORCHESTRATION
+# ============================================================
+
+def cleanup_orphaned_tickets(current_ticket_ids: Set[str]):
+    """Find and delete tickets in Dust that no longer exist in ServiceDesk Plus"""
+    logger.info("\n" + "=" * 60)
+    logger.info("CLEANUP: Removing Orphaned Tickets")
+    logger.info("=" * 60)
+    
+    # Check if cleanup should run
+    if not should_run_cleanup():
+        logger.info("  Cleanup skipped (ran recently)")
+        logger.info("=" * 60)
+        return
+    
+    # Fetch all documents from Dust
+    dust_doc_ids = fetch_all_dust_documents()
+    
+    # Find orphaned tickets (in Dust but not in ServiceDesk Plus)
+    orphaned_ids = dust_doc_ids - current_ticket_ids
+    METRICS['orphaned_tickets_found'] = len(orphaned_ids)
+    
+    if orphaned_ids:
+        logger.info(f"  Found {len(orphaned_ids)} orphaned tickets to delete")
+        delete_orphaned_tickets(orphaned_ids)
+    else:
+        logger.info(f"  ✓ No orphaned tickets found - Dust is in sync")
+    
+    # Save cleanup time
+    save_cleanup_time()
+    
+    logger.info("=" * 60)
 
 # ============================================================
 # SERVICEDESK PLUS API
@@ -331,7 +508,7 @@ def fetch_all_tickets() -> List[Dict]:
                 break
             
             page += 1
-            time.sleep(0.3)  # Rate limiting
+            time.sleep(0.3)
             
         except Exception as e:
             logger.error(f"Error fetching page {page}: {e}")
@@ -343,6 +520,7 @@ def fetch_all_tickets() -> List[Dict]:
 
 # ============================================================
 # FIELD EXTRACTION & PROCESSING
+# (Identical to v3.1.19 - keeping for brevity)
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -366,60 +544,42 @@ def clean_html(html_text: str) -> str:
 def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dict[str, Any]:
     """Extract all comprehensive fields from ticket"""
     
-    # Basic Information
     ticket_id = safe_get(ticket, 'display_id', default='Unknown')
     subject = safe_get(ticket, 'subject', default='No Subject')
     description = clean_html(safe_get(ticket, 'description', default=''))
-    
-    # Status & Priority
     status = safe_get(ticket, 'status', 'name', default='Unknown')
     status_internal = safe_get(ticket, 'status', 'internal_name', default=status)
     priority = safe_get(ticket, 'priority', 'name', default='Normal')
-    
-    # People
     requester_name = safe_get(ticket, 'requester', 'name', default='Unknown')
     requester_email = safe_get(ticket, 'requester', 'email_id', default='')
     technician_name = safe_get(ticket, 'technician', 'name', default='Unassigned')
     technician_email = safe_get(ticket, 'technician', 'email_id', default='')
     created_by_name = safe_get(ticket, 'created_by', 'name', default='Unknown')
-    
-    # Category & Classification
     category = safe_get(ticket, 'category', 'name', default='Uncategorized')
     subcategory = safe_get(ticket, 'subcategory', 'name', default='')
     group_name = safe_get(ticket, 'group', 'name', default='')
-    
-    # Dates
     created_time = safe_get(ticket, 'created_time', 'display_value', default='')
     due_by_time = safe_get(ticket, 'due_by_time', 'display_value', default='')
     resolved_time = safe_get(ticket, 'resolved_time', 'display_value', default='')
-    
-    # Type
     is_service_request = safe_get(ticket, 'is_service_request', default=False)
     ticket_type = 'Service Request' if is_service_request else 'Incident'
-    
-    # SLA
     sla_name = safe_get(ticket, 'sla', 'name', default='')
     is_overdue = safe_get(ticket, 'is_overdue', default=False)
     is_escalated = safe_get(ticket, 'is_escalated', default=False)
-    
-    # Closure info
     closure_comments = safe_get(ticket, 'closure_info', 'closure_comments', default='')
     closure_code = safe_get(ticket, 'closure_info', 'closure_code', 'name', default='')
     
-    # Status category
     status_category = 'closed'
     if status_internal in ['Open', 'Pending', 'In Progress', 'On Hold', 'Waiting']:
         status_category = 'active'
     
-    # Conversation analysis
     conversation_count = len(conversations)
     conversation_types = {}
     for conv in conversations:
         conv_type = conv.get('type', 'Unknown')
         conversation_types[conv_type] = conversation_types.get(conv_type, 0) + 1
     
-    # AI Complexity Score (0-10)
-    complexity = 5  # Base
+    complexity = 5
     if len(description) > 500:
         complexity += 1
     if len(description) > 1000:
@@ -434,7 +594,6 @@ def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dic
         complexity += 1
     complexity = min(10, max(0, complexity))
     
-    # Activity level
     activity_level = 'Low'
     if conversation_count > 5:
         activity_level = 'Moderate'
@@ -477,19 +636,14 @@ def build_document_content(fields: Dict) -> str:
     """Build comprehensive document content"""
     parts = []
     
-    # Header
     parts.append(f"# Ticket #{fields['ticket_id']}\n")
     parts.append(f"**Subject:** {fields['subject']}\n\n")
-    
-    # Status Bar
     parts.append(f"**Status:** {fields['status']} ({fields['status_category']})")
     if fields['is_overdue']:
         parts.append(" ⚠️ **OVERDUE**")
     if fields['is_escalated']:
         parts.append(" ⚠️ **ESCALATED**")
     parts.append("\n\n")
-    
-    # Key Info
     parts.append(f"**Priority:** {fields['priority']}\n")
     parts.append(f"**Type:** {fields['ticket_type']}\n")
     parts.append(f"**Category:** {fields['category']}\n")
@@ -500,13 +654,9 @@ def build_document_content(fields: Dict) -> str:
     if fields['sla']:
         parts.append(f"**SLA:** {fields['sla']}\n")
     parts.append("\n")
-    
-    # People
     parts.append(f"**Requester:** {fields['requester_name']}\n")
     parts.append(f"**Technician:** {fields['technician_name']}\n")
     parts.append(f"**Created By:** {fields['created_by']}\n\n")
-    
-    # Timeline
     parts.append(f"## Timeline\n\n")
     parts.append(f"**Created:** {fields['created_time']}\n")
     if fields['due_by_time']:
@@ -514,12 +664,8 @@ def build_document_content(fields: Dict) -> str:
     if fields['resolved_time']:
         parts.append(f"**Resolved:** {fields['resolved_time']}\n")
     parts.append("\n")
-    
-    # Description
     if fields['description']:
         parts.append(f"## Description\n\n{fields['description']}\n\n")
-    
-    # Conversation Activity
     if fields['conversation_count'] > 0:
         parts.append(f"## Conversation Activity\n\n")
         parts.append(f"**Total Exchanges:** {fields['conversation_count']}\n")
@@ -529,8 +675,6 @@ def build_document_content(fields: Dict) -> str:
             for conv_type, count in fields['conversation_types'].items():
                 parts.append(f"  - {conv_type}: {count}\n")
         parts.append("\n")
-    
-    # Resolution (if closed)
     if fields['status_category'] == 'closed':
         parts.append(f"## Resolution\n\n")
         if fields['closure_code']:
@@ -538,13 +682,9 @@ def build_document_content(fields: Dict) -> str:
         if fields['closure_comments']:
             parts.append(f"**Comments:** {fields['closure_comments']}\n")
         parts.append("\n")
-    
-    # AI Intelligence
     parts.append(f"## AI Intelligence\n\n")
     parts.append(f"**Complexity Score:** {fields['complexity_score']}/10\n")
     parts.append(f"**Activity Level:** {fields['activity_level']}\n")
-    
-    # Complexity explanation
     if fields['complexity_score'] >= 8:
         parts.append(f"**Assessment:** High complexity - requires senior technical expertise\n")
     elif fields['complexity_score'] >= 6:
@@ -557,38 +697,25 @@ def build_document_content(fields: Dict) -> str:
 def build_tags(fields: Dict) -> List[str]:
     """Build comprehensive searchable tags"""
     tags = []
-    
-    # Core tags
     tags.append(f"ticket-id:{fields['ticket_id']}")
     tags.append(f"status:{fields['status'].lower().replace(' ', '-')}")
     tags.append(f"status-category:{fields['status_category']}")
     tags.append(f"priority:{fields['priority'].lower()}")
     tags.append(f"type:{fields['ticket_type'].lower().replace(' ', '-')}")
-    
-    # Category tags
     if fields['category']:
         tags.append(f"category:{fields['category'].lower().replace(' ', '-')}")
-    
-    # People tags
     if fields['technician_name'] != 'Unassigned':
         tags.append(f"technician:{fields['technician_name'].lower().replace(' ', '-')}")
     else:
         tags.append("unassigned")
-    
-    # Activity tags
     if fields['status_category'] == 'active':
         tags.extend(['active', 'open-status', 'needs-attention', 'ACTIVE-TICKET', 'IS-OPEN', 'NOT-CLOSED'])
     else:
         tags.extend(['closed', 'CLOSED-TICKET', 'IS-CLOSED', 'NOT-ACTIVE'])
-    
-    # SLA tags
     if fields['is_overdue']:
         tags.extend(['overdue', 'sla-risk:critical'])
-    
     if fields['is_escalated']:
         tags.append('escalated')
-    
-    # Complexity tags
     tags.append(f"complexity:{fields['complexity_score']}")
     if fields['complexity_score'] >= 8:
         tags.append('complexity:high')
@@ -596,8 +723,6 @@ def build_tags(fields: Dict) -> List[str]:
         tags.append('complexity:medium')
     else:
         tags.append('complexity:low')
-    
-    # Activity tags
     tags.append(f"activity:{fields['activity_level'].lower()}")
     if fields['conversation_count'] > 0:
         tags.append('has-conversations')
@@ -609,7 +734,6 @@ def process_single_ticket(ticket: Dict, conversations: List[Dict]) -> Optional[D
     try:
         fields = extract_comprehensive_fields(ticket, conversations)
         
-        # Build document
         document = {
             'id': str(fields['ticket_id']),
             'title': f"Ticket #{fields['ticket_id']}: {fields['subject']}",
@@ -626,7 +750,6 @@ def process_single_ticket(ticket: Dict, conversations: List[Dict]) -> Optional[D
             }
         }
         
-        # Update metrics
         METRICS['total_processed'] += 1
         if fields['status_category'] == 'active':
             METRICS['active_tickets'] += 1
@@ -677,7 +800,7 @@ def upsert_to_dust_with_retry(document: Dict, max_retries: int = MAX_429_RETRIES
             if e.response.status_code == 429:
                 METRICS['rate_limited'] += 1
                 if attempt < max_retries:
-                    wait_time = (2 ** attempt) * 2  # Exponential: 2s, 4s, 8s
+                    wait_time = (2 ** attempt) * 2
                     logger.warning(f"Rate limited on ticket {document['id']}, waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
                     time.sleep(wait_time)
                     METRICS['retried_uploads'] += 1
@@ -720,9 +843,8 @@ def upload_batch_parallel(documents: List[Dict]) -> Tuple[int, int]:
             except Exception as e:
                 failure_count += 1
                 METRICS['failed_uploads'] += 1
-                logger.error(f"Upload exception: {e}")
+                logger.error(f"Uploalogger.error(f"Upload exception: {e}")
             
-            # Small delay between completions
             time.sleep(0.2)
     
     return success_count, failure_count
@@ -737,13 +859,11 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int
     logger.info(f"BATCH {batch_num}/{total_batches} ({len(tickets)} tickets)")
     logger.info(f"{'='*60}")
     
-    # Fetch conversations in parallel
     logger.info("  Fetching conversation metadata...")
     ticket_ids = [str(t.get('id')) for t in tickets]
     conversations_map = fetch_conversations_parallel(ticket_ids)
     logger.info(f"  ✓ Fetched conversations for {len(conversations_map)} tickets")
     
-    # Process tickets
     logger.info("  Processing tickets...")
     documents = []
     for ticket in tickets:
@@ -755,7 +875,6 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int
     
     logger.info(f"  ✓ Processed {len(documents)} documents")
     
-    # Upload to Dust with rate limiting
     if documents:
         logger.info("  Uploading to Dust (with rate limit protection)...")
         success, failure = upload_batch_parallel(documents)
@@ -763,7 +882,6 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int
         if failure > 0:
             logger.warning(f"  ⚠️  {failure} upload failures")
     
-    # Longer delay between batches
     if batch_num < total_batches:
         logger.info(f"  ⏸️  Pausing {BATCH_DELAY}s before next batch...")
         time.sleep(BATCH_DELAY)
@@ -800,6 +918,14 @@ def print_final_summary():
         avg = METRICS['total_conversations'] / METRICS['conversations_fetched']
         logger.info(f"  Average per Ticket:        {avg:.1f}")
     
+    logger.info(f"\n🧹 CLEANUP STATISTICS:")
+    if METRICS['cleanup_skipped']:
+        logger.info(f"  Cleanup: Skipped (ran recently)")
+    else:
+        logger.info(f"  Dust Documents Found:      {METRICS['dust_documents_found']}")
+        logger.info(f"  Orphaned Tickets Found:    {METRICS['orphaned_tickets_found']}")
+        logger.info(f"  Orphaned Tickets Deleted:  {METRICS['orphaned_tickets_deleted']}")
+    
     logger.info(f"\n🔧 API STATISTICS:")
     logger.info(f"  Total API Calls:   {METRICS['api_calls']}")
     
@@ -810,7 +936,7 @@ def print_final_summary():
     
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  Mode: RATE-LIMITED (slower but more reliable)")
+    logger.info("  Mode: RATE-LIMITED with AUTO-CLEANUP")
     logger.info("=" * 60)
 
 def main():
@@ -820,12 +946,11 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info(f"Mode: RATE-LIMITED (optimized for 99%+ success)")
+    logger.info(f"Mode: RATE-LIMITED with AUTO-CLEANUP")
     logger.info(f"Production sync starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
     
     try:
-        # Initialize token
         token_manager.get_token()
         
         # Fetch all tickets
@@ -835,7 +960,10 @@ def main():
             logger.info("✓ No tickets to process")
             return 0
         
-        # Process in smaller batches with delays
+        # Get current ticket IDs for cleanup
+        current_ticket_ids = {str(t.get('display_id')) for t in tickets}
+        
+        # Process in batches
         total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
         logger.info(f"Estimated time: {total_batches * 0.7:.0f} minutes\n")
@@ -849,6 +977,9 @@ def main():
             except Exception as e:
                 logger.error(f"Error processing batch {batch_num}: {e}")
                 continue
+        
+        # Cleanup orphaned tickets
+        cleanup_orphaned_tickets(current_ticket_ids)
         
         # Final summary
         elapsed_time = time.time() - start_time
