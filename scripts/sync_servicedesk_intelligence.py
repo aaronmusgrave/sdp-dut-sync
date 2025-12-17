@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.20-PRODUCTION
+ServiceDesk Intelligence Suite v3.1.21-PRODUCTION
 =================================================
 
-Production release with automatic cleanup of orphaned tickets.
-- Removes tickets from Dust that no longer exist in ServiceDesk Plus
-- Periodic cleanup (once per day by default)
-- Preserves all legitimate tickets
-- Rate-limited uploads for 99%+ success
+CRITICAL FIX: Status detection logic corrected
+- Properly detects Open, On Hold, Pending, In Progress as ACTIVE
+- Enhanced status detection with multiple checks
+- Debug logging for status categorization
+- Handles status name variations (hyphens, spaces, case)
 """
 
 import os
@@ -29,7 +29,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.20-PRODUCTION"
+VERSION = "3.1.21-PRODUCTION"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -94,7 +94,7 @@ print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
 print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
 print(f"  SDP Domain: {SDP_DOMAIN}")
-print(f"  Mode: RATE-LIMITED with AUTO-CLEANUP")
+print(f"  Version: v{VERSION} - STATUS DETECTION FIX")
 print("")
 
 # Processing Configuration
@@ -106,12 +106,16 @@ MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 3
 UPLOAD_DELAY = 2.0
+BATCH0
 BATCH_DELAY = 3.0
 MAX_429_RETRIES = 3
 
 # Cleanup Configuration
 CLEANUP_INTERVAL_HOURS = 24
 LAST_CLEANUP_FILE = "last_cleanup.json"
+
+# Debug Configuration
+DEBUG_STATUS_DETECTION = True  # Enable status detection logging
 
 # ============================================================
 # LOGGING SETUP
@@ -147,6 +151,7 @@ METRICS = {
     'orphaned_tickets_found': 0,
     'orphaned_tickets_deleted': 0,
     'cleanup_skipped': False,
+    'status_detection_debug': [],
     'upload_errors': {}
 }
 
@@ -515,7 +520,7 @@ def fetch_all_tickets() -> List[Dict]:
     return all_tickets
 
 # ============================================================
-# FIELD EXTRACTION & PROCESSING
+# FIELD EXTRACTION & PROCESSING - FIXED STATUS DETECTION
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -536,8 +541,69 @@ def clean_html(html_text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def normalize_status_string(status: str) -> str:
+    """Normalize status string for comparison"""
+    if not status:
+        return ""
+    return status.lower().replace('-', ' ').replace('_', ' ').strip()
+
+def determine_status_category(status: str, status_internal: str, ticket_id: str = "unknown") -> str:
+    """
+    Determine if ticket is active or closed with enhanced detection
+    
+    FIXED: v3.1.21 - Properly detects Open, On Hold, Pending, In Progress as ACTIVE
+    """
+    # Normalize both status strings
+    status_norm = normalize_status_string(status)
+    status_internal_norm = normalize_status_string(status_internal)
+    
+    # Explicit closed keywords (check these first)
+    closed_keywords = ['closed', 'resolved', 'completed', 'cancelled', 'rejected', 'declined']
+    
+    # Explicit active keywords
+    active_keywords = ['open', 'pending', 'progress', 'hold', 'waiting', 'assigned', 'new', 'acknowledged']
+    
+    # Check for closed status first (explicit match)
+    for keyword in closed_keywords:
+        if keyword in status_norm or keyword in status_internal_norm:
+            if DEBUG_STATUS_DETECTION:
+                METRICS['status_detection_debug'].append({
+                    'ticket_id': ticket_id,
+                    'status': status,
+                    'internal': status_internal,
+                    'category': 'closed',
+                    'reason': f'matched closed keyword: {keyword}'
+                })
+            return 'closed'
+    
+    # Check for active status (explicit match)
+    for keyword in active_keywords:
+        if keyword in status_norm or keyword in status_internal_norm:
+            if DEBUG_STATUS_DETECTION:
+                METRICS['status_detection_debug'].append({
+                    'ticket_id': ticket_id,
+                    'status': status,
+                    'internal': status_internal,
+                    'category': 'active',
+                    'reason': f'matched active keyword: {keyword}'
+                })
+            return 'active'
+    
+    # Default to closed if we can't determine
+    if DEBUG_STATUS_DETECTION:
+        METRICS['status_detection_debug'].append({
+            'ticket_id': ticket_id,
+            'status': status,
+            'internal': status_internal,
+            'category': 'closed',
+            'reason': 'no keywords matched - defaulted to closed'
+        })
+    
+    logger.warning(f"Ticket {ticket_id}: Could not determine status category for status='{status}', internal='{status_internal}' - defaulting to closed")
+    return 'closed'
+
 def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dict[str, Any]:
-    """Extract all comprehensive fields from ticket"""
+    """Extract all comprehensive fields from ticket with FIXED status detection"""
     
     ticket_id = safe_get(ticket, 'display_id', default='Unknown')
     subject = safe_get(ticket, 'subject', default='No Subject')
@@ -564,9 +630,8 @@ def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dic
     closure_comments = safe_get(ticket, 'closure_info', 'closure_comments', default='')
     closure_code = safe_get(ticket, 'closure_info', 'closure_code', 'name', default='')
     
-    status_category = 'closed'
-    if status_internal in ['Open', 'Pending', 'In Progress', 'On Hold', 'Waiting']:
-        status_category = 'active'
+    # FIXED: Use new status detection logic
+    status_category = determine_status_category(status, status_internal, ticket_id)
     
     conversation_count = len(conversations)
     conversation_types = {}
@@ -881,6 +946,26 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int
         logger.info(f"  ⏸️  Pausing {BATCH_DELAY}s before next batch...")
         time.sleep(BATCH_DELAY)
 
+def print_status_detection_debug():
+    """Print status detection debug information"""
+    if not DEBUG_STATUS_DETECTION or not METRICS['status_detection_debug']:
+        return
+    
+    logger.info("\n" + "=" * 60)
+    logger.info("STATUS DETECTION DEBUG (First 20 samples)")
+    logger.info("=" * 60)
+    
+    samples = METRICS['status_detection_debug'][:20]
+    for sample in samples:
+        logger.info(f"  Ticket {sample['ticket_id']}:")
+        logger.info(f"    Status: '{sample['status']}'")
+        logger.info(f"    Internal: '{sample['internal']}'")
+        logger.info(f"    Category: {sample['category']}")
+        logger.info(f"    Reason: {sample['reason']}")
+    
+    logger.info(f"\n  Total status detections logged: {len(METRICS['status_detection_debug'])}")
+    logger.info("=" * 60)
+
 def print_final_summary():
     """Print comprehensive final summary"""
     logger.info("\n" + "=" * 60)
@@ -929,9 +1014,11 @@ def print_final_summary():
         for error_type, count in METRICS['upload_errors'].items():
             logger.info(f"  {error_type}: {count}")
     
+    print_status_detection_debug()
+    
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  Mode: RATE-LIMITED with AUTO-CLEANUP")
+    logger.info("  CRITICAL FIX: Status detection corrected")
     logger.info("=" * 60)
 
 def main():
@@ -941,7 +1028,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info(f"Mode: RATE-LIMITED with AUTO-CLEANUP")
+    logger.info(f"CRITICAL FIX: Status detection logic corrected")
     logger.info(f"Production sync starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
     
