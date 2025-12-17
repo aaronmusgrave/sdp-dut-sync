@@ -15,13 +15,13 @@ New in v3.1.10:
 - Enhanced OAuth error debugging
 - Auto-cleans ALL credentials (removes backslashes)
 - Uses WORKING v3.1.9 API request format
-- OPTIMIZED: Reduced concurrent uploads (5) and increased timeout (60s)
+- WORKING v3.1.9 concurrency settings (10 workers, 30s timeout)
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
 - Parallel cleanup deletion (51 min → 3 min)
 - Smart cleanup detection (skip when unnecessary)
-- Increased parallel workers (20 conversation, 5 upload - OPTIMIZED)
+- Increased parallel workers (20 conversation, 10 upload)
 - Progress tracking and speed metrics
 """
 
@@ -177,11 +177,11 @@ print(f"  OAuth URL: {ZOHO_OAUTH_URL}")
 print(f"  ✓ ALL credentials auto-cleaned (backslashes removed)")
 print("")
 
-# Processing Configuration - OPTIMIZED FOR RELIABILITY
+# Processing Configuration - WORKING v3.1.9 SETTINGS
 BATCH_SIZE = 50
 MAX_PAGES = None
 MAX_CONCURRENT_CONVERSATIONS = 20
-MAX_CONCURRENT_UPLOADS = 5        # REDUCED FROM 10 TO 5
+MAX_CONCURRENT_UPLOADS = 10        # WORKING v3.1.9 SETTING
 MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
@@ -1081,7 +1081,7 @@ def generate_ticket_document(ticket: Dict, conversations: List[Dict],
     return document
 
 def upload_to_dust(document: Dict) -> bool:
-    """Upload document to Dust - OPTIMIZED WITH LONGER TIMEOUT"""
+    """Upload document to Dust - WORKING v3.1.9 SETTINGS"""
     headers = {
         "Authorization": f"Bearer {DUST_API_KEY}",
         "Content-Type": "application/json"
@@ -1090,14 +1090,14 @@ def upload_to_dust(document: Dict) -> bool:
     url = f"{DUST_API_URL}/documents/{document['document_id']}"
     
     try:
-        response = session.post(url, headers=headers, json=document, timeout=60)  # INCREASED FROM 30 TO 60
+        response = session.post(url, headers=headers, json=document, timeout=30)  # v3.1.9 SETTING
         response.raise_for_status()
         return True
     except Exception:
         return False
 
 def upload_documents_parallel(documents: List[Dict]) -> tuple:
-    """Upload documents in parallel - OPTIMIZED WITH 5 WORKERS"""
+    """Upload documents in parallel - WORKING v3.1.9 SETTINGS"""
     if not documents:
         return 0, 0
     
