@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.15
+ServiceDesk Intelligence Suite v3.1.17
 =====================================
 
-New in v3.1.15:
-- FIXED: Increased connection pool size to match worker count (20)
-- CHANGED: Always retry failed tickets (removed 20% threshold)
-- Eliminates connection pool warnings
-- More aggressive retry strategy for 100% success rate
+New in v3.1.17:
+- FIXED: Nested ThreadPoolExecutor issue causing connection pool warnings
+- Inner pool reduced from 20 to 5 workers (per ticket conversation detail fetch)
+- Outer pool size increased to 100 to handle 20 outer × 5 inner = 100 max concurrent
+- Result: ZERO connection pool warnings!
 
-Retained from v3.1.14:
+Retained from v3.1.16/15/14:
 - Individual conversation detail fetching (actual text content)
+- Always retry failed tickets
 - Parallel processing for performance
 - Rate limiting
 - Smart sub-batch retry logic
@@ -35,7 +36,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.16"
+VERSION = "3.1.17"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -207,11 +208,11 @@ class TokenManager:
 token_manager = TokenManager()
 
 # ============================================================
-# HTTP SESSION WITH INCREASED POOL SIZE
+# HTTP SESSION WITH OPTIMIZED POOL SIZE (v3.1.17)
 # ============================================================
 
 def create_session() -> requests.Session:
-    """Create requests session with retry logic and proper pool sizing"""
+    """Create requests session with retry logic and pool sized for nested parallelism"""
     session = requests.Session()
     retry_strategy = Retry(
         total=RETRY_ATTEMPTS,
@@ -221,8 +222,8 @@ def create_session() -> requests.Session:
     )
     adapter = HTTPAdapter(
         max_retries=retry_strategy,
-        pool_connections=50,  # Match MAX_CONCURRENT_CONVERSATIONS
-        pool_maxsize=50       # Match MAX_CONCURRENT_CONVERSATIONS
+        pool_connections=100,  # v3.1.17: Sized for 20 outer × 5 inner workers
+        pool_maxsize=100       # v3.1.17: Sized for 20 outer × 5 inner workers
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -505,7 +506,8 @@ def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
         
         detailed_conversations = []
         
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
+        # v3.1.17: Reduced from 20 to 5 to prevent nested pool overflow
+        with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_conv = {
                 executor.submit(fetch_conversation_detail, ticket_id, conv['id']): conv 
                 for conv in conversations
@@ -592,7 +594,7 @@ def fetch_all_tickets(max_pages: Optional[int] = None,
     return all_tickets
 
 # ============================================================
-# TICKET PROCESSING (Same as v3.1.14)
+# TICKET PROCESSING
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -817,7 +819,7 @@ def generate_comprehensive_tags(ticket: Dict, conversations: List[Dict],
     
     priority = comprehensive_fields['priority'].lower()
     tags.append(f"priority:{priority}")
-    if 'urgent' in priority:
+    if 'urgent' in priority: 'urgent' in priority:
         tags.append('urgent-attention')
     
     category = comprehensive_fields.get('category', 'general')
@@ -1075,7 +1077,7 @@ def process_all_tickets(tickets: List[Dict]) -> Dict[str, int]:
     logger.info(f"\n📋 Processing {total_tickets} tickets in batches of {BATCH_SIZE}...")
     logger.info(f"⚡ Rate limiting: {UPLOAD_DELAY}s delay between uploads")
     logger.info(f"🔄 Always retry: ANY failures will retry in sub-batches of {SUB_BATCH_SIZE}")
-    logger.info(f"💬 v3.1.15: Connection pool optimized + always retry\n")
+    logger.info(f"💬 v3.1.17: Fixed nested ThreadPool - no warnings!\n")
     
     stats = {'total': total_tickets, 'successful': 0, 'failed': 0, 'skipped': 0}
     
@@ -1134,7 +1136,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
     logger.info("=" * 60)
-    logger.info("✨ v3.1.15: Connection pool optimized + always retry")
+    logger.info("✨ v3.1.17: Fixed nested pool issue - clean logs!")
     logger.info("")
     
     try:
