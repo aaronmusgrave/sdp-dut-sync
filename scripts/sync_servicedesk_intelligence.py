@@ -14,7 +14,7 @@ New in v3.1.10:
 - Correct Zoho OAuth endpoint for ServiceDesk Plus Cloud
 - Enhanced OAuth error debugging
 - Auto-cleans ALL credentials (removes backslashes)
-- Ultra-simple GET request (OData-style pagination)
+- Minimal input_data (only row_count and start_index)
 
 Retained from v3.1.9:
 - Token Manager with auto-refresh (prevents 401 failures)
@@ -575,7 +575,7 @@ def cleanup_dust_data_source():
     logger.info("")
 
 # ============================================================
-# SERVICEDESK PLUS API - ULTRA-SIMPLE GET REQUEST
+# SERVICEDESK PLUS API - MINIMAL INPUT_DATA
 # ============================================================
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, 
@@ -587,22 +587,23 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100,
         "Authorization": f"Bearer {access_token}"
     }
     
-    # Ultra-simple GET request with minimal parameters
-    url = f"{SDP_BASE_URL}/api/v3/requests"
-    params = {}
+    # Absolute minimal list_info - just pagination
+    list_info = {
+        "row_count": row_count,
+        "start_index": start_index
+    }
     
-    # Add only row_count and start_index as query params (no input_data wrapper)
-    if row_count:
-        params['\$limit'] = row_count
-    if start_index > 1:
-        params['\$skip'] = start_index - 1
+    input_data = {"list_info": list_info}
+    
+    # URL encode the JSON
+    url = f"{SDP_BASE_URL}/api/v3/requests"
     
     try:
-        # Simple GET request
+        # GET request with input_data as query parameter
         response = session.get(
             url,
             headers=headers,
-            params=params,
+            params={"input_data": json.dumps(input_data)},
             timeout=30
         )
         response.raise_for_status()
