@@ -6,10 +6,13 @@ ServiceDesk Intelligence Suite v3.1.24-PRODUCTION
 MAJOR FEATURES:
 - FIXED: Timestamp conversion handles string values from API
 - Full sync DELETES all existing documents before uploading
-- FIXED: Status detection logic corrected
+- FIXED: Status detection logic corrected (Open/On Hold/Pending = active)
 - Incremental sync - only fetches new/updated tickets
 - Checkpoint system tracks last sync time
 - Force full sync option via environment variable
+- 48 comprehensive ticket fields
+- Rate-limited uploads with retry logic
+- Parallel processing for speed
 """
 
 import os
@@ -398,6 +401,7 @@ def clean_slate_full_sync():
     """
     For full sync: Delete ALL existing documents from Dust before uploading
     
+    This ensures
     This ensures:
     - No stale data
     - No orphaned tickets
