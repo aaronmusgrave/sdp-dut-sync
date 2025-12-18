@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.22-PRODUCTION
+ServiceDesk Intelligence Suite v3.1.23-PRODUCTION
 =================================================
 
 MAJOR FEATURES:
+- NEW: Full sync DELETES all existing documents before uploading
 - FIXED: Status detection logic corrected
-- NEW: Incremental sync - only fetches new/updated tickets
-- NEW: Checkpoint system tracks last sync time
-- NEW: Force full sync option via environment variable
-- Automatic cleanup of orphaned tickets
-- Rate-limited uploads for 99%+ success
+- Incremental sync - only fetches new/updated tickets (no deletion)
+- Checkpoint system tracks last sync time
+- Force full sync option via environment variable
 """
 
 import os
@@ -31,7 +30,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.22-PRODUCTION"
+VERSION = "3.1.23-PRODUCTION"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -116,10 +115,6 @@ UPLOAD_DELAY = 2.0
 BATCH_DELAY = 3.0
 MAX_429_RETRIES = 3
 
-# Cleanup Configuration
-CLEANUP_INTERVAL_HOURS = 24
-LAST_CLEANUP_FILE = "last_cleanup.json"
-
 # Debug Configuration
 DEBUG_STATUS_DETECTION = True
 
@@ -156,9 +151,7 @@ METRICS = {
     'total_conversations': 0,
     'api_calls': 0,
     'dust_documents_found': 0,
-    'orphaned_tickets_found': 0,
-    'orphaned_tickets_deleted': 0,
-    'cleanup_skipped': False,
+    'dust_documents_deleted': 0,
     'sync_mode': 'full' if FORCE_FULL_SYNC else 'incremental',
     'status_detection_debug': [],
     'upload_errors': {}
@@ -299,44 +292,7 @@ def create_session() -> requests.Session:
 session = create_session()
 
 # ============================================================
-# CLEANUP TRACKING
-# ============================================================
-
-def should_run_cleanup() -> bool:
-    """Check if cleanup should run based on last cleanup time"""
-    if not os.path.exists(LAST_CLEANUP_FILE):
-        return True
-    
-    try:
-        with open(LAST_CLEANUP_FILE, 'r') as f:
-            data = json.load(f)
-            last_cleanup = datetime.fromisoformat(data['last_cleanup'])
-            hours_since = (datetime.now() - last_cleanup).total_seconds() / 3600
-            
-            if hours_since >= CLEANUP_INTERVAL_HOURS:
-                logger.info(f"  Last cleanup was {hours_since:.1f} hours ago - running cleanup")
-                return True
-            else:
-                logger.info(f"  Last cleanup was {hours_since:.1f} hours ago - skipping cleanup")
-                METRICS['cleanup_skipped'] = True
-                return False
-    except Exception as e:
-        logger.warning(f"  Error reading cleanup file: {e} - running cleanup")
-        return True
-
-def save_cleanup_time():
-    """Save current time as last cleanup time"""
-    try:
-        with open(LAST_CLEANUP_FILE, 'w') as f:
-            json.dump({
-                'last_cleanup': datetime.now().isoformat(),
-                'version': VERSION
-            }, f)
-    except Exception as e:
-        logger.warning(f"Failed to save cleanup time: {e}")
-
-# ============================================================
-# DUST API - FETCH & DELETE
+# DUST API - FETCH & DELETE ALL
 # ============================================================
 
 def fetch_dust_documents(limit: int = 1000, offset: int = 0) -> List[str]:
@@ -409,57 +365,57 @@ def delete_dust_document(doc_id: str) -> bool:
         logger.error(f"Failed to delete document {doc_id}: {e}")
         return False
 
-def delete_orphaned_tickets(orphaned_ids: Set[str]) -> int:
-    """Delete orphaned tickets from Dust in parallel"""
-    if not orphaned_ids:
+def delete_all_documents(doc_ids: Set[str]) -> int:
+    """Delete all documents from Dust in parallel"""
+    if not doc_ids:
         return 0
     
-    logger.info(f"  Deleting {len(orphaned_ids)} orphaned tickets...")
+    logger.info(f"  Deleting {len(doc_ids)} existing documents...")
     deleted_count = 0
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DELETES) as executor:
-        futures = {executor.submit(delete_dust_document, doc_id): doc_id for doc_id in orphaned_ids}
+        futures = {executor.submit(delete_dust_document, doc_id): doc_id for doc_id in doc_ids}
         
         for future in as_completed(futures):
             try:
                 if future.result():
                     deleted_count += 1
-                    if deleted_count % 50 == 0:
-                        logger.info(f"    Deleted {deleted_count}/{len(orphaned_ids)} orphaned tickets...")
+                    if deleted_count % 100 == 0:
+                        logger.info(f"    Deleted {deleted_count}/{len(doc_ids)} documents...")
             except Exception as e:
                 logger.error(f"Exception deleting document: {e}")
     
-    METRICS['orphaned_tickets_deleted'] = deleted_count
-    logger.info(f"  ✓ Deleted {deleted_count}/{len(orphaned_ids)} orphaned tickets")
+    METRICS['dust_documents_deleted'] = deleted_count
+    logger.info(f"  ✓ Deleted {deleted_count}/{len(doc_ids)} documents")
     return deleted_count
 
 # ============================================================
-# CLEANUP ORCHESTRATION
+# CLEAN SLATE FOR FULL SYNC
 # ============================================================
 
-def cleanup_orphaned_tickets(current_ticket_ids: Set[str]):
-    """Find and delete tickets in Dust that no longer exist in ServiceDesk Plus"""
+def clean_slate_full_sync():
+    """
+    For full sync: Delete ALL existing documents from Dust before uploading
+    
+    This ensures:
+    - No stale data
+    - No orphaned tickets
+    - Clean fresh upload
+    - Correct status tags for all tickets
+    """
     logger.info("\n" + "=" * 60)
-    logger.info("CLEANUP: Removing Orphaned Tickets")
+    logger.info("FULL SYNC: CLEANING DUST DATA SOURCE")
     logger.info("=" * 60)
     
-    if not should_run_cleanup():
-        logger.info("  Cleanup skipped (ran recently)")
-        logger.info("=" * 60)
-        return
-    
+    # Fetch all existing documents
     dust_doc_ids = fetch_all_dust_documents()
     
-    orphaned_ids = dust_doc_ids - current_ticket_ids
-    METRICS['orphaned_tickets_found'] = len(orphaned_ids)
-    
-    if orphaned_ids:
-        logger.info(f"  Found {len(orphaned_ids)} orphaned tickets to delete")
-        delete_orphaned_tickets(orphaned_ids)
+    if dust_doc_ids:
+        logger.info(f"  Found {len(dust_doc_ids)} existing documents to delete")
+        delete_all_documents(dust_doc_ids)
+        logger.info(f"  ✓ Dust data source cleaned - ready for fresh upload")
     else:
-        logger.info(f"  ✓ No orphaned tickets found - Dust is in sync")
-    
-    save_cleanup_time()
+        logger.info(f"  ✓ Dust data source is empty - ready for upload")
     
     logger.info("=" * 60)
 
@@ -495,10 +451,8 @@ def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, last_sync
     
     # Add filter for incremental sync
     if last_sync_time is not None:
-        # ServiceDesk Plus expects milliseconds since epoch
         timestamp_ms = convert_datetime_to_sdp_timestamp(last_sync_time)
         
-        # Filter for tickets created or modified after last sync
         list_info["list_info"]["filter_by"] = {
             "name": "last_updated_time",
             "value": timestamp_ms,
@@ -1100,13 +1054,9 @@ def print_final_summary():
         avg = METRICS['total_conversations'] / METRICS['conversations_fetched']
         logger.info(f"  Average per Ticket:        {avg:.1f}")
     
-    logger.info(f"\n🧹 CLEANUP STATISTICS:")
-    if METRICS['cleanup_skipped']:
-        logger.info(f"  Cleanup: Skipped (ran recently)")
-    else:
-        logger.info(f"  Dust Documents Found:      {METRICS['dust_documents_found']}")
-        logger.info(f"  Orphaned Tickets Found:    {METRICS['orphaned_tickets_found']}")
-        logger.info(f"  Orphaned Tickets Deleted:  {METRICS['orphaned_tickets_deleted']}")
+    if METRICS['sync_mode'] == 'full':
+        logger.info(f"\n🧹 CLEANUP STATISTICS:")
+        logger.info(f"  Dust Documents Deleted:    {METRICS['dust_documents_deleted']}")
     
     logger.info(f"\n🔧 API STATISTICS:")
     logger.info(f"  Total API Calls:   {METRICS['api_calls']}")
@@ -1120,7 +1070,7 @@ def print_final_summary():
     
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  Status Fix + Incremental Sync")
+    logger.info("  Status Fix + Incremental Sync + Clean Full Sync")
     logger.info("=" * 60)
 
 def main():
@@ -1141,16 +1091,17 @@ def main():
         last_sync_time, sync_mode = get_sync_parameters()
         METRICS['sync_mode'] = sync_mode
         
+        # If full sync, clean Dust first
+        if sync_mode == 'full':
+            clean_slate_full_sync()
+        
         # Fetch tickets (filtered if incremental)
         tickets = fetch_all_tickets(last_sync_time)
         
         if not tickets:
             logger.info("✓ No tickets to process")
-            # Still save checkpoint
             save_checkpoint(sync_start_time)
             return 0
-        
-        current_ticket_ids = {str(t.get('display_id')) for t in tickets}
         
         # Process tickets
         total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -1170,10 +1121,6 @@ def main():
             except Exception as e:
                 logger.error(f"Error processing batch {batch_num}: {e}")
                 continue
-        
-        # Cleanup (only on full sync or periodically)
-        if sync_mode == 'full':
-            cleanup_orphaned_tickets(current_ticket_ids)
         
         # Save checkpoint for next incremental sync
         save_checkpoint(sync_start_time)
