@@ -31,13 +31,15 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # NEW: Delete checkpoint if force sync requested
+      # FIXED: Correct condition (boolean comparison, no quotes)
+      # FIXED: Correct filename (sync_checkpoint.json)
       - name: Check for force full sync
-        if: github.event.inputs.force_full_sync == 'true'
+        if: github.event.inputs.force_full_sync == true
         run: |
-          echo "🔄 Force full sync requested - deleting checkpoint"
-          rm -f last_sync_time.txt
-          rm -f checkpoint.json
+          echo "🔄 Force full sync requested - deleting checkpoints"
+          rm -f sync_checkpoint.json
+          rm -f last_cleanup.json
+          echo "✓ Checkpoints deleted"
 
       - name: Run sync
         env:
@@ -47,7 +49,11 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/sync_servicedesk_intelligence.py
+          # FIXED: Pass force_full_sync to Python script
+          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync == true && 'true' || 'false' }}
+        run: |
+          echo "Running sync with FORCE_FULL_SYNC=\$FORCE_FULL_SYNC"
+          python scripts/sync_servicedesk_intelligence.py
 
       - name: Commit changes
         if: always()
@@ -55,5 +61,5 @@ jobs:
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add -A
-          git diff --staged --quiet || git commit -m "Update timestamp"
+          git diff --staged --quiet || git commit -m "Update sync checkpoint"
           git push || true
