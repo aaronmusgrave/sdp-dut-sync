@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.23-PRODUCTION
+ServiceDesk Intelligence Suite v3.1.24-PRODUCTION
 =================================================
 
 MAJOR FEATURES:
-- NEW: Full sync DELETES all existing documents before uploading
+- FIXED: Timestamp conversion handles string values from API
+- Full sync DELETES all existing documents before uploading
 - FIXED: Status detection logic corrected
-- Incremental sync - only fetches new/updated tickets (no deletion)
+- Incremental sync - only fetches new/updated tickets
 - Checkpoint system tracks last sync time
 - Force full sync option via environment variable
 """
@@ -30,7 +31,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.23-PRODUCTION"
+VERSION = "3.1.24-PRODUCTION"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -563,11 +564,21 @@ def fetch_all_tickets(last_sync_time: Optional[datetime] = None) -> List[Dict]:
     
     METRICS['total_tickets_fetched'] = len(all_tickets)
     
-    # Classify tickets as new or updated
+    # Classify tickets as new or updated (FIXED: Handle string timestamps)
     if last_sync_time:
         for ticket in all_tickets:
             created_time_ms = safe_get(ticket, 'created_time', 'value', default=0)
-            created_time = datetime.fromtimestamp(created_time_ms / 1000) if created_time_ms else None
+            
+            # Convert to int if string (API sometimes returns as string)
+            if created_time_ms:
+                try:
+                    created_time_ms = int(created_time_ms)
+                    created_time = datetime.fromtimestamp(created_time_ms / 1000)
+                except (ValueError, TypeError):
+                    logger.debug(f"Could not parse created_time for ticket: {created_time_ms}")
+                    created_time = None
+            else:
+                created_time = None
             
             if created_time and created_time > last_sync_time:
                 METRICS['new_tickets'] += 1
@@ -1070,7 +1081,7 @@ def print_final_summary():
     
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  Status Fix + Incremental Sync + Clean Full Sync")
+    logger.info("  Timestamp Fix + Status Fix + Clean Full Sync")
     logger.info("=" * 60)
 
 def main():
