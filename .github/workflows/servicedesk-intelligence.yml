@@ -31,15 +31,71 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # Delete checkpoint if force sync requested
-      - name: Check for force full sync
-        if: github.event.inputs.force_full_sync == true
+      # ============================================================
+      # DEBUG SECTION - Shows us what's happening
+      # ============================================================
+      - name: Debug workflow inputs
         run: |
-          echo "🔄 Force full sync requested - deleting checkpoints"
+          echo "╔════════════════════════════════════════════════════════╗"
+          echo "║          WORKFLOW INPUT DEBUG                          ║"
+          echo "╚════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Event Name: \${{ github.event_name }}"
+          echo "Event Type: workflow_dispatch"
+          echo ""
+          echo "Input Value (raw):"
+          echo "  github.event.inputs.force_full_sync = '\${{ github.event.inputs.force_full_sync }}'"
+          echo ""
+          echo "Boolean Comparisons:"
+          echo "  == true  : \${{ github.event.inputs.force_full_sync == true }}"
+          echo "  == 'true': \${{ github.event.inputs.force_full_sync == 'true' }}"
+          echo "  != false : \${{ github.event.inputs.force_full_sync != false }}"
+          echo ""
+          echo "Ternary Result:"
+          echo "  \${{ github.event.inputs.force_full_sync == true && 'WOULD_BE_TRUE' || 'WOULD_BE_FALSE' }}"
+          echo ""
+          echo "Files in workspace:"
+          ls -la *.json 2>/dev/null || echo "  (no JSON files found)"
+          echo ""
+          echo "════════════════════════════════════════════════════════"
+
+      # Test both conditions
+      - name: Test condition (== true)
+        if: \${{ github.event.inputs.force_full_sync == true }}
+        run: |
+          echo "✅ Condition 1 PASSED: github.event.inputs.force_full_sync == true"
+
+      - name: Test condition (== 'true')
+        if: \${{ github.event.inputs.force_full_sync == 'true' }}
+        run: |
+          echo "✅ Condition 2 PASSED: github.event.inputs.force_full_sync == 'true'"
+
+      # Actual cleanup (try both conditions)
+      - name: Force full sync cleanup
+        if: \${{ github.event.inputs.force_full_sync == true || github.event.inputs.force_full_sync == 'true' }}
+        run: |
+          echo "════════════════════════════════════════════════════════"
+          echo "🔄 FORCE FULL SYNC - Deleting checkpoint files"
+          echo "════════════════════════════════════════════════════════"
           rm -f sync_checkpoint.json
           rm -f last_cleanup.json
-          echo "✓ Checkpoints deleted"
+          echo "✓ Checkpoint files deleted"
+          ls -la *.json 2>/dev/null || echo "✓ All checkpoint files removed"
+          echo "════════════════════════════════════════════════════════"
 
+      # Show what we're about to pass to Python
+      - name: Environment variable debug
+        env:
+          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync == true && 'true' || 'false' }}
+        run: |
+          echo "════════════════════════════════════════════════════════"
+          echo "ENVIRONMENT VARIABLE BEING PASSED TO PYTHON:"
+          echo "  FORCE_FULL_SYNC='\$FORCE_FULL_SYNC'"
+          echo "════════════════════════════════════════════════════════"
+
+      # ============================================================
+      # ACTUAL SYNC
+      # ============================================================
       - name: Run sync
         env:
           SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
@@ -50,7 +106,11 @@ jobs:
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
           FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync == true && 'true' || 'false' }}
         run: |
-          echo "Running sync with FORCE_FULL_SYNC=\$FORCE_FULL_SYNC"
+          echo "════════════════════════════════════════════════════════"
+          echo "STARTING SYNC"
+          echo "════════════════════════════════════════════════════════"
+          echo "FORCE_FULL_SYNC environment variable: \$FORCE_FULL_SYNC"
+          echo ""
           python scripts/sync_servicedesk_intelligence.py
 
       - name: Commit changes
