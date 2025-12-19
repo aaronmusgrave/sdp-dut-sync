@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.1.24-PRODUCTION
+ServiceDesk Intelligence Suite v3.2.1-PRODUCTION
 =================================================
 
-MAJOR FEATURES:
-- FIXED: Timestamp conversion handles string values from API
-- Full sync DELETES all existing documents before uploading
-- FIXED: Status detection logic corrected (Open/On Hold/Pending = active)
-- Incremental sync - only fetches new/updated tickets
-- Checkpoint system tracks last sync time
-- Force full sync option via environment variable
-- 48 comprehensive ticket fields
-- Rate-limited uploads with retry logic
-- Parallel processing for speed
+DUAL DATA SOURCE ARCHITECTURE:
+- servicedesk: ALL tickets (upsert updates - efficient)
+- servicedesk-active: ONLY active tickets (rebuild each sync - accurate)
+
+FEATURES:
+- Incremental sync rebuilds servicedesk-active completely (no stale data)
+- Main servicedesk gets efficient upserts only
+- Fixed timestamp conversion and status detection
+- Full sync option for clean slate
 """
 
 import os
@@ -34,7 +33,7 @@ from html import unescape
 # VERSION & CONFIGURATION
 # ============================================================
 
-VERSION = "3.1.24-PRODUCTION"
+VERSION = "3.2.1-PRODUCTION"
 
 # Validate environment variables first
 def validate_required_env_vars():
@@ -84,8 +83,13 @@ print("")
 # Configuration
 DUST_API_KEY = os.environ.get("DUST_API_KEY", "").strip().lstrip('\\').lstrip('/')
 DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad").strip().lstrip('\\').lstrip('/')
-DUST_DATA_SOURCE_ID = "servicedesk"
-DUST_API_URL = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ID}"
+
+# DUAL DATA SOURCES
+DUST_DATA_SOURCE_MAIN = "servicedesk"  # ALL tickets (historical + active)
+DUST_DATA_SOURCE_ACTIVE = "servicedesk-active"  # ONLY active tickets
+
+DUST_API_URL_MAIN = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_MAIN}"
+DUST_API_URL_ACTIVE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ACTIVE}"
 
 SDP_DOMAIN = os.environ.get("SDP_DOMAIN", "").strip()
 SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID", "").strip().lstrip('\\').lstrip('/')
@@ -101,7 +105,8 @@ CHECKPOINT_FILE = "sync_checkpoint.json"
 
 print(f"✓ Configuration loaded")
 print(f"  Workspace: {DUST_WORKSPACE_ID}")
-print(f"  Data Source: {DUST_DATA_SOURCE_ID}")
+print(f"  Main Data Source: {DUST_DATA_SOURCE_MAIN} (all tickets)")
+print(f"  Active Data Source: {DUST_DATA_SOURCE_ACTIVE} (active only)")
 print(f"  SDP Domain: {SDP_DOMAIN}")
 print(f"  Version: v{VERSION}")
 print(f"  Sync Mode: {'FULL SYNC (forced)' if FORCE_FULL_SYNC else 'INCREMENTAL'}")
@@ -109,13 +114,10 @@ print("")
 
 # Processing Configuration
 BATCH_SIZE = 50
-SUB_BATCH_SIZE = 10
 MAX_CONCURRENT_CONVERSATIONS = 8
 MAX_CONCURRENT_UPLOADS = 3
 MAX_CONCURRENT_DELETES = 20
 RETRY_ATTEMPTS = 5
-RETRY_DELAY = 3
-UPLOAD_DELAY = 2.0
 BATCH_DELAY = 3.0
 MAX_429_RETRIES = 3
 
@@ -142,7 +144,8 @@ METRICS = {
     'new_tickets': 0,
     'updated_tickets': 0,
     'total_processed': 0,
-    'total_uploaded': 0,
+    'total_uploaded_main': 0,
+    'total_uploaded_active': 0,
     'skipped': 0,
     'failed_uploads': 0,
     'retried_uploads': 0,
@@ -154,8 +157,10 @@ METRICS = {
     'incidents': 0,
     'total_conversations': 0,
     'api_calls': 0,
-    'dust_documents_found': 0,
-    'dust_documents_deleted': 0,
+    'dust_documents_found_main': 0,
+    'dust_documents_deleted_main': 0,
+    'dust_documents_found_active': 0,
+    'dust_documents_deleted_active': 0,
     'sync_mode': 'full' if FORCE_FULL_SYNC else 'incremental',
     'status_detection_debug': [],
     'upload_errors': {}
@@ -296,17 +301,17 @@ def create_session() -> requests.Session:
 session = create_session()
 
 # ============================================================
-# DUST API - FETCH & DELETE ALL
+# DUST API - DUAL DATA SOURCE MANAGEMENT
 # ============================================================
 
-def fetch_dust_documents(limit: int = 1000, offset: int = 0) -> List[str]:
+def fetch_dust_documents(data_source_url: str, limit: int = 1000, offset: int = 0) -> List[str]:
     """Fetch document IDs from Dust data source"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
     }
     
-    url = f"{DUST_API_URL}/documents"
+    url = f"{data_source_url}/documents"
     params = {
         'limit': limit,
         'offset': offset
@@ -325,16 +330,16 @@ def fetch_dust_documents(limit: int = 1000, offset: int = 0) -> List[str]:
         logger.error(f"Failed to fetch Dust documents: {e}")
         return []
 
-def fetch_all_dust_documents() -> Set[str]:
+def fetch_all_dust_documents(data_source_url: str, source_name: str) -> Set[str]:
     """Fetch all document IDs from Dust"""
     all_doc_ids = set()
     offset = 0
     limit = 1000
     
-    logger.info("  Fetching existing documents from Dust...")
+    logger.info(f"  Fetching existing documents from {source_name}...")
     
     while True:
-        doc_ids = fetch_dust_documents(limit=limit, offset=offset)
+        doc_ids = fetch_dust_documents(data_source_url, limit=limit, offset=offset)
         
         if not doc_ids:
             break
@@ -348,18 +353,17 @@ def fetch_all_dust_documents() -> Set[str]:
         offset += limit
         time.sleep(0.5)
     
-    METRICS['dust_documents_found'] = len(all_doc_ids)
-    logger.info(f"  ✓ Found {len(all_doc_ids)} documents in Dust")
+    logger.info(f"  ✓ Found {len(all_doc_ids)} documents in {source_name}")
     return all_doc_ids
 
-def delete_dust_document(doc_id: str) -> bool:
+def delete_dust_document(data_source_url: str, doc_id: str) -> bool:
     """Delete a document from Dust"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
     }
     
-    url = f"{DUST_API_URL}/documents/{doc_id}"
+    url = f"{data_source_url}/documents/{doc_id}"
     
     try:
         response = session.delete(url, headers=headers, timeout=30)
@@ -369,16 +373,16 @@ def delete_dust_document(doc_id: str) -> bool:
         logger.error(f"Failed to delete document {doc_id}: {e}")
         return False
 
-def delete_all_documents(doc_ids: Set[str]) -> int:
+def delete_all_documents(data_source_url: str, doc_ids: Set[str], source_name: str) -> int:
     """Delete all documents from Dust in parallel"""
     if not doc_ids:
         return 0
     
-    logger.info(f"  Deleting {len(doc_ids)} existing documents...")
+    logger.info(f"  Deleting {len(doc_ids)} existing documents from {source_name}...")
     deleted_count = 0
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DELETES) as executor:
-        futures = {executor.submit(delete_dust_document, doc_id): doc_id for doc_id in doc_ids}
+        futures = {executor.submit(delete_dust_document, data_source_url, doc_id): doc_id for doc_id in doc_ids}
         
         for future in as_completed(futures):
             try:
@@ -389,43 +393,72 @@ def delete_all_documents(doc_ids: Set[str]) -> int:
             except Exception as e:
                 logger.error(f"Exception deleting document: {e}")
     
-    METRICS['dust_documents_deleted'] = deleted_count
-    logger.info(f"  ✓ Deleted {deleted_count}/{len(doc_ids)} documents")
+    logger.info(f"  ✓ Deleted {deleted_count}/{len(doc_ids)} documents from {source_name}")
     return deleted_count
 
 # ============================================================
-# CLEAN SLATE FOR FULL SYNC
+# CLEAN SLATE FOR FULL SYNC - BOTH DATA SOURCES
 # ============================================================
 
 def clean_slate_full_sync():
     """
-    For full sync: Delete ALL existing documents from Dust before uploading
-    
-    This ensures
-    This ensures:
-    - No stale data
-    - No orphaned tickets
-    - Clean fresh upload
-    - Correct status tags for all tickets
+    For full sync: Delete ALL existing documents from BOTH data sources
     """
     logger.info("\n" + "=" * 60)
-    logger.info("FULL SYNC: CLEANING DUST DATA SOURCE")
+    logger.info("FULL SYNC: CLEANING BOTH DATA SOURCES")
     logger.info("=" * 60)
     
-    # Fetch all existing documents
-    dust_doc_ids = fetch_all_dust_documents()
-    
-    if dust_doc_ids:
-        logger.info(f"  Found {len(dust_doc_ids)} existing documents to delete")
-        delete_all_documents(dust_doc_ids)
-        logger.info(f"  ✓ Dust data source cleaned - ready for fresh upload")
+    # Clean main data source
+    logger.info("\n📦 Cleaning MAIN data source (servicedesk)...")
+    dust_doc_ids_main = fetch_all_dust_documents(DUST_API_URL_MAIN, "servicedesk")
+    if dust_doc_ids_main:
+        deleted = delete_all_documents(DUST_API_URL_MAIN, dust_doc_ids_main, "servicedesk")
+        METRICS['dust_documents_found_main'] = len(dust_doc_ids_main)
+        METRICS['dust_documents_deleted_main'] = deleted
     else:
-        logger.info(f"  ✓ Dust data source is empty - ready for upload")
+        logger.info("  ✓ Main data source is empty")
     
+    # Clean active data source
+    logger.info("\n⚡ Cleaning ACTIVE data source (servicedesk-active)...")
+    dust_doc_ids_active = fetch_all_dust_documents(DUST_API_URL_ACTIVE, "servicedesk-active")
+    if dust_doc_ids_active:
+        deleted = delete_all_documents(DUST_API_URL_ACTIVE, dust_doc_ids_active, "servicedesk-active")
+        METRICS['dust_documents_found_active'] = len(dust_doc_ids_active)
+        METRICS['dust_documents_deleted_active'] = deleted
+    else:
+        logger.info("  ✓ Active data source is empty")
+    
+    logger.info("\n✓ Both data sources cleaned - ready for fresh upload")
+    logger.info("=" * 60)
+
+def clean_active_incremental():
+    """
+    For incremental sync: Clean ONLY servicedesk-active (to remove stale closed tickets)
+    Main servicedesk keeps its data and just gets upserts
+    """
+    logger.info("\n" + "=" * 60)
+    logger.info("INCREMENTAL SYNC: CLEANING ACTIVE DATA SOURCE")
+    logger.info("=" * 60)
+    logger.info("  📦 Main data source (servicedesk) will receive upserts only")
+    logger.info("  ⚡ Active data source (servicedesk-active) will be rebuilt fresh")
+    logger.info("")
+    
+    # Clean active data source only
+    logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
+    dust_doc_ids_active = fetch_all_dust_documents(DUST_API_URL_ACTIVE, "servicedesk-active")
+    if dust_doc_ids_active:
+        deleted = delete_all_documents(DUST_API_URL_ACTIVE, dust_doc_ids_active, "servicedesk-active")
+        METRICS['dust_documents_found_active'] = len(dust_doc_ids_active)
+        METRICS['dust_documents_deleted_active'] = deleted
+        logger.info(f"  ✓ Deleted {deleted} documents from servicedesk-active")
+    else:
+        logger.info("  ✓ Active data source is empty")
+    
+    logger.info("✓ Active data source cleaned - will rebuild with current active tickets only")
     logger.info("=" * 60)
 
 # ============================================================
-# SERVICEDESK PLUS API - WITH INCREMENTAL SUPPORT
+# SERVICEDESK PLUS API
 # ============================================================
 
 def convert_datetime_to_sdp_timestamp(dt: datetime) -> int:
@@ -433,11 +466,7 @@ def convert_datetime_to_sdp_timestamp(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, last_sync_time: Optional[datetime] = None) -> Dict:
-    """
-    Fetch tickets from ServiceDesk Plus API
-    
-    If last_sync_time is provided, filters for tickets created or modified since that time
-    """
+    """Fetch tickets from ServiceDesk Plus API"""
     access_token = token_manager.get_token()
     
     headers = {
@@ -524,11 +553,7 @@ def fetch_conversations_parallel(ticket_ids: List[str]) -> Dict[str, List[Dict]]
     return conversations_map
 
 def fetch_all_tickets(last_sync_time: Optional[datetime] = None) -> List[Dict]:
-    """
-    Fetch tickets from ServiceDesk Plus
-    
-    If last_sync_time is provided, only fetches new/updated tickets
-    """
+    """Fetch tickets from ServiceDesk Plus"""
     all_tickets = []
     page = 1
     row_count = 100
@@ -568,12 +593,11 @@ def fetch_all_tickets(last_sync_time: Optional[datetime] = None) -> List[Dict]:
     
     METRICS['total_tickets_fetched'] = len(all_tickets)
     
-    # Classify tickets as new or updated (FIXED: Handle string timestamps)
+    # Classify tickets as new or updated
     if last_sync_time:
         for ticket in all_tickets:
             created_time_ms = safe_get(ticket, 'created_time', 'value', default=0)
             
-            # Convert to int if string (API sometimes returns as string)
             if created_time_ms:
                 try:
                     created_time_ms = int(created_time_ms)
@@ -597,7 +621,7 @@ def fetch_all_tickets(last_sync_time: Optional[datetime] = None) -> List[Dict]:
     return all_tickets
 
 # ============================================================
-# FIELD EXTRACTION & PROCESSING - FIXED STATUS DETECTION
+# FIELD EXTRACTION & PROCESSING
 # ============================================================
 
 def safe_get(obj, *keys, default=None):
@@ -625,11 +649,7 @@ def normalize_status_string(status: str) -> str:
     return status.lower().replace('-', ' ').replace('_', ' ').strip()
 
 def determine_status_category(status: str, status_internal: str, ticket_id: str = "unknown") -> str:
-    """
-    Determine if ticket is active or closed with enhanced detection
-    
-    FIXED: v3.1.21 - Properly detects Open, On Hold, Pending, In Progress as ACTIVE
-    """
+    """Determine if ticket is active or closed"""
     status_norm = normalize_status_string(status)
     status_internal_norm = normalize_status_string(status_internal)
     
@@ -673,7 +693,7 @@ def determine_status_category(status: str, status_internal: str, ticket_id: str 
     return 'closed'
 
 def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dict[str, Any]:
-    """Extract all comprehensive fields from ticket with FIXED status detection"""
+    """Extract all comprehensive fields from ticket"""
     
     ticket_id = safe_get(ticket, 'display_id', default='Unknown')
     subject = safe_get(ticket, 'subject', default='No Subject')
@@ -898,17 +918,17 @@ def process_single_ticket(ticket: Dict, conversations: List[Dict]) -> Optional[D
         return None
 
 # ============================================================
-# DUST API WITH RETRY LOGIC
+# DUST API - DUAL UPLOAD WITH RETRY LOGIC
 # ============================================================
 
-def upsert_to_dust_with_retry(document: Dict, max_retries: int = MAX_429_RETRIES) -> bool:
+def upsert_to_dust_with_retry(data_source_url: str, document: Dict, source_name: str, max_retries: int = MAX_429_RETRIES) -> bool:
     """Upload document to Dust with exponential backoff for 429 errors"""
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type': 'application/json'
     }
     
-    url = f"{DUST_API_URL}/documents/{document['id']}"
+    url = f"{data_source_url}/documents/{document['id']}"
     
     payload = {
         'text': document['content'],
@@ -930,53 +950,79 @@ def upsert_to_dust_with_retry(document: Dict, max_retries: int = MAX_429_RETRIES
                 METRICS['rate_limited'] += 1
                 if attempt < max_retries:
                     wait_time = (2 ** attempt) * 2
-                    logger.warning(f"Rate limited on ticket {document['id']}, waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
+                    logger.warning(f"Rate limited on {source_name} ticket {document['id']}, waiting {wait_time}s")
                     time.sleep(wait_time)
                     METRICS['retried_uploads'] += 1
                     continue
                 else:
-                    logger.error(f"Failed to upload ticket {document['id']} after {max_retries} retries (rate limited)")
+                    logger.error(f"Failed to upload ticket {document['id']} to {source_name} after {max_retries} retries")
                     METRICS['failed_uploads'] += 1
                     return False
             else:
                 error_type = type(e).__name__
                 METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
                 METRICS['failed_uploads'] += 1
-                logger.error(f"Failed to upload ticket {document['id']}: {e}")
+                logger.error(f"Failed to upload ticket {document['id']} to {source_name}: {e}")
                 return False
                 
         except Exception as e:
             error_type = type(e).__name__
             METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
             METRICS['failed_uploads'] += 1
-            logger.error(f"Failed to upload ticket {document['id']}: {e}")
+            logger.error(f"Failed to upload ticket {document['id']} to {source_name}: {e}")
             return False
     
     return False
 
-def upload_batch_parallel(documents: List[Dict]) -> Tuple[int, int]:
-    """Upload batch of documents in parallel with rate limiting"""
-    success_count = 0
-    failure_count = 0
+def upload_batch_dual(documents: List[Dict]) -> Tuple[int, int, int, int]:
+    """
+    Upload batch of documents to BOTH data sources
+    Returns: (main_success, main_failure, active_success, active_failure)
+    """
+    main_success = 0
+    main_failure = 0
+    active_success = 0
+    active_failure = 0
     
+    # Separate active and all documents
+    active_documents = [doc for doc in documents if 'ACTIVE-TICKET' in doc['tags']]
+    
+    # Upload ALL documents to main source
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-        futures = {executor.submit(upsert_to_dust_with_retry, doc): doc for doc in documents}
+        futures = {executor.submit(upsert_to_dust_with_retry, DUST_API_URL_MAIN, doc, "main"): doc for doc in documents}
         
         for future in as_completed(futures):
             try:
                 if future.result():
-                    success_count += 1
-                    METRICS['total_uploaded'] += 1
+                    main_success += 1
+                    METRICS['total_uploaded_main'] += 1
                 else:
-                    failure_count += 1
+                    main_failure += 1
             except Exception as e:
-                failure_count += 1
-                METRICS['failed_uploads'] += 1
-                logger.error(f"Upload exception: {e}")
+                main_failure += 1
+                logger.error(f"Upload exception (main): {e}")
             
             time.sleep(0.2)
     
-    return success_count, failure_count
+    # Upload ONLY active documents to active source
+    if active_documents:
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
+            futures = {executor.submit(upsert_to_dust_with_retry, DUST_API_URL_ACTIVE, doc, "active"): doc for doc in active_documents}
+            
+            for future in as_completed(futures):
+                try:
+                    if future.result():
+                        active_success += 1
+                        METRICS['total_uploaded_active'] += 1
+                    else:
+                        active_failure += 1
+                except Exception as e:
+                    active_failure += 1
+                    logger.error(f"Upload exception (active): {e}")
+                
+                time.sleep(0.2)
+    
+    return main_success, main_failure, active_success, active_failure
 
 # ============================================================
 # MAIN PROCESSING
@@ -1005,11 +1051,17 @@ def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int
     logger.info(f"  ✓ Processed {len(documents)} documents")
     
     if documents:
-        logger.info("  Uploading to Dust (with rate limit protection)...")
-        success, failure = upload_batch_parallel(documents)
-        logger.info(f"  ✓ Uploaded {success}/{len(documents)} documents")
-        if failure > 0:
-            logger.warning(f"  ⚠️  {failure} upload failures")
+        logger.info("  Uploading to BOTH data sources...")
+        main_success, main_failure, active_success, active_failure = upload_batch_dual(documents)
+        
+        active_count = len([d for d in documents if 'ACTIVE-TICKET' in d['tags']])
+        
+        logger.info(f"  📦 Main source: {main_success}/{len(documents)} uploaded")
+        if active_count > 0:
+            logger.info(f"  ⚡ Active source: {active_success}/{active_count} uploaded")
+        
+        if main_failure > 0 or active_failure > 0:
+            logger.warning(f"  ⚠️  Upload failures: {main_failure + active_failure} total")
     
     if batch_num < total_batches:
         logger.info(f"  ⏸️  Pausing {BATCH_DELAY}s before next batch...")
@@ -1046,14 +1098,15 @@ def print_final_summary():
         logger.info(f"  New Tickets:       {METRICS['new_tickets']}")
         logger.info(f"  Updated Tickets:   {METRICS['updated_tickets']}")
     logger.info(f"  Total Processed:   {METRICS['total_processed']}")
-    logger.info(f"  Total Uploaded:    {METRICS['total_uploaded']}")
+    logger.info(f"  Uploaded to Main:  {METRICS['total_uploaded_main']}")
+    logger.info(f"  Uploaded to Active: {METRICS['total_uploaded_active']}")
     logger.info(f"  Skipped:           {METRICS['skipped']}")
     logger.info(f"  Upload Failures:   {METRICS['failed_uploads']}")
     logger.info(f"  Retried:           {METRICS['retried_uploads']}")
     logger.info(f"  Rate Limited:      {METRICS['rate_limited']}")
     
     if METRICS['total_processed'] > 0:
-        success_rate = (METRICS['total_uploaded'] / METRICS['total_processed']) * 100
+        success_rate = (METRICS['total_uploaded_main'] / METRICS['total_processed']) * 100
         logger.info(f"  Success Rate:      {success_rate:.1f}%")
     
     logger.info(f"\n📈 TICKET BREAKDOWN:")
@@ -1071,7 +1124,12 @@ def print_final_summary():
     
     if METRICS['sync_mode'] == 'full':
         logger.info(f"\n🧹 CLEANUP STATISTICS:")
-        logger.info(f"  Dust Documents Deleted:    {METRICS['dust_documents_deleted']}")
+        logger.info(f"  Main - Documents Deleted:  {METRICS['dust_documents_deleted_main']}")
+        logger.info(f"  Active - Documents Deleted: {METRICS['dust_documents_deleted_active']}")
+    else:
+        logger.info(f"\n🧹 CLEANUP STATISTICS:")
+        logger.info(f"  Active - Documents Deleted: {METRICS['dust_documents_deleted_active']}")
+        logger.info(f"  Main - Received upserts only (efficient)")
     
     logger.info(f"\n🔧 API STATISTICS:")
     logger.info(f"  Total API Calls:   {METRICS['api_calls']}")
@@ -1085,7 +1143,7 @@ def print_final_summary():
     
     logger.info("\n" + "=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  Timestamp Fix + Status Fix + Clean Full Sync")
+    logger.info("  Dual Data Source + Active Cleanup + Timestamp Fix + Status Fix")
     logger.info("=" * 60)
 
 def main():
@@ -1106,9 +1164,11 @@ def main():
         last_sync_time, sync_mode = get_sync_parameters()
         METRICS['sync_mode'] = sync_mode
         
-        # If full sync, clean Dust first
+        # Clean data sources based on sync mode
         if sync_mode == 'full':
-            clean_slate_full_sync()
+            clean_slate_full_sync()  # Wipe both sources
+        else:
+            clean_active_incremental()  # Wipe only servicedesk-active
         
         # Fetch tickets (filtered if incremental)
         tickets = fetch_all_tickets(last_sync_time)
@@ -1123,9 +1183,9 @@ def main():
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
         
         if sync_mode == 'incremental':
-            logger.info(f"Estimated time: {total_batches * 0.2:.0f} minutes (incremental)\n")
+            logger.info(f"Estimated time: {total_batches * 0.4:.0f} minutes (incremental with active rebuild)\n")
         else:
-            logger.info(f"Estimated time: {total_batches * 0.7:.0f} minutes (full sync)\n")
+            logger.info(f"Estimated time: {total_batches * 0.9:.0f} minutes (full sync - dual upload)\n")
         
         for i in range(0, len(tickets), BATCH_SIZE):
             batch = tickets[i:i+BATCH_SIZE]
@@ -1137,7 +1197,7 @@ def main():
                 logger.error(f"Error processing batch {batch_num}: {e}")
                 continue
         
-        # Save checkpoint for next incremental sync
+        # Save checkpoint
         save_checkpoint(sync_start_time)
         
         elapsed_time = time.time() - start_time
