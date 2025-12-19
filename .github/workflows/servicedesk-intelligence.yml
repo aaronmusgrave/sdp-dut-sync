@@ -2,122 +2,68 @@ name: ServiceDesk Sync
 
 on:
   schedule:
-    - cron: '*/90 * * * *'
+    - cron: '0 */2 * * *'  # Every 2 hours
   workflow_dispatch:
     inputs:
       force_full_sync:
-        description: 'Force full sync (ignore checkpoint)'
+        description: 'Force full sync (delete checkpoint)'
         required: false
         type: boolean
         default: false
 
-permissions:
-  contents: write
-
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: true
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests
-
-      # ============================================================
-      # DEBUG SECTION - Shows us what's happening
-      # ============================================================
-      - name: Debug workflow inputs
         run: |
-          echo "╔════════════════════════════════════════════════════════╗"
-          echo "║          WORKFLOW INPUT DEBUG                          ║"
-          echo "╚════════════════════════════════════════════════════════╝"
-          echo ""
-          echo "Event Name: \${{ github.event_name }}"
-          echo "Event Type: workflow_dispatch"
-          echo ""
-          echo "Input Value (raw):"
-          echo "  github.event.inputs.force_full_sync = '\${{ github.event.inputs.force_full_sync }}'"
-          echo ""
-          echo "Boolean Comparisons:"
-          echo "  == true  : \${{ github.event.inputs.force_full_sync == true }}"
-          echo "  == 'true': \${{ github.event.inputs.force_full_sync == 'true' }}"
-          echo "  != false : \${{ github.event.inputs.force_full_sync != false }}"
-          echo ""
-          echo "Ternary Result:"
-          echo "  \${{ github.event.inputs.force_full_sync == true && 'WOULD_BE_TRUE' || 'WOULD_BE_FALSE' }}"
-          echo ""
-          echo "Files in workspace:"
-          ls -la *.json 2>/dev/null || echo "  (no JSON files found)"
-          echo ""
-          echo "════════════════════════════════════════════════════════"
+          pip install requests
 
-      # Test both conditions
-      - name: Test condition (== true)
-        if: \${{ github.event.inputs.force_full_sync == true }}
-        run: |
-          echo "✅ Condition 1 PASSED: github.event.inputs.force_full_sync == true"
+      # RESTORE CHECKPOINT (if exists)
+      - name: Restore checkpoint from previous run
+        if: github.event.inputs.force_full_sync != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v3
+        with:
+          name: sync-checkpoint
 
-      - name: Test condition (== 'true')
-        if: \${{ github.event.inputs.force_full_sync == 'true' }}
-        run: |
-          echo "✅ Condition 2 PASSED: github.event.inputs.force_full_sync == 'true'"
-
-      # Actual cleanup (try both conditions)
-      - name: Force full sync cleanup
-        if: \${{ github.event.inputs.force_full_sync == true || github.event.inputs.force_full_sync == 'true' }}
+      # DELETE CHECKPOINT (only if force full sync)
+      - name: Force Full Sync - Delete checkpoint
+        if: github.event.inputs.force_full_sync == 'true'
         run: |
           echo "════════════════════════════════════════════════════════"
           echo "🔄 FORCE FULL SYNC - Deleting checkpoint files"
           echo "════════════════════════════════════════════════════════"
           rm -f sync_checkpoint.json
-          rm -f last_cleanup.json
           echo "✓ Checkpoint files deleted"
-          ls -la *.json 2>/dev/null || echo "✓ All checkpoint files removed"
           echo "════════════════════════════════════════════════════════"
 
-      # Show what we're about to pass to Python
-      - name: Environment variable debug
+      # RUN SYNC
+      - name: Run ServiceDesk Intelligence Sync
         env:
-          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync == true && 'true' || 'false' }}
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "ENVIRONMENT VARIABLE BEING PASSED TO PYTHON:"
-          echo "  FORCE_FULL_SYNC='\$FORCE_FULL_SYNC'"
-          echo "════════════════════════════════════════════════════════"
-
-      # ============================================================
-      # ACTUAL SYNC
-      # ============================================================
-      - name: Run sync
-        env:
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
           SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
           SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
           SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync == true && 'true' || 'false' }}
+          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync }}
         run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "STARTING SYNC"
-          echo "════════════════════════════════════════════════════════"
-          echo "FORCE_FULL_SYNC environment variable: \$FORCE_FULL_SYNC"
-          echo ""
           python scripts/sync_servicedesk_intelligence.py
 
-      - name: Commit changes
+      # SAVE CHECKPOINT (for next run)
+      - name: Save checkpoint for next run
         if: always()
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add -A
-          git diff --staged --quiet || git commit -m "Update sync checkpoint"
-          git push || true
+        uses: actions/upload-artifact@v3
+        with:
+          name: sync-checkpoint
+          path: sync_checkpoint.json
+          retention-days: 30
