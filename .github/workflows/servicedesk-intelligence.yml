@@ -1,8 +1,8 @@
-name: ServiceDesk Sync
+name: ServiceDesk Intelligence Sync
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # Every 2 hours
+    - cron: '*/30 * * * *'  # Every 30 minutes
   workflow_dispatch:
     inputs:
       force_full_sync:
@@ -14,24 +14,25 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           pip install requests
 
-      # RESTORE CHECKPOINT (if exists)
+      # RESTORE CHECKPOINT (if exists and not forcing full sync)
       - name: Restore checkpoint from previous run
         if: github.event.inputs.force_full_sync != 'true'
         continue-on-error: true
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: sync-checkpoint
 
@@ -44,6 +45,15 @@ jobs:
           echo "════════════════════════════════════════════════════════"
           rm -f sync_checkpoint.json
           echo "✓ Checkpoint files deleted"
+          ls -lah *.json 2>/dev/null || echo "No JSON files found"
+          echo "════════════════════════════════════════════════════════"
+
+      # SHOW ENVIRONMENT (for debugging)
+      - name: Show environment
+        run: |
+          echo "════════════════════════════════════════════════════════"
+          echo "ENVIRONMENT VARIABLE BEING PASSED TO PYTHON:"
+          echo "  FORCE_FULL_SYNC='\${{ github.event.inputs.force_full_sync }}'"
           echo "════════════════════════════════════════════════════════"
 
       # RUN SYNC
@@ -57,13 +67,19 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync }}
         run: |
+          echo "════════════════════════════════════════════════════════"
+          echo "STARTING SYNC"
+          echo "════════════════════════════════════════════════════════"
+          echo "FORCE_FULL_SYNC environment variable: \$FORCE_FULL_SYNC"
+          echo ""
           python scripts/sync_servicedesk_intelligence.py
 
       # SAVE CHECKPOINT (for next run)
       - name: Save checkpoint for next run
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sync-checkpoint
           path: sync_checkpoint.json
           retention-days: 30
+          if-no-files-found: warn
