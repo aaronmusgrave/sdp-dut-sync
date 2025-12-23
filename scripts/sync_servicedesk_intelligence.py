@@ -7,6 +7,7 @@ Changes in v3.2.5-CLOUD-FINAL:
 - Restored working pagination from previous versions
 - Uses input_data parameter with row_count and start_index
 - Keeps all null safety fixes from v3.2.4
+- Fixed HTTPError handling in fetch_conversations
 - Should fetch all 4,500+ tickets
 
 Architecture:
@@ -339,7 +340,7 @@ def fetch_conversations(ticket_id: str, retry_count: int = 0) -> dict:
         }
         
     except requests.HTTPError as e:
-        if e.response.status_code == 401:
+        if hasattr(e, 'response') and e.response and e.response.status_code == 401:
             CONVERSATION_401_ERRORS += 1
             
             # Retry with token refresh (max 2 retries)
@@ -368,7 +369,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     row_count = 100
     
     # Build query based on sync mode
-    if last_sync:
     if last_sync:
         last_sync_ms = int(last_sync.timestamp() * 1000)
         logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
