@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.5-CLOUD-FINAL
-Dual Data Source + Token Retry + Cloud API + Null Safety + Working Pagination
+ServiceDesk Intelligence Suite v3.2.6-CLOUD-FIXED
+Dual Data Source + Token Retry + Cloud API + Null Safety + WORKING PAGINATION
 
-Changes in v3.2.5-CLOUD-FINAL:
-- Restored working pagination from previous versions
-- Uses input_data parameter with row_count and start_index
+Changes in v3.2.6-CLOUD-FIXED:
+- FIXED: Pagination now uses nested list_info structure from v3.1.9
+- FIXED: Added proper Accept header (application/vnd.manageengine.sdp.v3+json)
+- FIXED: Added get_total_count, sort_field, sort_order parameters
+- FIXED: Check has_more_rows flag for reliable pagination
 - Keeps all null safety fixes from v3.2.4
-- Fixed HTTPError handling in fetch_conversations
-- Should fetch all 4,500+ tickets
+- Should now fetch all 4,500+ tickets successfully
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -58,7 +59,7 @@ BATCH_PAUSE_SECONDS = 3.0
 CONVERSATION_FETCH_DELAY = 0.3  # Delay every 10 conversations
 
 # Version
-VERSION = "v3.2.5-CLOUD-FINAL"
+VERSION = "v3.2.6-CLOUD-FIXED"
 
 # ============================================================
 # LOGGING SETUP
@@ -361,46 +362,63 @@ def fetch_conversations(ticket_id: str, retry_count: int = 0) -> dict:
         return {"exchanges": [], "count": 0}
 
 def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
-    """Fetch tickets from ServiceDesk Plus API with working pagination."""
+    """Fetch tickets from ServiceDesk Plus API with working pagination from v3.1.9."""
     ensure_token_valid()
     
     all_tickets = []
     page = 1
     row_count = 100
     
-    # Build query based on sync mode
+    # Build headers with proper Accept header
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.manageengine.sdp.v3+json"  # IMPORTANT!
+    }
+    
+    # Build search criteria for incremental sync
+    search_criteria = []
     if last_sync:
         last_sync_ms = int(last_sync.timestamp() * 1000)
+        search_criteria = [
+            {
+                "field": "created_time",
+                "condition": "greater than",
+                "value": str(last_sync_ms),
+                "logical_operator": "OR"
+            },
+            {
+                "field": "last_updated_time",
+                "condition": "greater than",
+                "value": str(last_sync_ms)
+            }
+        ]
         logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
-        search_criteria = {
-            "field": "last_updated_time",
-            "condition": "greater than",
-            "value": str(last_sync_ms)
-        }
     else:
         logger.info(f"📊 Fetching all tickets (full sync)...")
-        search_criteria = None
+    
+    # Build list_info with NESTED structure (this is the key!)
+    list_info = {
+        "list_info": {  # <-- NESTED STRUCTURE!
+            "row_count": row_count,
+            "start_index": 1,
+            "get_total_count": True,
+            "sort_field": "created_time",
+            "sort_order": "desc"
+        }
+    }
+    
+    # Add search criteria if incremental
+    if search_criteria:
+        list_info["list_info"]["search_criteria"] = search_criteria
+    
+    url = f"https://{SDP_DOMAIN}/api/v3/requests"
     
     while True:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests"
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {TOKEN}",
-            "Content-Type": "application/json"
-        }
+        # Update start index for pagination
+        list_info["list_info"]["start_index"] = (page - 1) * row_count + 1
         
-        # Calculate start index for this page
-        start_index = (page - 1) * row_count + 1
-        
-        # Build list_info
-        list_info = {
-            "row_count": row_count,
-            "start_index": start_index
-        }
-        
-        if search_criteria:
-            list_info["search_criteria"] = search_criteria
-        
-        # Use input_data parameter (standard ServiceDesk API)
+        # Pass as input_data parameter
         params = {"input_data": json.dumps(list_info)}
         
         try:
@@ -412,38 +430,36 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             requests_data = data.get('requests', [])
             
             if not requests_data:
-                logger.info(f"  Page {page}: Last page reached")
+                logger.info(f"  Page {page}: No more tickets")
                 break
             
             all_tickets.extend(requests_data)
             logger.info(f"  Page {page}: {len(requests_data)} tickets (total: {len(all_tickets)})")
             
-            # Check if we got less than requested (last page)
+            # Check has_more_rows flag
+            list_info_response = data.get('list_info', {})
+            has_more = list_info_response.get('has_more_rows', False)
+            
+            if not has_more:
+                logger.info(f"  Page {page}: No more pages (has_more_rows=False)")
+                break
+            
+            # Also check if we got less than requested
             if len(requests_data) < row_count:
-                logger.info(f"  Page {page}: Last page reached")
+                logger.info(f"  Page {page}: Last page (got {len(requests_data)} < {row_count})")
                 break
             
             page += 1
+            time.sleep(0.1)  # Small delay between pages
             
         except Exception as e:
             logger.error(f"Failed to fetch tickets on page {page}: {e}")
             break
     
-    # Client-side filtering if needed for incremental
-    if last_sync and all_tickets:
-        last_sync_ms = int(last_sync.timestamp() * 1000)
-        original_count = len(all_tickets)
-        all_tickets = [
-            t for t in all_tickets 
-            if t.get('last_updated_time', {}).get('value', 0) > last_sync_ms
-        ]
-        if original_count != len(all_tickets):
-            logger.info(f"  ✓ Filtered from {original_count} to {len(all_tickets)} tickets")
-    
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
     stats['tickets_fetched'] = len(all_tickets)
     
-    # Determine new vs updated
+    # Determine new vs updated (for incremental syncs)
     if last_sync and all_tickets:
         new_count = 0
         updated_count = 0
@@ -883,7 +899,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  Dual Data Source + Token Retry + Cloud API + Working Pagination")
+    logger.info("  Dual Data Source + Cloud API + WORKING PAGINATION")
     logger.info("=" * 60)
 
 # ============================================================
