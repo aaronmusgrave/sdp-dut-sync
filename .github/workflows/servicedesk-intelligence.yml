@@ -1,11 +1,24 @@
-name: ServiceDesk Sync Test
+name: ServiceDesk Intelligence Sync
 
 on:
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      force_full_sync:
+        description: 'Force full sync'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: servicedesk-sync
+  cancel-in-progress: false
 
 jobs:
-  test:
+  sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     
     steps:
       - name: Checkout
@@ -16,28 +29,55 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Test 1 - Check file exists
-        run: |
-          echo "Test 1: Checking if script exists"
-          ls -la scripts/
-          echo ""
-          if [ -f scripts/sync_servicedesk_intelligence.py ]; then
-            echo "✓ Script found"
-          else
-            echo "❌ Script NOT found"
-            exit 1
-          fi
+      - name: Install dependencies
+        run: pip install requests
 
-      - name: Test 2 - Try to run Python
+      - name: Diagnostic - Check everything
         run: |
-          echo "Test 2: Running Python script"
+          echo "=== Python ===" 
           python --version
+          python -c "import sys; print(sys.executable)"
           echo ""
-          echo "Attempting to run script..."
-          python scripts/sync_servicedesk_intelligence.py --help || echo "Script executed but may have failed"
+          echo "=== Script ===" 
+          ls -lh scripts/sync_servicedesk_intelligence.py
+          echo ""
+          echo "=== Syntax Check ===" 
+          python -m py_compile scripts/sync_servicedesk_intelligence.py
+          echo "✓ Syntax OK"
+          echo ""
+          echo "=== First 50 lines ===" 
+          head -50 scripts/sync_servicedesk_intelligence.py
 
-      - name: Test 3 - Show what happened
-        if: always()
+      - name: Restore checkpoint
+        if: github.event.inputs.force_full_sync != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-checkpoint
+
+      - name: Delete checkpoint
+        if: github.event.inputs.force_full_sync == 'true'
+        run: rm -f sync_checkpoint.json
+
+      - name: Run sync with full error capture
+        env:
+          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
+          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync }}
         run: |
-          echo "Test complete"
-          ls -la
+          echo "Starting sync..."
+          python -u scripts/sync_servicedesk_intelligence.py 2>&1
+          echo "Sync completed with exit code: \$?"
+
+      - name: Save checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-checkpoint
+          path: sync_checkpoint.json
+          retention-days: 30
+          if-no-files-found: warn
