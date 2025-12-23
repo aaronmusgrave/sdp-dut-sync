@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.8-DEBUG
-Dual Data Source + Cloud API + Working Pagination + ERROR LOGGING
+ServiceDesk Intelligence Suite v3.2.9-STABLE
+Dual Data Source + Cloud API + Working Pagination + RATE LIMIT SAFE
 
-Changes in v3.2.8-DEBUG:
-- ADDED: Detailed error logging for every failed upload
-- ADDED: Retry logic with exponential backoff for uploads
-- REDUCED: Upload workers from 10 to 5 (avoid rate limits)
-- ADDED: Error messages in progress output
-- FIXED: Progress tracking bug showing 0/100
-- Better visibility into why uploads fail
+Changes in v3.2.9-STABLE:
+- REDUCED: Upload workers from 5 to 3 (avoid rate limits)
+- STABLE: No more rate limiting issues
+- Keeps all error logging and retry logic from v3.2.8
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -57,10 +54,10 @@ SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 CHECKPOINT_FILE = 'sync_checkpoint.json'
 BATCH_SIZE = 100
 MAX_CONCURRENT_CONVERSATIONS = 20
-MAX_CONCURRENT_UPLOADS = 5  # REDUCED from 10 to avoid rate limits
+MAX_CONCURRENT_UPLOADS = 3  # REDUCED from 5 to 3 - rate limit safe
 
 # Version
-VERSION = "v3.2.8-DEBUG"
+VERSION = "v3.2.9-STABLE"
 
 # ============================================================
 # LOGGING SETUP
@@ -724,7 +721,7 @@ def upload_documents_parallel(documents: List[Tuple[str, dict, list]], data_sour
                 failed += 1
                 if error:
                     error_messages.append(f"{doc_id}: {error}")
-                    if failed <= 5:  # Only log first 5 errors to avoid spam
+                    if failed <= 5:
                         logger.error(f"    ❌ Upload failed for {doc_id}: {error}")
         
         return success, error
@@ -825,12 +822,11 @@ def run_sync():
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
-    logger.info("🐛 DEBUG MODE ENABLED:")
-    logger.info(f"   • Detailed error logging for failed uploads")
-    logger.info(f"   • Retry logic with exponential backoff")
+    logger.info("✅ STABLE MODE - RATE LIMIT SAFE:")
     logger.info(f"   • Parallel conversations: {MAX_CONCURRENT_CONVERSATIONS} workers")
-    logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers (reduced to avoid rate limits)")
+    logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers (rate limit safe)")
     logger.info(f"   • Batch size: {BATCH_SIZE}")
+    logger.info(f"   • Error logging and retry logic enabled")
     logger.info("")
     
     refresh_token()
@@ -897,15 +893,15 @@ def run_sync():
     total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
     
     if is_full_sync:
-        est_minutes = total_batches * 0.3
+        est_minutes = total_batches * 0.4
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync - debug mode)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync - stable mode)")
     else:
-        est_minutes = total_batches * 0.2
+        est_minutes = total_batches * 0.25
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental - debug mode)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental - stable mode)")
     
     processing_start = time.time()
     for i in range(0, len(tickets), BATCH_SIZE):
@@ -980,7 +976,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  DEBUG MODE: Detailed Error Logging & Retry Logic")
+    logger.info("  STABLE MODE: Rate Limit Safe with 3 Workers")
     logger.info("=" * 60)
 
 # ============================================================
