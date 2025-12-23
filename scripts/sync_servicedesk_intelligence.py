@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.2-PRODUCTION-FIXED
-Dual Data Source + Token Retry Logic + Rate Limit Handling + Secret Cleaning
+ServiceDesk Intelligence Suite v3.2.3-PRODUCTION
+Dual Data Source + Token Retry Logic + Rate Limit Handling + API Fix
+
+Changes in v3.2.3:
+- Fixed ticket fetching with simpler API pagination
+- Removed problematic input_data parameter format
+- Added fallback to client-side filtering for incremental sync
 
 Changes in v3.2.2-FIXED:
 - Re-added secret cleaning (strip quotes, backslashes, whitespace)
-- All other v3.2.2 features intact
-
-Changes in v3.2.2:
 - Added 401 error retry logic with automatic token refresh
 - Proactive token refresh (when < 10 minutes remaining)
 - Rate limit handling (delays between conversation fetches)
-- Enhanced error tracking and recovery
-- Improved logging for troubleshooting
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -62,7 +62,7 @@ BATCH_PAUSE_SECONDS = 3.0
 CONVERSATION_FETCH_DELAY = 0.3  # Delay every 10 conversations
 
 # Version
-VERSION = "v3.2.2-PRODUCTION-FIXED"
+VERSION = "v3.2.3-PRODUCTION"
 
 # ============================================================
 # LOGGING SETUP
@@ -365,33 +365,17 @@ def fetch_conversations(ticket_id: str, retry_count: int = 0) -> dict:
         return {"exchanges": [], "count": 0}
 
 def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
-    """Fetch tickets from ServiceDesk Plus API."""
+    """Fetch tickets from ServiceDesk Plus API with simpler pagination."""
     ensure_token_valid()
     
     all_tickets = []
     page = 1
+    row_count = 100
     
-    # Build query based on sync mode
     if last_sync:
-        # Incremental: fetch tickets modified since last sync
-        last_sync_ms = int(last_sync.timestamp() * 1000)
-        logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
-        list_info = json.dumps({
-            "row_count": 100,
-            "start_index": 1,
-            "search_criteria": {
-                "field": "last_updated_time",
-                "condition": "greater than",
-                "value": str(last_sync_ms)
-            }
-        })
+        logger.info(f"📊 Fetching all tickets (will filter by date: {last_sync.strftime('%Y-%m-%d %H:%M:%S')})...")
     else:
-        # Full sync: fetch all tickets
         logger.info(f"📊 Fetching all tickets (full sync)...")
-        list_info = json.dumps({
-            "row_count": 100,
-            "start_index": 1
-        })
     
     while True:
         url = f"https://{SDP_DOMAIN}/api/v3/requests"
@@ -400,14 +384,20 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             "Content-Type": "application/json"
         }
         
-        # Update page number in list_info
-        list_info_dict = json.loads(list_info)
-        list_info_dict['start_index'] = (page - 1) * 100 + 1
-        
-        params = {"input_data": json.dumps(list_info_dict)}
+        # Calculate start index
+        start_index = (page - 1) * row_count + 1
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
+            # Use simple URL parameters (works better with ServiceDesk Plus API)
+            response = requests.get(
+                url,
+                headers=headers,
+                params={
+                    "start_index": start_index,
+                    "row_count": row_count
+                },
+                timeout=60
+            )
             response.raise_for_status()
             stats['api_calls'] += 1
             
@@ -422,7 +412,7 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             logger.info(f"  Page {page}: {len(requests_data)} tickets (total: {len(all_tickets)})")
             
             # Check if we got less than requested (last page)
-            if len(requests_data) < 100:
+            if len(requests_data) < row_count:
                 logger.info(f"  Page {page}: Last page reached")
                 break
             
@@ -431,6 +421,17 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
         except Exception as e:
             logger.error(f"Failed to fetch tickets on page {page}: {e}")
             break
+    
+    # Filter by last_sync if needed (client-side filtering)
+    if last_sync:
+        last_sync_ms = int(last_sync.timestamp() * 1000)
+        logger.info(f"  Filtering tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
+        original_count = len(all_tickets)
+        all_tickets = [
+            t for t in all_tickets 
+            if t.get('last_updated_time', {}).get('value', 0) > last_sync_ms
+        ]
+        logger.info(f"  ✓ Filtered from {original_count} to {len(all_tickets)} tickets")
     
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
     stats['tickets_fetched'] = len(all_tickets)
@@ -830,7 +831,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  Dual Data Source + Token Retry + Rate Limit Handling")
+    logger.info("  Dual Data Source + Token Retry + API Fix")
     logger.info("=" * 60)
 
 # ============================================================
