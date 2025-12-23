@@ -1,133 +1,53 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.1-PRODUCTION
-=================================================
+ServiceDesk Intelligence Suite v3.2.2-PRODUCTION
+Dual Data Source + Token Retry Logic + Rate Limit Handling
 
-DUAL DATA SOURCE ARCHITECTURE:
-- servicedesk: ALL tickets (upsert updates - efficient)
-- servicedesk-active: ONLY active tickets (rebuild each sync - accurate)
+Changes in v3.2.2:
+- Added 401 error retry logic with automatic token refresh
+- Proactive token refresh (when < 10 minutes remaining)
+- Rate limit handling (delays between conversation fetches)
+- Enhanced error tracking and recovery
+- Improved logging for troubleshooting
 
-FEATURES:
-- Incremental sync rebuilds servicedesk-active completely (no stale data)
-- Main servicedesk gets efficient upserts only
-- Fixed timestamp conversion and status detection
-- Full sync option for clean slate
+Architecture:
+- servicedesk: All tickets (active + closed) with UPSERT updates
+- servicedesk-active: Only active tickets, completely rebuilt each sync
 """
 
 import os
 import sys
-import requests
 import json
-import logging
 import time
+import requests
+import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any, Tuple, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote
-import re
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from html import unescape
+from typing import Dict, List, Optional, Tuple
 
 # ============================================================
-# VERSION & CONFIGURATION
+# CONFIGURATION
 # ============================================================
+DUST_API_KEY = os.getenv('DUST_API_KEY')
+DUST_WORKSPACE_ID = os.getenv('DUST_WORKSPACE_ID')
+DUST_MAIN_DATA_SOURCE = 'servicedesk'          # All tickets
+DUST_ACTIVE_DATA_SOURCE = 'servicedesk-active'  # Active only
 
-VERSION = "3.2.1-PRODUCTION"
+SDP_DOMAIN = os.getenv('SDP_DOMAIN')
+SDP_CLIENT_ID = os.getenv('SDP_CLIENT_ID')
+SDP_CLIENT_SECRET = os.getenv('SDP_CLIENT_SECRET')
+SDP_REFRESH_TOKEN = os.getenv('SDP_REFRESH_TOKEN')
 
-# Validate environment variables first
-def validate_required_env_vars():
-    """Validate all required environment variables are set"""
-    required = {
-        'DUST_API_KEY': 'Dust API key',
-        'DUST_WORKSPACE_ID': 'Dust workspace ID',
-        'SDP_DOMAIN': 'ServiceDesk Plus domain',
-        'SDP_CLIENT_ID': 'ServiceDesk Plus OAuth client ID',
-        'SDP_CLIENT_SECRET': 'ServiceDesk Plus OAuth client secret',
-        'SDP_REFRESH_TOKEN': 'ServiceDesk Plus OAuth refresh token'
-    }
-    
-    missing = []
-    for var, description in required.items():
-        value = os.environ.get(var)
-        if not value or not value.strip():
-            missing.append(f"{var} ({description})")
-    
-    if missing:
-        print("=" * 60)
-        print("❌ MISSING REQUIRED ENVIRONMENT VARIABLES")
-        print("=" * 60)
-        for var in missing:
-            print(f"  • {var}")
-        print("=" * 60)
-        sys.exit(1)
-    
-    sdp_domain = os.environ.get('SDP_DOMAIN', '').strip()
-    if sdp_domain:
-        sdp_domain = sdp_domain.replace('https://', '').replace('http://', '')
-        sdp_domain = sdp_domain.lstrip('\\').lstrip('/').rstrip('/').strip()
-        if not sdp_domain or len(sdp_domain) < 5:
-            print("❌ INVALID SDP_DOMAIN")
-            sys.exit(1)
-        os.environ['SDP_DOMAIN'] = sdp_domain
-    
-    return True
-
-print("=" * 60)
-print("VALIDATING ENVIRONMENT VARIABLES")
-print("=" * 60)
-validate_required_env_vars()
-print("=" * 60)
-print("")
-
-# Configuration
-DUST_API_KEY = os.environ.get("DUST_API_KEY", "").strip().lstrip('\\').lstrip('/')
-DUST_WORKSPACE_ID = os.environ.get("DUST_WORKSPACE_ID", "MotoRad").strip().lstrip('\\').lstrip('/')
-
-# DUAL DATA SOURCES
-DUST_DATA_SOURCE_MAIN = "servicedesk"  # ALL tickets (historical + active)
-DUST_DATA_SOURCE_ACTIVE = "servicedesk-active"  # ONLY active tickets
-
-DUST_API_URL_MAIN = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_MAIN}"
-DUST_API_URL_ACTIVE = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{DUST_DATA_SOURCE_ACTIVE}"
-
-SDP_DOMAIN = os.environ.get("SDP_DOMAIN", "").strip()
-SDP_CLIENT_ID = os.environ.get("SDP_CLIENT_ID", "").strip().lstrip('\\').lstrip('/')
-SDP_CLIENT_SECRET = os.environ.get("SDP_CLIENT_SECRET", "").strip().lstrip('\\').lstrip('/')
-SDP_REFRESH_TOKEN = os.environ.get("SDP_REFRESH_TOKEN", "").strip().lstrip('\\').lstrip('/')
-SDP_BASE_URL = f"https://{SDP_DOMAIN}"
-
-ZOHO_OAUTH_URL = os.environ.get("ZOHO_OAUTH_URL", "https://accounts.zoho.com/oauth/v2/token")
-
-# Sync Configuration
-FORCE_FULL_SYNC = os.environ.get("FORCE_FULL_SYNC", "false").lower() == "true"
-CHECKPOINT_FILE = "sync_checkpoint.json"
-
-print(f"✓ Configuration loaded")
-print(f"  Workspace: {DUST_WORKSPACE_ID}")
-print(f"  Main Data Source: {DUST_DATA_SOURCE_MAIN} (all tickets)")
-print(f"  Active Data Source: {DUST_DATA_SOURCE_ACTIVE} (active only)")
-print(f"  SDP Domain: {SDP_DOMAIN}")
-print(f"  Version: v{VERSION}")
-print(f"  Sync Mode: {'FULL SYNC (forced)' if FORCE_FULL_SYNC else 'INCREMENTAL'}")
-print("")
-
-# Processing Configuration
+CHECKPOINT_FILE = 'sync_checkpoint.json'
 BATCH_SIZE = 50
-MAX_CONCURRENT_CONVERSATIONS = 8
-MAX_CONCURRENT_UPLOADS = 3
-MAX_CONCURRENT_DELETES = 20
-RETRY_ATTEMPTS = 5
-BATCH_DELAY = 3.0
-MAX_429_RETRIES = 3
+BATCH_PAUSE_SECONDS = 3.0
+CONVERSATION_FETCH_DELAY = 0.3  # Delay every 10 conversations
 
-# Debug Configuration
-DEBUG_STATUS_DETECTION = True
+# Version
+VERSION = "v3.2.2-PRODUCTION"
 
 # ============================================================
 # LOGGING SETUP
 # ============================================================
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -136,1085 +56,804 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# METRICS TRACKING
+# GLOBAL STATE
 # ============================================================
+TOKEN = None
+TOKEN_EXPIRY = None
+CONVERSATION_401_ERRORS = 0
+MAX_401_BEFORE_REFRESH = 5
 
-METRICS = {
-    'total_tickets_fetched': 0,
+# Statistics
+stats = {
+    'tickets_fetched': 0,
+    'tickets_processed': 0,
+    'main_uploaded': 0,
+    'active_uploaded': 0,
+    'main_deleted': 0,
+    'active_deleted': 0,
     'new_tickets': 0,
     'updated_tickets': 0,
-    'total_processed': 0,
-    'total_uploaded_main': 0,
-    'total_uploaded_active': 0,
-    'skipped': 0,
-    'failed_uploads': 0,
-    'retried_uploads': 0,
-    'rate_limited': 0,
     'conversations_fetched': 0,
-    'active_tickets': 0,
-    'closed_tickets': 0,
+    'upload_failures': 0,
+    'retries': 0,
+    'rate_limited': 0,
+    'api_calls': 0,
+    'active_count': 0,
+    'closed_count': 0,
     'service_requests': 0,
     'incidents': 0,
-    'total_conversations': 0,
-    'api_calls': 0,
-    'dust_documents_found_main': 0,
-    'dust_documents_deleted_main': 0,
-    'dust_documents_found_active': 0,
-    'dust_documents_deleted_active': 0,
-    'sync_mode': 'full' if FORCE_FULL_SYNC else 'incremental',
-    'status_detection_debug': [],
-    'upload_errors': {}
+    'total_exchanges': 0
 }
+
+# ============================================================
+# TOKEN MANAGEMENT
+# ============================================================
+def refresh_token():
+    """Refresh OAuth token and update expiry."""
+    global TOKEN, TOKEN_EXPIRY, CONVERSATION_401_ERRORS
+    
+    logger.info("🔑 Fetching new token...")
+    
+    url = "https://accounts.zoho.com/oauth/v2/token"
+    params = {
+        "refresh_token": SDP_REFRESH_TOKEN,
+        "client_id": SDP_CLIENT_ID,
+        "client_secret": SDP_CLIENT_SECRET,
+        "grant_type": "refresh_token"
+    }
+    
+    try:
+        response = requests.post(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        TOKEN = data.get('access_token')
+        expires_in = data.get('expires_in', 3600)
+        TOKEN_EXPIRY = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        
+        # Reset 401 error counter on successful refresh
+        CONVERSATION_401_ERRORS = 0
+        
+        logger.info(f"✓ Token refreshed successfully (expires in {expires_in // 60} minutes)")
+        
+    except Exception as e:
+        logger.error(f"Failed to refresh token: {e}")
+        raise
+
+def ensure_token_valid():
+    """Ensure token is valid, refresh if expired or expiring soon."""
+    global TOKEN, TOKEN_EXPIRY
+    
+    # Check if token is expired or expiring in next 10 minutes
+    if not TOKEN or not TOKEN_EXPIRY:
+        refresh_token()
+    else:
+        time_remaining = (TOKEN_EXPIRY - datetime.now(timezone.utc)).total_seconds()
+        if time_remaining < 600:  # Less than 10 minutes
+            logger.info(f"Token expiring in {int(time_remaining/60)} minutes - refreshing proactively...")
+            refresh_token()
 
 # ============================================================
 # CHECKPOINT MANAGEMENT
 # ============================================================
-
 def load_checkpoint() -> Optional[datetime]:
-    """Load last sync timestamp from checkpoint file"""
-    if not os.path.exists(CHECKPOINT_FILE):
-        logger.info("  No checkpoint found - will perform full sync")
-        return None
+    """Load last sync timestamp from checkpoint file."""
+    if os.path.exists(CHECKPOINT_FILE):
+        try:
+            with open(CHECKPOINT_FILE, 'r') as f:
+                data = json.load(f)
+                timestamp_str = data.get('last_sync_timestamp')
+                if timestamp_str:
+                    last_sync = datetime.fromisoformat(timestamp_str)
+                    logger.info(f"  Checkpoint found: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+                    return last_sync
+        except Exception as e:
+            logger.warning(f"Failed to load checkpoint: {e}")
     
-    try:
-        with open(CHECKPOINT_FILE, 'r') as f:
-            data = json.load(f)
-            last_sync = datetime.fromisoformat(data['last_sync_time'])
-            logger.info(f"  Checkpoint found: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
-            return last_sync
-    except Exception as e:
-        logger.warning(f"  Error reading checkpoint: {e} - will perform full sync")
-        return None
+    logger.info("  No checkpoint found - will perform full sync")
+    return None
 
-def save_checkpoint(sync_time: datetime):
-    """Save sync timestamp to checkpoint file"""
+def save_checkpoint(timestamp: datetime):
+    """Save sync timestamp to checkpoint file."""
     try:
         with open(CHECKPOINT_FILE, 'w') as f:
             json.dump({
-                'last_sync_time': sync_time.isoformat(),
-                'version': VERSION,
-                'sync_completed': datetime.now().isoformat()
+                'last_sync_timestamp': timestamp.isoformat(),
+                'version': VERSION
             }, f, indent=2)
-        logger.info(f"  ✓ Checkpoint saved: {sync_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"  ✓ Checkpoint saved: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
     except Exception as e:
         logger.warning(f"Failed to save checkpoint: {e}")
 
-def get_sync_parameters() -> Tuple[Optional[datetime], str]:
-    """
-    Determine sync mode and parameters
-    Returns: (last_sync_time, sync_mode)
-    """
-    if FORCE_FULL_SYNC:
-        logger.info("  🔄 FORCE_FULL_SYNC enabled - performing full sync")
-        return None, 'full'
-    
-    last_sync = load_checkpoint()
-    if last_sync is None:
-        logger.info("  🔄 No previous sync - performing full sync")
-        return None, 'full'
-    
-    # Check if checkpoint is too old (>7 days = force full sync)
-    age = datetime.now() - last_sync
-    if age > timedelta(days=7):
-        logger.info(f"  ⚠️  Checkpoint is {age.days} days old - performing full sync")
-        return None, 'full'
-    
-    logger.info(f"  ✓ Performing incremental sync since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
-    return last_sync, 'incremental'
-
 # ============================================================
-# TOKEN MANAGER
+# DUST API - DOCUMENT MANAGEMENT
 # ============================================================
-
-class TokenManager:
-    """Manages ServiceDesk Plus OAuth tokens with automatic refresh"""
+def fetch_all_documents_from_dust(data_source_id: str) -> List[str]:
+    """Fetch all document IDs from a Dust data source."""
+    logger.info(f"  Fetching existing documents from {data_source_id}...")
     
-    def __init__(self):
-        self.access_token = None
-        self.token_expiry = None
-        self.refresh_buffer = timedelta(minutes=5)
-        
-    def get_token(self) -> str:
-        """Get valid access token, refreshing if needed"""
-        now = datetime.now(timezone.utc)
-        
-        if (self.access_token is None or 
-            self.token_expiry is None or 
-            now >= (self.token_expiry - self.refresh_buffer)):
-            self._refresh_token()
-        
-        return self.access_token
-    
-    def _refresh_token(self):
-        """Refresh the access token"""
-        if not self.access_token:
-            logger.info("🔑 Fetching new token...")
-        else:
-            logger.info("🔄 Token expiring soon, refreshing...")
-        
-        payload = {
-            'client_id': SDP_CLIENT_ID,
-            'client_secret': SDP_CLIENT_SECRET,
-            'refresh_token': SDP_REFRESH_TOKEN,
-            'grant_type': 'refresh_token'
-        }
-        
-        try:
-            response = requests.post(ZOHO_OAUTH_URL, data=payload, timeout=30)
-            response.raise_for_status()
-            
-            token_data = response.json()
-            self.access_token = token_data['access_token']
-            expires_in = token_data.get('expires_in', 3300)
-            self.token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-            
-            logger.info(f"✓ Token refreshed successfully (expires in {expires_in/60:.0f} minutes)")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to refresh token: {e}")
-            raise
-
-token_manager = TokenManager()
-
-# ============================================================
-# HTTP SESSION
-# ============================================================
-
-def create_session() -> requests.Session:
-    """Create requests session with retry logic"""
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=RETRY_ATTEMPTS,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE"]
-    )
-    adapter = HTTPAdapter(
-        max_retries=retry_strategy,
-        pool_connections=50,
-        pool_maxsize=50
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-
-session = create_session()
-
-# ============================================================
-# DUST API - DUAL DATA SOURCE MANAGEMENT
-# ============================================================
-
-def fetch_dust_documents(data_source_url: str, limit: int = 1000, offset: int = 0) -> List[str]:
-    """Fetch document IDs from Dust data source"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    url = f"{data_source_url}/documents"
-    params = {
-        'limit': limit,
-        'offset': offset
-    }
-    
-    try:
-        response = session.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        documents = data.get('documents', [])
-        doc_ids = [doc.get('document_id') for doc in documents if doc.get('document_id')]
-        
-        return doc_ids
-    except Exception as e:
-        logger.error(f"Failed to fetch Dust documents: {e}")
-        return []
-
-def fetch_all_dust_documents(data_source_url: str, source_name: str) -> Set[str]:
-    """Fetch all document IDs from Dust"""
-    all_doc_ids = set()
+    all_doc_ids = []
     offset = 0
     limit = 1000
     
-    logger.info(f"  Fetching existing documents from {source_name}...")
-    
     while True:
-        doc_ids = fetch_dust_documents(data_source_url, limit=limit, offset=offset)
-        
-        if not doc_ids:
-            break
-        
-        all_doc_ids.update(doc_ids)
-        logger.info(f"    Fetched {len(doc_ids)} documents (total: {len(all_doc_ids)})")
-        
-        if len(doc_ids) < limit:
-            break
-        
-        offset += limit
-        time.sleep(0.5)
-    
-    logger.info(f"  ✓ Found {len(all_doc_ids)} documents in {source_name}")
-    return all_doc_ids
-
-def delete_dust_document(data_source_url: str, doc_id: str) -> bool:
-    """Delete a document from Dust"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    
-    url = f"{data_source_url}/documents/{doc_id}"
-    
-    try:
-        response = session.delete(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to delete document {doc_id}: {e}")
-        return False
-
-def delete_all_documents(data_source_url: str, doc_ids: Set[str], source_name: str) -> int:
-    """Delete all documents from Dust in parallel"""
-    if not doc_ids:
-        return 0
-    
-    logger.info(f"  Deleting {len(doc_ids)} existing documents from {source_name}...")
-    deleted_count = 0
-    
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DELETES) as executor:
-        futures = {executor.submit(delete_dust_document, data_source_url, doc_id): doc_id for doc_id in doc_ids}
-        
-        for future in as_completed(futures):
-            try:
-                if future.result():
-                    deleted_count += 1
-                    if deleted_count % 100 == 0:
-                        logger.info(f"    Deleted {deleted_count}/{len(doc_ids)} documents...")
-            except Exception as e:
-                logger.error(f"Exception deleting document: {e}")
-    
-    logger.info(f"  ✓ Deleted {deleted_count}/{len(doc_ids)} documents from {source_name}")
-    return deleted_count
-
-# ============================================================
-# CLEAN SLATE FOR FULL SYNC - BOTH DATA SOURCES
-# ============================================================
-
-def clean_slate_full_sync():
-    """
-    For full sync: Delete ALL existing documents from BOTH data sources
-    """
-    logger.info("\n" + "=" * 60)
-    logger.info("FULL SYNC: CLEANING BOTH DATA SOURCES")
-    logger.info("=" * 60)
-    
-    # Clean main data source
-    logger.info("\n📦 Cleaning MAIN data source (servicedesk)...")
-    dust_doc_ids_main = fetch_all_dust_documents(DUST_API_URL_MAIN, "servicedesk")
-    if dust_doc_ids_main:
-        deleted = delete_all_documents(DUST_API_URL_MAIN, dust_doc_ids_main, "servicedesk")
-        METRICS['dust_documents_found_main'] = len(dust_doc_ids_main)
-        METRICS['dust_documents_deleted_main'] = deleted
-    else:
-        logger.info("  ✓ Main data source is empty")
-    
-    # Clean active data source
-    logger.info("\n⚡ Cleaning ACTIVE data source (servicedesk-active)...")
-    dust_doc_ids_active = fetch_all_dust_documents(DUST_API_URL_ACTIVE, "servicedesk-active")
-    if dust_doc_ids_active:
-        deleted = delete_all_documents(DUST_API_URL_ACTIVE, dust_doc_ids_active, "servicedesk-active")
-        METRICS['dust_documents_found_active'] = len(dust_doc_ids_active)
-        METRICS['dust_documents_deleted_active'] = deleted
-    else:
-        logger.info("  ✓ Active data source is empty")
-    
-    logger.info("\n✓ Both data sources cleaned - ready for fresh upload")
-    logger.info("=" * 60)
-
-def clean_active_incremental():
-    """
-    For incremental sync: Clean ONLY servicedesk-active (to remove stale closed tickets)
-    Main servicedesk keeps its data and just gets upserts
-    """
-    logger.info("\n" + "=" * 60)
-    logger.info("INCREMENTAL SYNC: CLEANING ACTIVE DATA SOURCE")
-    logger.info("=" * 60)
-    logger.info("  📦 Main data source (servicedesk) will receive upserts only")
-    logger.info("  ⚡ Active data source (servicedesk-active) will be rebuilt fresh")
-    logger.info("")
-    
-    # Clean active data source only
-    logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
-    dust_doc_ids_active = fetch_all_dust_documents(DUST_API_URL_ACTIVE, "servicedesk-active")
-    if dust_doc_ids_active:
-        deleted = delete_all_documents(DUST_API_URL_ACTIVE, dust_doc_ids_active, "servicedesk-active")
-        METRICS['dust_documents_found_active'] = len(dust_doc_ids_active)
-        METRICS['dust_documents_deleted_active'] = deleted
-        logger.info(f"  ✓ Deleted {deleted} documents from servicedesk-active")
-    else:
-        logger.info("  ✓ Active data source is empty")
-    
-    logger.info("✓ Active data source cleaned - will rebuild with current active tickets only")
-    logger.info("=" * 60)
-
-# ============================================================
-# SERVICEDESK PLUS API
-# ============================================================
-
-def convert_datetime_to_sdp_timestamp(dt: datetime) -> int:
-    """Convert datetime to ServiceDesk Plus millisecond timestamp"""
-    return int(dt.timestamp() * 1000)
-
-def fetch_tickets_from_sdp(start_index: int = 1, row_count: int = 100, last_sync_time: Optional[datetime] = None) -> Dict:
-    """Fetch tickets from ServiceDesk Plus API"""
-    access_token = token_manager.get_token()
-    
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    
-    list_info = {
-        "list_info": {
-            "row_count": row_count,
-            "start_index": start_index,
-            "sort_field": "last_updated_time",
-            "sort_order": "desc"
-        }
-    }
-    
-    # Add filter for incremental sync
-    if last_sync_time is not None:
-        timestamp_ms = convert_datetime_to_sdp_timestamp(last_sync_time)
-        
-        list_info["list_info"]["filter_by"] = {
-            "name": "last_updated_time",
-            "value": timestamp_ms,
-            "comparator": "greater_than"
-        }
-    
-    params = {'input_data': json.dumps(list_info)}
-    url = f"{SDP_BASE_URL}/api/v3/requests"
-    
-    try:
-        METRICS['api_calls'] += 1
-        response = session.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json()
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API request failed: {e}")
-        raise
-
-def fetch_ticket_conversations(ticket_id: str) -> List[Dict]:
-    """Fetch conversation metadata for a ticket"""
-    access_token = token_manager.get_token()
-    
-    headers = {
-        'Authorization': f'Zoho-oauthtoken {access_token}',
-        'Accept': 'application/vnd.manageengine.sdp.v3+json'
-    }
-    
-    url = f"{SDP_BASE_URL}/api/v3/requests/{ticket_id}/conversations"
-    
-    try:
-        METRICS['api_calls'] += 1
-        response = session.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        conversations = data.get('conversations', [])
-        METRICS['conversations_fetched'] += 1
-        METRICS['total_conversations'] += len(conversations)
-        return conversations
-        
-    except Exception as e:
-        logger.warning(f"Failed to fetch conversations for ticket {ticket_id}: {e}")
-        return []
-
-def fetch_conversations_parallel(ticket_ids: List[str]) -> Dict[str, List[Dict]]:
-    """Fetch conversations for multiple tickets in parallel"""
-    conversations_map = {}
-    
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
-        future_to_ticket = {
-            executor.submit(fetch_ticket_conversations, ticket_id): ticket_id 
-            for ticket_id in ticket_ids
-        }
-        
-        for future in as_completed(future_to_ticket):
-            ticket_id = future_to_ticket[future]
-            try:
-                conversations = future.result()
-                conversations_map[ticket_id] = conversations
-            except Exception as e:
-                logger.error(f"Exception fetching conversations for {ticket_id}: {e}")
-                conversations_map[ticket_id] = []
-    
-    return conversations_map
-
-def fetch_all_tickets(last_sync_time: Optional[datetime] = None) -> List[Dict]:
-    """Fetch tickets from ServiceDesk Plus"""
-    all_tickets = []
-    page = 1
-    row_count = 100
-    
-    if last_sync_time:
-        logger.info(f"📊 Fetching tickets updated since {last_sync_time.strftime('%Y-%m-%d %H:%M:%S')}...")
-    else:
-        logger.info(f"📊 Fetching all tickets (full sync)...")
-    
-    while True:
-        start_index = (page - 1) * row_count + 1
+        url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents"
+        params = {"limit": limit, "offset": offset}
+        headers = {"Authorization": f"Bearer {DUST_API_KEY}"}
         
         try:
-            data = fetch_tickets_from_sdp(start_index, row_count, last_sync_time)
-            tickets = data.get('requests', [])
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
+            stats['api_calls'] += 1
             
-            if not tickets:
-                logger.info(f"  Page {page}: No more tickets")
+            data = response.json()
+            documents = data.get('documents', [])
+            
+            if not documents:
                 break
             
-            all_tickets.extend(tickets)
-            logger.info(f"  Page {page}: {len(tickets)} tickets (total: {len(all_tickets)})")
+            doc_ids = [doc['document_id'] for doc in documents]
+            all_doc_ids.extend(doc_ids)
             
-            list_info = data.get('list_info', {})
-            has_more = list_info.get('has_more_rows', False)
+            logger.info(f"    Fetched {len(documents)} documents (total: {len(all_doc_ids)})")
             
-            if not has_more:
+            if len(documents) < limit:
+                break
+            
+            offset += limit
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch documents from {data_source_id}: {e}")
+            break
+    
+    logger.info(f"  ✓ Found {len(all_doc_ids)} documents in {data_source_id}")
+    return all_doc_ids
+
+def delete_documents_from_dust(data_source_id: str, document_ids: List[str]):
+    """Delete documents from Dust data source."""
+    if not document_ids:
+        logger.info(f"  No documents to delete from {data_source_id}")
+        return
+    
+    logger.info(f"  Deleting {len(document_ids)} existing documents from {data_source_id}...")
+    
+    deleted_count = 0
+    for doc_id in document_ids:
+        url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents/{doc_id}"
+        headers = {"Authorization": f"Bearer {DUST_API_KEY}"}
+        
+        try:
+            response = requests.delete(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            stats['api_calls'] += 1
+            deleted_count += 1
+            
+            if deleted_count % 100 == 0:
+                logger.info(f"    Deleted {deleted_count}/{len(document_ids)} documents...")
+            
+        except Exception as e:
+            logger.warning(f"Failed to delete document {doc_id}: {e}")
+    
+    logger.info(f"  ✓ Deleted {deleted_count}/{len(document_ids)} documents from {data_source_id}")
+    return deleted_count
+
+def upload_document_to_dust(data_source_id: str, doc_id: str, content: dict, tags: list) -> bool:
+    """Upload a single document to Dust."""
+    url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents/{doc_id}"
+    headers = {
+        "Authorization": f"Bearer {DUST_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Prepare text content
+    text_content = f"""
+Ticket ID: {content.get('ticket_id', 'N/A')}
+Subject: {content.get('subject', 'N/A')}
+Status: {content.get('status', 'N/A')}
+Priority: {content.get('priority', 'N/A')}
+Technician: {content.get('technician', 'Unassigned')}
+Requester: {content.get('requester', 'N/A')}
+Category: {content.get('category', 'N/A')}
+Description: {content.get('description', 'N/A')}
+Resolution: {content.get('resolution', 'N/A')}
+"""
+    
+    payload = {
+        "text": text_content,
+        "source_url": content.get('source_url'),
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
+        "tags": tags,
+        "parents": None,
+        "light_document_output": True,
+        "upsert": True
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        stats['api_calls'] += 1
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to upload document {doc_id} to {data_source_id}: {e}")
+        stats['upload_failures'] += 1
+        return False
+
+# ============================================================
+# SERVICEDESK API - DATA FETCHING
+# ============================================================
+def fetch_conversations(ticket_id: str, retry_count: int = 0) -> dict:
+    """
+    Fetch conversation metadata for a ticket with retry logic.
+    Automatically refreshes token and retries on 401 errors.
+    """
+    global TOKEN, TOKEN_EXPIRY, CONVERSATION_401_ERRORS
+    
+    # Check if we need to refresh token due to repeated 401s
+    if CONVERSATION_401_ERRORS >= MAX_401_BEFORE_REFRESH:
+        logger.warning(f"   🔑 {CONVERSATION_401_ERRORS} consecutive 401 errors - forcing token refresh...")
+        refresh_token()
+        CONVERSATION_401_ERRORS = 0
+    
+    url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        stats['api_calls'] += 1
+        
+        # Success - reset 401 counter
+        if CONVERSATION_401_ERRORS > 0:
+            logger.info(f"   ✓ Recovered from 401 errors")
+            CONVERSATION_401_ERRORS = 0
+        
+        data = response.json()
+        conversations = data.get('conversations', [])
+        
+        # Count total exchanges
+        total_exchanges = 0
+        for conv in conversations:
+            replies = conv.get('replies', [])
+            total_exchanges += len(replies)
+        
+        return {
+            "exchanges": conversations,
+            "count": total_exchanges
+        }
+        
+    except requests.HTTPError as e:
+        if e.response.status_code == 401:
+            CONVERSATION_401_ERRORS += 1
+            
+            # Retry with token refresh (max 2 retries)
+            if retry_count < 2:
+                logger.warning(f"   ⚠️  401 error for ticket {ticket_id} (attempt {retry_count + 1}/2)")
+                refresh_token()
+                time.sleep(2)  # Brief pause after refresh
+                return fetch_conversations(ticket_id, retry_count + 1)
+            else:
+                logger.warning(f"   ❌ Failed after 2 retries for ticket {ticket_id}: {e}")
+                return {"exchanges": [], "count": 0}
+        else:
+            logger.warning(f"Failed to fetch conversations for ticket {ticket_id}: {e}")
+            return {"exchanges": [], "count": 0}
+            
+    except Exception as e:
+        logger.warning(f"Failed to fetch conversations for ticket {ticket_id}: {e}")
+        return {"exchanges": [], "count": 0}
+
+def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
+    """Fetch tickets from ServiceDesk Plus API."""
+    ensure_token_valid()
+    
+    all_tickets = []
+    page = 1
+    
+    # Build query based on sync mode
+    if last_sync:
+        # Incremental: fetch tickets modified since last sync
+        last_sync_ms = int(last_sync.timestamp() * 1000)
+        logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
+        list_info = json.dumps({
+            "row_count": 100,
+            "start_index": 1,
+            "search_criteria": {
+                "field": "last_updated_time",
+                "condition": "greater than",
+                "value": str(last_sync_ms)
+            }
+        })
+    else:
+        # Full sync: fetch all tickets
+        logger.info(f"📊 Fetching all tickets (full sync)...")
+        list_info = json.dumps({
+            "row_count": 100,
+            "start_index": 1
+        })
+    
+    while True:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests"
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        # Update page number in list_info
+        list_info_dict = json.loads(list_info)
+        list_info_dict['start_index'] = (page - 1) * 100 + 1
+        
+        params = {"input_data": json.dumps(list_info_dict)}
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
+            stats['api_calls'] += 1
+            
+            data = response.json()
+            requests_data = data.get('requests', [])
+            
+            if not requests_data:
+                logger.info(f"  Page {page}: Last page reached")
+                break
+            
+            all_tickets.extend(requests_data)
+            logger.info(f"  Page {page}: {len(requests_data)} tickets (total: {len(all_tickets)})")
+            
+            # Check if we got less than requested (last page)
+            if len(requests_data) < 100:
                 logger.info(f"  Page {page}: Last page reached")
                 break
             
             page += 1
-            time.sleep(0.3)
             
         except Exception as e:
-            logger.error(f"Error fetching page {page}: {e}")
+            logger.error(f"Failed to fetch tickets on page {page}: {e}")
             break
     
-    METRICS['total_tickets_fetched'] = len(all_tickets)
-    
-    # Classify tickets as new or updated
-    if last_sync_time:
-        for ticket in all_tickets:
-            created_time_ms = safe_get(ticket, 'created_time', 'value', default=0)
-            
-            if created_time_ms:
-                try:
-                    created_time_ms = int(created_time_ms)
-                    created_time = datetime.fromtimestamp(created_time_ms / 1000)
-                except (ValueError, TypeError):
-                    logger.debug(f"Could not parse created_time for ticket: {created_time_ms}")
-                    created_time = None
-            else:
-                created_time = None
-            
-            if created_time and created_time > last_sync_time:
-                METRICS['new_tickets'] += 1
-            else:
-                METRICS['updated_tickets'] += 1
-    
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
-    if last_sync_time:
-        logger.info(f"  New tickets: {METRICS['new_tickets']}")
-        logger.info(f"  Updated tickets: {METRICS['updated_tickets']}")
-    logger.info("")
+    stats['tickets_fetched'] = len(all_tickets)
+    
+    # Determine new vs updated
+    if last_sync:
+        new_count = 0
+        updated_count = 0
+        for ticket in all_tickets:
+            created_time = ticket.get('created_time', {}).get('value', 0)
+            if created_time > int(last_sync.timestamp() * 1000):
+                new_count += 1
+            else:
+                updated_count += 1
+        
+        logger.info(f"  New tickets: {new_count}")
+        logger.info(f"  Updated tickets: {updated_count}")
+        stats['new_tickets'] = new_count
+        stats['updated_tickets'] = updated_count
+    
     return all_tickets
 
 # ============================================================
-# FIELD EXTRACTION & PROCESSING
+# TICKET PROCESSING
 # ============================================================
-
-def safe_get(obj, *keys, default=None):
-    """Safely get nested dictionary values"""
-    for key in keys:
-        if isinstance(obj, dict):
-            obj = obj.get(key, default)
-        else:
-            return default
-    return obj if obj is not None else default
-
-def clean_html(html_text: str) -> str:
-    """Clean HTML from text"""
-    if not html_text:
-        return ""
-    text = re.sub(r'<[^>]+>', '', html_text)
-    text = unescape(text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-def normalize_status_string(status: str) -> str:
-    """Normalize status string for comparison"""
-    if not status:
-        return ""
-    return status.lower().replace('-', ' ').replace('_', ' ').strip()
-
-def determine_status_category(status: str, status_internal: str, ticket_id: str = "unknown") -> str:
-    """Determine if ticket is active or closed"""
-    status_norm = normalize_status_string(status)
-    status_internal_norm = normalize_status_string(status_internal)
+def determine_status_category(status: str, internal_status: str) -> Tuple[str, str]:
+    """Determine if ticket is active or closed."""
+    status_lower = status.lower()
+    internal_lower = internal_status.lower()
     
-    closed_keywords = ['closed', 'resolved', 'completed', 'cancelled', 'rejected', 'declined']
-    active_keywords = ['open', 'pending', 'progress', 'hold', 'waiting', 'assigned', 'new', 'acknowledged']
+    # Active keywords
+    active_keywords = ['open', 'in progress', 'on hold', 'pending', 'waiting', 'assigned']
+    # Closed keywords
+    closed_keywords = ['closed', 'resolved', 'completed', 'cancelled', 'canceled']
+    
+    # Check status first
+    for keyword in active_keywords:
+        if keyword in status_lower:
+            return 'active', f'matched active keyword: {keyword}'
     
     for keyword in closed_keywords:
-        if keyword in status_norm or keyword in status_internal_norm:
-            if DEBUG_STATUS_DETECTION and len(METRICS['status_detection_debug']) < 20:
-                METRICS['status_detection_debug'].append({
-                    'ticket_id': ticket_id,
-                    'status': status,
-                    'internal': status_internal,
-                    'category': 'closed',
-                    'reason': f'matched closed keyword: {keyword}'
-                })
-            return 'closed'
+        if keyword in status_lower:
+            return 'closed', f'matched closed keyword: {keyword}'
     
+    # Check internal status
     for keyword in active_keywords:
-        if keyword in status_norm or keyword in status_internal_norm:
-            if DEBUG_STATUS_DETECTION and len(METRICS['status_detection_debug']) < 20:
-                METRICS['status_detection_debug'].append({
-                    'ticket_id': ticket_id,
-                    'status': status,
-                    'internal': status_internal,
-                    'category': 'active',
-                    'reason': f'matched active keyword: {keyword}'
-                })
-            return 'active'
+        if keyword in internal_lower:
+            return 'active', f'matched active keyword in internal: {keyword}'
     
-    if DEBUG_STATUS_DETECTION and len(METRICS['status_detection_debug']) < 20:
-        METRICS['status_detection_debug'].append({
-            'ticket_id': ticket_id,
-            'status': status,
-            'internal': status_internal,
-            'category': 'closed',
-            'reason': 'no keywords matched - defaulted to closed'
-        })
+    for keyword in closed_keywords:
+        if keyword in internal_lower:
+            return 'closed', f'matched closed keyword in internal: {keyword}'
     
-    logger.warning(f"Ticket {ticket_id}: Could not determine status category for status='{status}', internal='{status_internal}' - defaulting to closed")
-    return 'closed'
+    # Default to closed if uncertain
+    logger.warning(f"Could not determine status category for status='{status}', internal='{internal_status}' - defaulting to closed")
+    return 'closed', 'defaulted to closed (uncertain)'
 
-def extract_comprehensive_fields(ticket: Dict, conversations: List[Dict]) -> Dict[str, Any]:
-    """Extract all comprehensive fields from ticket"""
+def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
+    """Process a single ticket into Dust document format."""
     
-    ticket_id = safe_get(ticket, 'display_id', default='Unknown')
-    subject = safe_get(ticket, 'subject', default='No Subject')
-    description = clean_html(safe_get(ticket, 'description', default=''))
-    status = safe_get(ticket, 'status', 'name', default='Unknown')
-    status_internal = safe_get(ticket, 'status', 'internal_name', default=status)
-    priority = safe_get(ticket, 'priority', 'name', default='Normal')
-    requester_name = safe_get(ticket, 'requester', 'name', default='Unknown')
-    requester_email = safe_get(ticket, 'requester', 'email_id', default='')
-    technician_name = safe_get(ticket, 'technician', 'name', default='Unassigned')
-    technician_email = safe_get(ticket, 'technician', 'email_id', default='')
-    created_by_name = safe_get(ticket, 'created_by', 'name', default='Unknown')
-    category = safe_get(ticket, 'category', 'name', default='Uncategorized')
-    subcategory = safe_get(ticket, 'subcategory', 'name', default='')
-    group_name = safe_get(ticket, 'group', 'name', default='')
-    created_time = safe_get(ticket, 'created_time', 'display_value', default='')
-    due_by_time = safe_get(ticket, 'due_by_time', 'display_value', default='')
-    resolved_time = safe_get(ticket, 'resolved_time', 'display_value', default='')
-    is_service_request = safe_get(ticket, 'is_service_request', default=False)
-    ticket_type = 'Service Request' if is_service_request else 'Incident'
-    sla_name = safe_get(ticket, 'sla', 'name', default='')
-    is_overdue = safe_get(ticket, 'is_overdue', default=False)
-    is_escalated = safe_get(ticket, 'is_escalated', default=False)
-    closure_comments = safe_get(ticket, 'closure_info', 'closure_comments', default='')
-    closure_code = safe_get(ticket, 'closure_info', 'closure_code', 'name', default='')
+    # Extract basic info
+    ticket_id = str(ticket.get('id', ''))
+    subject = ticket.get('subject', 'No Subject')
     
-    status_category = determine_status_category(status, status_internal, ticket_id)
+    # Status determination
+    status_obj = ticket.get('status', {})
+    status = status_obj.get('name', 'Unknown')
+    internal_status = status_obj.get('internal_name', status)
+    status_category, status_reason = determine_status_category(status, internal_status)
     
-    conversation_count = len(conversations)
-    conversation_types = {}
-    for conv in conversations:
-        conv_type = conv.get('type', 'Unknown')
-        conversation_types[conv_type] = conversation_types.get(conv_type, 0) + 1
+    # Timestamps
+    created_time = ticket.get('created_time', {}).get('display_value', 'Unknown')
+    due_by_time = ticket.get('due_by_time', {}).get('display_value', 'Not set')
+    resolved_time = ticket.get('resolved_time', {}).get('display_value', 'Not resolved')
+    closed_time = ticket.get('closed_time', {}).get('display_value', 'Not closed')
     
-    complexity = 5
-    if len(description) > 500:
-        complexity += 1
-    if len(description) > 1000:
-        complexity += 1
-    if conversation_count > 5:
-        complexity += 1
-    if conversation_count > 10:
-        complexity += 1
-    if is_escalated:
-        complexity += 1
-    if priority in ['High', 'Urgent']:
-        complexity += 1
-    complexity = min(10, max(0, complexity))
+    # People
+    technician_obj = ticket.get('technician', {})
+    technician_name = technician_obj.get('name', 'Unassigned')
+    technician_email = technician_obj.get('email_id', '')
     
-    activity_level = 'Low'
-    if conversation_count > 5:
-        activity_level = 'Moderate'
-    if conversation_count > 10:
-        activity_level = 'High'
+    requester_obj = ticket.get('requester', {})
+    requester_name = requester_obj.get('name', 'Unknown')
+    requester_email = requester_obj.get('email_id', '')
     
-    fields = {
-        'ticket_id': ticket_id,
-        'subject': subject,
-        'description': description,
-        'status': status,
-        'status_category': status_category,
-        'priority': priority,
-        'category': category,
-        'subcategory': subcategory,
-        'group': group_name,
-        'ticket_type': ticket_type,
-        'requester_name': requester_name,
-        'requester_email': requester_email,
-        'technician_name': technician_name,
-        'technician_email': technician_email,
-        'created_by': created_by_name,
-        'created_time': created_time,
-        'due_by_time': due_by_time,
-        'resolved_time': resolved_time,
-        'sla': sla_name,
-        'is_overdue': is_overdue,
-        'is_escalated': is_escalated,
-        'closure_comments': clean_html(closure_comments),
-        'closure_code': closure_code,
-        'conversation_count': conversation_count,
-        'conversation_types': conversation_types,
-        'activity_level': activity_level,
-        'complexity_score': complexity,
+    # Classification
+    priority = ticket.get('priority', {}).get('name', 'Normal')
+    category = ticket.get('category', {}).get('name', 'Uncategorized')
+    subcategory = ticket.get('subcategory', {}).get('name', '')
+    request_type = ticket.get('request_type', {}).get('name', 'Service Request')
+    
+    # Description and resolution
+    description = ticket.get('description', 'No description')
+    resolution = ticket.get('resolution', {}).get('content', '')
+    
+    # Conversation data
+    conversation_count = conversation_data.get('count', 0)
+    
+    # Build tags
+    tags = [
+        f"ticket-id:{ticket_id}",
+        f"status:{status}",
+        f"status-category:{status_category}",
+        f"priority:{priority}",
+        f"category:{category}",
+        f"request-type:{request_type}",
+        f"technician:{technician_name.lower().replace(' ', '-')}",
+        f"requester:{requester_name.lower().replace(' ', '-')}",
+        f"conversations:{conversation_count}"
+    ]
+    
+    if status_category == 'closed':
+        tags.append("CLOSED-TICKET")
+    else:
+        tags.append("ACTIVE-TICKET")
+        tags.append("IS-OPEN")
+        tags.append("NOT-CLOSED")
+    
+    # Build content
+    content = {
+        "ticket_id": ticket_id,
+        "subject": subject,
+        "status": status,
+        "status_category": status_category,
+        "priority": priority,
+        "category": category,
+        "subcategory": subcategory,
+        "request_type": request_type,
+        "technician": technician_name,
+        "technician_email": technician_email,
+        "requester": requester_name,
+        "requester_email": requester_email,
+        "description": description,
+        "resolution": resolution,
+        "created_time": created_time,
+        "due_by_time": due_by_time,
+        "resolved_time": resolved_time,
+        "closed_time": closed_time,
+        "conversation_count": conversation_count,
+        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{ticket_id}"
     }
     
-    return fields
-
-def build_document_content(fields: Dict) -> str:
-    """Build comprehensive document content"""
-    parts = []
-    
-    parts.append(f"# Ticket #{fields['ticket_id']}\n")
-    parts.append(f"**Subject:** {fields['subject']}\n\n")
-    parts.append(f"**Status:** {fields['status']} ({fields['status_category']})")
-    if fields['is_overdue']:
-        parts.append(" ⚠️ **OVERDUE**")
-    if fields['is_escalated']:
-        parts.append(" ⚠️ **ESCALATED**")
-    parts.append("\n\n")
-    parts.append(f"**Priority:** {fields['priority']}\n")
-    parts.append(f"**Type:** {fields['ticket_type']}\n")
-    parts.append(f"**Category:** {fields['category']}\n")
-    if fields['subcategory']:
-        parts.append(f"**Subcategory:** {fields['subcategory']}\n")
-    if fields['group']:
-        parts.append(f"**Group:** {fields['group']}\n")
-    if fields['sla']:
-        parts.append(f"**SLA:** {fields['sla']}\n")
-    parts.append("\n")
-    parts.append(f"**Requester:** {fields['requester_name']}\n")
-    parts.append(f"**Technician:** {fields['technician_name']}\n")
-    parts.append(f"**Created By:** {fields['created_by']}\n\n")
-    parts.append(f"## Timeline\n\n")
-    parts.append(f"**Created:** {fields['created_time']}\n")
-    if fields['due_by_time']:
-        parts.append(f"**Due:** {fields['due_by_time']}\n")
-    if fields['resolved_time']:
-        parts.append(f"**Resolved:** {fields['resolved_time']}\n")
-    parts.append("\n")
-    if fields['description']:
-        parts.append(f"## Description\n\n{fields['description']}\n\n")
-    if fields['conversation_count'] > 0:
-        parts.append(f"## Conversation Activity\n\n")
-        parts.append(f"**Total Exchanges:** {fields['conversation_count']}\n")
-        parts.append(f"**Activity Level:** {fields['activity_level']}\n")
-        if fields['conversation_types']:
-            parts.append(f"**Exchange Types:**\n")
-            for conv_type, count in fields['conversation_types'].items():
-                parts.append(f"  - {conv_type}: {count}\n")
-        parts.append("\n")
-    if fields['status_category'] == 'closed':
-        parts.append(f"## Resolution\n\n")
-        if fields['closure_code']:
-            parts.append(f"**Closure Code:** {fields['closure_code']}\n")
-        if fields['closure_comments']:
-            parts.append(f"**Comments:** {fields['closure_comments']}\n")
-        parts.append("\n")
-    parts.append(f"## AI Intelligence\n\n")
-    parts.append(f"**Complexity Score:** {fields['complexity_score']}/10\n")
-    parts.append(f"**Activity Level:** {fields['activity_level']}\n")
-    if fields['complexity_score'] >= 8:
-        parts.append(f"**Assessment:** High complexity - requires senior technical expertise\n")
-    elif fields['complexity_score'] >= 6:
-        parts.append(f"**Assessment:** Moderate complexity - standard technical issue\n")
+    # Track statistics
+    if status_category == 'active':
+        stats['active_count'] += 1
     else:
-        parts.append(f"**Assessment:** Low complexity - routine support request\n")
+        stats['closed_count'] += 1
     
-    return "".join(parts)
-
-def build_tags(fields: Dict) -> List[str]:
-    """Build comprehensive searchable tags"""
-    tags = []
-    tags.append(f"ticket-id:{fields['ticket_id']}")
-    tags.append(f"status:{fields['status'].lower().replace(' ', '-')}")
-    tags.append(f"status-category:{fields['status_category']}")
-    tags.append(f"priority:{fields['priority'].lower()}")
-    tags.append(f"type:{fields['ticket_type'].lower().replace(' ', '-')}")
-    if fields['category']:
-        tags.append(f"category:{fields['category'].lower().replace(' ', '-')}")
-    if fields['technician_name'] != 'Unassigned':
-        tags.append(f"technician:{fields['technician_name'].lower().replace(' ', '-')}")
+    if request_type == 'Incident':
+        stats['incidents'] += 1
     else:
-        tags.append("unassigned")
-    if fields['status_category'] == 'active':
-        tags.extend(['active', 'open-status', 'needs-attention', 'ACTIVE-TICKET', 'IS-OPEN', 'NOT-CLOSED'])
-    else:
-        tags.extend(['closed', 'CLOSED-TICKET', 'IS-CLOSED', 'NOT-ACTIVE'])
-    if fields['is_overdue']:
-        tags.extend(['overdue', 'sla-risk:critical'])
-    if fields['is_escalated']:
-        tags.append('escalated')
-    tags.append(f"complexity:{fields['complexity_score']}")
-    if fields['complexity_score'] >= 8:
-        tags.append('complexity:high')
-    elif fields['complexity_score'] >= 6:
-        tags.append('complexity:medium')
-    else:
-        tags.append('complexity:low')
-    tags.append(f"activity:{fields['activity_level'].lower()}")
-    if fields['conversation_count'] > 0:
-        tags.append('has-conversations')
+        stats['service_requests'] += 1
     
-    return tags
+    stats['total_exchanges'] += conversation_count
+    
+    return content, tags
 
-def process_single_ticket(ticket: Dict, conversations: List[Dict]) -> Optional[Dict]:
-    """Process a single ticket and return document data"""
-    try:
-        fields = extract_comprehensive_fields(ticket, conversations)
-        
-        document = {
-            'id': str(fields['ticket_id']),
-            'title': f"Ticket #{fields['ticket_id']}: {fields['subject']}",
-            'content': build_document_content(fields),
-            'tags': build_tags(fields),
-            'metadata': {
-                'ticket_id': fields['ticket_id'],
-                'status': fields['status'],
-                'status_category': fields['status_category'],
-                'priority': fields['priority'],
-                'technician': fields['technician_name'],
-                'complexity': fields['complexity_score'],
-                'conversation_count': fields['conversation_count'],
-            }
-        }
-        
-        METRICS['total_processed'] += 1
-        if fields['status_category'] == 'active':
-            METRICS['active_tickets'] += 1
-        else:
-            METRICS['closed_tickets'] += 1
-        
-        if fields['ticket_type'] == 'Service Request':
-            METRICS['service_requests'] += 1
-        else:
-            METRICS['incidents'] += 1
-        
-        return document
-        
-    except Exception as e:
-        logger.error(f"Error processing ticket {ticket.get('display_id', 'unknown')}: {e}")
-        METRICS['skipped'] += 1
-        return None
-
-# ============================================================
-# DUST API - DUAL UPLOAD WITH RETRY LOGIC
-# ============================================================
-
-def upsert_to_dust_with_retry(data_source_url: str, document: Dict, source_name: str, max_retries: int = MAX_429_RETRIES) -> bool:
-    """Upload document to Dust with exponential backoff for 429 errors"""
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type': 'application/json'
-    }
+def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int, is_full_sync: bool):
+    """Process a batch of tickets."""
     
-    url = f"{data_source_url}/documents/{document['id']}"
+    logger.info(f"\n{'=' * 60}")
+    logger.info(f"BATCH {batch_num}/{total_batches} ({len(batch_tickets)} tickets)")
+    logger.info(f"{'=' * 60}")
     
-    payload = {
-        'text': document['content'],
-        'source_url': None,
-        'timestamp': None,
-        'tags': document['tags'],
-        'parents': None,
-        'light_document_output': True
-    }
+    # Proactive token check
+    ensure_token_valid()
     
-    for attempt in range(max_retries + 1):
-        try:
-            response = session.post(url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            return True
-            
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                METRICS['rate_limited'] += 1
-                if attempt < max_retries:
-                    wait_time = (2 ** attempt) * 2
-                    logger.warning(f"Rate limited on {source_name} ticket {document['id']}, waiting {wait_time}s")
-                    time.sleep(wait_time)
-                    METRICS['retried_uploads'] += 1
-                    continue
-                else:
-                    logger.error(f"Failed to upload ticket {document['id']} to {source_name} after {max_retries} retries")
-                    METRICS['failed_uploads'] += 1
-                    return False
-            else:
-                error_type = type(e).__name__
-                METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
-                METRICS['failed_uploads'] += 1
-                logger.error(f"Failed to upload ticket {document['id']} to {source_name}: {e}")
-                return False
-                
-        except Exception as e:
-            error_type = type(e).__name__
-            METRICS['upload_errors'][error_type] = METRICS['upload_errors'].get(error_type, 0) + 1
-            METRICS['failed_uploads'] += 1
-            logger.error(f"Failed to upload ticket {document['id']} to {source_name}: {e}")
-            return False
-    
-    return False
-
-def upload_batch_dual(documents: List[Dict]) -> Tuple[int, int, int, int]:
-    """
-    Upload batch of documents to BOTH data sources
-    Returns: (main_success, main_failure, active_success, active_failure)
-    """
-    main_success = 0
-    main_failure = 0
-    active_success = 0
-    active_failure = 0
-    
-    # Separate active and all documents
-    active_documents = [doc for doc in documents if 'ACTIVE-TICKET' in doc['tags']]
-    
-    # Upload ALL documents to main source
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-        futures = {executor.submit(upsert_to_dust_with_retry, DUST_API_URL_MAIN, doc, "main"): doc for doc in documents}
-        
-        for future in as_completed(futures):
-            try:
-                if future.result():
-                    main_success += 1
-                    METRICS['total_uploaded_main'] += 1
-                else:
-                    main_failure += 1
-            except Exception as e:
-                main_failure += 1
-                logger.error(f"Upload exception (main): {e}")
-            
-            time.sleep(0.2)
-    
-    # Upload ONLY active documents to active source
-    if active_documents:
-        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-            futures = {executor.submit(upsert_to_dust_with_retry, DUST_API_URL_ACTIVE, doc, "active"): doc for doc in active_documents}
-            
-            for future in as_completed(futures):
-                try:
-                    if future.result():
-                        active_success += 1
-                        METRICS['total_uploaded_active'] += 1
-                    else:
-                        active_failure += 1
-                except Exception as e:
-                    active_failure += 1
-                    logger.error(f"Upload exception (active): {e}")
-                
-                time.sleep(0.2)
-    
-    return main_success, main_failure, active_success, active_failure
-
-# ============================================================
-# MAIN PROCESSING
-# ============================================================
-
-def process_ticket_batch(tickets: List[Dict], batch_num: int, total_batches: int) -> None:
-    """Process a batch of tickets"""
-    logger.info(f"\n{'='*60}")
-    logger.info(f"BATCH {batch_num}/{total_batches} ({len(tickets)} tickets)")
-    logger.info(f"{'='*60}")
-    
+    # Fetch conversations with rate limit handling
     logger.info("  Fetching conversation metadata...")
-    ticket_ids = [str(t.get('id')) for t in tickets]
-    conversations_map = fetch_conversations_parallel(ticket_ids)
-    logger.info(f"  ✓ Fetched conversations for {len(conversations_map)} tickets")
+    conversations = {}
+    for i, ticket in enumerate(batch_tickets):
+        ticket_id = str(ticket.get('id', ''))
+        conv_data = fetch_conversations(ticket_id)
+        conversations[ticket_id] = conv_data
+        
+        # Add small delay every 10 tickets to avoid rate limits
+        if (i + 1) % 10 == 0 and i + 1 < len(batch_tickets):
+            time.sleep(CONVERSATION_FETCH_DELAY)
     
+    logger.info(f"  ✓ Fetched conversations for {len(batch_tickets)} tickets")
+    stats['conversations_fetched'] += len(batch_tickets)
+    
+    # Process tickets
     logger.info("  Processing tickets...")
     documents = []
-    for ticket in tickets:
-        ticket_id = str(ticket.get('id'))
-        conversations = conversations_map.get(ticket_id, [])
-        doc = process_single_ticket(ticket, conversations)
-        if doc:
-            documents.append(doc)
+    active_documents = []
+    
+    for ticket in batch_tickets:
+        ticket_id = str(ticket.get('id', ''))
+        conv_data = conversations.get(ticket_id, {"exchanges": [], "count": 0})
+        
+        content, tags = process_ticket(ticket, conv_data)
+        doc_id = f"ticket-{ticket_id}"
+        
+        documents.append((doc_id, content, tags))
+        
+        # Add to active documents if status_category is active
+        if content.get('status_category') == 'active':
+            active_documents.append((doc_id, content, tags))
     
     logger.info(f"  ✓ Processed {len(documents)} documents")
+    stats['tickets_processed'] += len(documents)
     
-    if documents:
-        logger.info("  Uploading to BOTH data sources...")
-        main_success, main_failure, active_success, active_failure = upload_batch_dual(documents)
-        
-        active_count = len([d for d in documents if 'ACTIVE-TICKET' in d['tags']])
-        
-        logger.info(f"  📦 Main source: {main_success}/{len(documents)} uploaded")
-        if active_count > 0:
-            logger.info(f"  ⚡ Active source: {active_success}/{active_count} uploaded")
-        
-        if main_failure > 0 or active_failure > 0:
-            logger.warning(f"  ⚠️  Upload failures: {main_failure + active_failure} total")
+    # Upload to BOTH data sources
+    logger.info("  Uploading to BOTH data sources...")
     
+    # Upload to MAIN source (always)
+    main_success = 0
+    for doc_id, content, tags in documents:
+        if upload_document_to_dust(DUST_MAIN_DATA_SOURCE, doc_id, content, tags):
+            main_success += 1
+    
+    logger.info(f"  📦 Main source: {main_success}/{len(documents)} uploaded")
+    stats['main_uploaded'] += main_success
+    
+    # Upload to ACTIVE source (only active tickets)
+    if active_documents:
+        active_success = 0
+        for doc_id, content, tags in active_documents:
+            if upload_document_to_dust(DUST_ACTIVE_DATA_SOURCE, doc_id, content, tags):
+                active_success += 1
+        
+        logger.info(f"  ⚡ Active source: {active_success}/{len(active_documents)} uploaded")
+        stats['active_uploaded'] += active_success
+    
+    # Pause before next batch
     if batch_num < total_batches:
-        logger.info(f"  ⏸️  Pausing {BATCH_DELAY}s before next batch...")
-        time.sleep(BATCH_DELAY)
+        logger.info(f"  ⏸️  Pausing {BATCH_PAUSE_SECONDS}s before next batch...")
+        time.sleep(BATCH_PAUSE_SECONDS)
 
-def print_status_detection_debug():
-    """Print status detection debug information"""
-    if not DEBUG_STATUS_DETECTION or not METRICS['status_detection_debug']:
-        return
+# ============================================================
+# MAIN SYNC LOGIC
+# ============================================================
+def run_sync():
+    """Main sync orchestration."""
     
-    logger.info("\n" + "=" * 60)
-    logger.info("STATUS DETECTION DEBUG (Sample)")
-    logger.info("=" * 60)
-    
-    for sample in METRICS['status_detection_debug']:
-        logger.info(f"  Ticket {sample['ticket_id']}:")
-        logger.info(f"    Status: '{sample['status']}'")
-        logger.info(f"    Internal: '{sample['internal']}'")
-        logger.info(f"    Category: {sample['category']}")
-        logger.info(f"    Reason: {sample['reason']}")
+    sync_start_time = datetime.now(timezone.utc)
     
     logger.info("=" * 60)
-
-def print_final_summary():
-    """Print comprehensive final summary"""
-    logger.info("\n" + "=" * 60)
-    logger.info("SYNC COMPLETE - FINAL SUMMARY")
-    logger.info("=" * 60)
-    
-    logger.info(f"\n📊 TICKET STATISTICS:")
-    logger.info(f"  Sync Mode:         {METRICS['sync_mode']}")
-    logger.info(f"  Total Fetched:     {METRICS['total_tickets_fetched']}")
-    if METRICS['sync_mode'] == 'incremental':
-        logger.info(f"  New Tickets:       {METRICS['new_tickets']}")
-        logger.info(f"  Updated Tickets:   {METRICS['updated_tickets']}")
-    logger.info(f"  Total Processed:   {METRICS['total_processed']}")
-    logger.info(f"  Uploaded to Main:  {METRICS['total_uploaded_main']}")
-    logger.info(f"  Uploaded to Active: {METRICS['total_uploaded_active']}")
-    logger.info(f"  Skipped:           {METRICS['skipped']}")
-    logger.info(f"  Upload Failures:   {METRICS['failed_uploads']}")
-    logger.info(f"  Retried:           {METRICS['retried_uploads']}")
-    logger.info(f"  Rate Limited:      {METRICS['rate_limited']}")
-    
-    if METRICS['total_processed'] > 0:
-        success_rate = (METRICS['total_uploaded_main'] / METRICS['total_processed']) * 100
-        logger.info(f"  Success Rate:      {success_rate:.1f}%")
-    
-    logger.info(f"\n📈 TICKET BREAKDOWN:")
-    logger.info(f"  Active Tickets:    {METRICS['active_tickets']}")
-    logger.info(f"  Closed Tickets:    {METRICS['closed_tickets']}")
-    logger.info(f"  Service Requests:  {METRICS['service_requests']}")
-    logger.info(f"  Incidents:         {METRICS['incidents']}")
-    
-    logger.info(f"\n💬 CONVERSATION DATA:")
-    logger.info(f"  Conversations Fetched:     {METRICS['conversations_fetched']}")
-    logger.info(f"  Total Exchanges:           {METRICS['total_conversations']}")
-    if METRICS['conversations_fetched'] > 0:
-        avg = METRICS['total_conversations'] / METRICS['conversations_fetched']
-        logger.info(f"  Average per Ticket:        {avg:.1f}")
-    
-    if METRICS['sync_mode'] == 'full':
-        logger.info(f"\n🧹 CLEANUP STATISTICS:")
-        logger.info(f"  Main - Documents Deleted:  {METRICS['dust_documents_deleted_main']}")
-        logger.info(f"  Active - Documents Deleted: {METRICS['dust_documents_deleted_active']}")
-    else:
-        logger.info(f"\n🧹 CLEANUP STATISTICS:")
-        logger.info(f"  Active - Documents Deleted: {METRICS['dust_documents_deleted_active']}")
-        logger.info(f"  Main - Received upserts only (efficient)")
-    
-    logger.info(f"\n🔧 API STATISTICS:")
-    logger.info(f"  Total API Calls:   {METRICS['api_calls']}")
-    
-    if METRICS['upload_errors']:
-        logger.info(f"\n⚠️  UPLOAD ERRORS:")
-        for error_type, count in METRICS['upload_errors'].items():
-            logger.info(f"  {error_type}: {count}")
-    
-    print_status_detection_debug()
-    
-    logger.info("\n" + "=" * 60)
-    logger.info(f"✓ ServiceDesk Intelligence Suite v{VERSION}")
-    logger.info("  Dual Data Source + Active Cleanup + Timestamp Fix + Status Fix")
-    logger.info("=" * 60)
-
-def main():
-    """Main execution"""
-    start_time = time.time()
-    sync_start_time = datetime.now()
-    
-    logger.info("=" * 60)
-    logger.info(f"SERVICEDESK INTELLIGENCE SUITE v{VERSION}")
+    logger.info(f"SERVICEDESK INTELLIGENCE SUITE {VERSION}")
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
     
-    try:
-        token_manager.get_token()
+    # Initialize token
+    refresh_token()
+    
+    # Load checkpoint
+    last_sync = load_checkpoint()
+    
+    # Check for forced full sync
+    force_full_sync = os.getenv('FORCE_FULL_SYNC', '').lower() in ['true', '1', 'yes']
+    if force_full_sync:
+        logger.info("  🔄 Force full sync requested - ignoring checkpoint")
+        last_sync = None
+    
+    # Determine sync mode
+    is_full_sync = (last_sync is None)
+    sync_mode = "full" if is_full_sync else "incremental"
+    
+    if is_full_sync:
+        logger.info("  🔄 No previous sync - performing full sync")
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("FULL SYNC: CLEANING BOTH DATA SOURCES")
+        logger.info("=" * 60)
+        logger.info("")
         
-        # Determine sync mode
-        last_sync_time, sync_mode = get_sync_parameters()
-        METRICS['sync_mode'] = sync_mode
+        # Clean MAIN data source
+        logger.info("📦 Cleaning MAIN data source (servicedesk)...")
+        main_docs = fetch_all_documents_from_dust(DUST_MAIN_DATA_SOURCE)
+        if main_docs:
+            stats['main_deleted'] = delete_documents_from_dust(DUST_MAIN_DATA_SOURCE, main_docs)
         
-        # Clean data sources based on sync mode
-        if sync_mode == 'full':
-            clean_slate_full_sync()  # Wipe both sources
-        else:
-            clean_active_incremental()  # Wipe only servicedesk-active
+        # Clean ACTIVE data source
+        logger.info("")
+        logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
+        active_docs = fetch_all_documents_from_dust(DUST_ACTIVE_DATA_SOURCE)
+        if active_docs:
+            stats['active_deleted'] = delete_documents_from_dust(DUST_ACTIVE_DATA_SOURCE, active_docs)
         
-        # Fetch tickets (filtered if incremental)
-        tickets = fetch_all_tickets(last_sync_time)
+        logger.info("")
+        logger.info("✓ Both data sources cleaned - ready for fresh upload")
+        logger.info("=" * 60)
+    else:
+        logger.info(f"  ✓ Performing incremental sync since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("INCREMENTAL SYNC: CLEANING ACTIVE DATA SOURCE")
+        logger.info("=" * 60)
+        logger.info("  📦 Main data source (servicedesk) will receive upserts only")
+        logger.info("  ⚡ Active data source (servicedesk-active) will be rebuilt fresh")
+        logger.info("")
         
-        if not tickets:
-            logger.info("✓ No tickets to process")
-            save_checkpoint(sync_start_time)
-            return 0
+        # Clean ONLY active data source (main gets upserts)
+        logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
+        active_docs = fetch_all_documents_from_dust(DUST_ACTIVE_DATA_SOURCE)
+        if active_docs:
+            stats['active_deleted'] = delete_documents_from_dust(DUST_ACTIVE_DATA_SOURCE, active_docs)
+            logger.info(f"  ✓ Deleted {stats['active_deleted']} documents from servicedesk-active")
         
-        # Process tickets
-        total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
-        logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        
-        if sync_mode == 'incremental':
-            logger.info(f"Estimated time: {total_batches * 0.4:.0f} minutes (incremental with active rebuild)\n")
-        else:
-            logger.info(f"Estimated time: {total_batches * 0.9:.0f} minutes (full sync - dual upload)\n")
-        
-        for i in range(0, len(tickets), BATCH_SIZE):
-            batch = tickets[i:i+BATCH_SIZE]
-            batch_num = (i // BATCH_SIZE) + 1
-            
-            try:
-                process_ticket_batch(batch, batch_num, total_batches)
-            except Exception as e:
-                logger.error(f"Error processing batch {batch_num}: {e}")
-                continue
-        
-        # Save checkpoint
+        logger.info("✓ Active data source cleaned - will rebuild with current active tickets only")
+        logger.info("=" * 60)
+    
+    # Fetch tickets
+    tickets = fetch_tickets(last_sync)
+    
+    if not tickets:
+        logger.info("")
+        logger.info("No tickets to process - sync complete")
         save_checkpoint(sync_start_time)
+        return
+    
+    # Process in batches
+    total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
+    
+    # Time estimate
+    if is_full_sync:
+        est_minutes = total_batches * 0.9  # ~54s per batch for dual upload
+        logger.info("")
+        logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync - dual upload)")
+    else:
+        est_minutes = total_batches * 0.4  # ~24s per batch for incremental
+        logger.info("")
+        logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with active rebuild)")
+    
+    # Process batches
+    for i in range(0, len(tickets), BATCH_SIZE):
+        batch = tickets[i:i + BATCH_SIZE]
+        batch_num = (i // BATCH_SIZE) + 1
+        process_batch(batch, batch_num, total_batches, is_full_sync)
+    
+    # Save checkpoint
+    save_checkpoint(sync_start_time)
+    
+    # Calculate execution time
+    sync_end_time = datetime.now(timezone.utc)
+    execution_time = (sync_end_time - sync_start_time).total_seconds()
+    execution_minutes = execution_time / 60
+    
+    logger.info("")
+    logger.info(f"⏱️  Total execution time: {execution_minutes:.1f} minutes")
+    
+    # Print summary
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("SYNC COMPLETE - FINAL SUMMARY")
+    logger.info("=" * 60)
+    logger.info("")
+    logger.info("📊 TICKET STATISTICS:")
+    logger.info(f"  Sync Mode:         {sync_mode}")
+    logger.info(f"  Total Fetched:     {stats['tickets_fetched']}")
+    logger.info(f"  Total Processed:   {stats['tickets_processed']}")
+    logger.info(f"  Uploaded to Main:  {stats['main_uploaded']}")
+    logger.info(f"  Uploaded to Active: {stats['active_uploaded']}")
+    logger.info(f"  Skipped:           {stats['tickets_fetched'] - stats['tickets_processed']}")
+    logger.info(f"  Upload Failures:   {stats['upload_failures']}")
+    logger.info(f"  Retried:           {stats['retries']}")
+    logger.info(f"  Rate Limited:      {stats['rate_limited']}")
+    
+    if stats['tickets_processed'] > 0:
+        success_rate = (stats['main_uploaded'] / stats['tickets_processed']) * 100
+        logger.info(f"  Success Rate:      {success_rate:.1f}%")
+    
+    logger.info("")
+    logger.info("📈 TICKET BREAKDOWN:")
+    logger.info(f"  Active Tickets:    {stats['active_count']}")
+    logger.info(f"  Closed Tickets:    {stats['closed_count']}")
+    logger.info(f"  Service Requests:  {stats['service_requests']}")
+    logger.info(f"  Incidents:         {stats['incidents']}")
+    
+    if stats['new_tickets'] > 0 or stats['updated_tickets'] > 0:
+        logger.info("")
+        logger.info("🆕 NEW vs UPDATED:")
+        logger.info(f"  New Tickets:       {stats['new_tickets']}")
+        logger.info(f"  Updated Tickets:   {stats['updated_tickets']}")
+    
+    logger.info("")
+    logger.info("💬 CONVERSATION DATA:")
+    logger.info(f"  Conversations Fetched:     {stats['conversations_fetched']}")
+    logger.info(f"  Total Exchanges:           {stats['total_exchanges']}")
+    if stats['conversations_fetched'] > 0:
+        avg_exchanges = stats['total_exchanges'] / stats['conversations_fetched']
+        logger.info(f"  Average per Ticket:        {avg_exchanges:.1f}")
+    
+    if stats['main_deleted'] > 0 or stats['active_deleted'] > 0:
+        logger.info("")
+        logger.info("🧹 CLEANUP STATISTICS:")
+        if stats['main_deleted'] > 0:
+            logger.info(f"  Main - Documents Deleted:  {stats['main_deleted']}")
+        if stats['active_deleted'] > 0:
+            logger.info(f"  Active - Documents Deleted: {stats['active_deleted']}")
+    
+    logger.info("")
+    logger.info("🔧 API STATISTICS:")
+    logger.info(f"  Total API Calls:   {stats['api_calls']}")
+    
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
+    logger.info("  Dual Data Source + Token Retry + Rate Limit Handling")
+    logger.info("=" * 60)
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+if __name__ == "__main__":
+    try:
+        # Validate configuration
+        logger.info("=" * 60)
+        logger.info("VALIDATING ENVIRONMENT VARIABLES")
+        logger.info("=" * 60)
+        logger.info("")
         
-        elapsed_time = time.time() - start_time
-        logger.info(f"\n⏱️  Total execution time: {elapsed_time/60:.1f} minutes")
-        print_final_summary()
+        required_vars = [
+            'DUST_API_KEY', 'DUST_WORKSPACE_ID',
+            'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN'
+        ]
         
-        return 0
+        missing = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing:
+            logger.error(f"Missing required environment variables: {', '.join(missing)}")
+            sys.exit(1)
+        
+        logger.info("✓ Configuration loaded")
+        logger.info(f"  Workspace: {DUST_WORKSPACE_ID}")
+        logger.info(f"  Main Data Source: {DUST_MAIN_DATA_SOURCE} (all tickets)")
+        logger.info(f"  Active Data Source: {DUST_ACTIVE_DATA_SOURCE} (active only)")
+        logger.info(f"  SDP Domain: {SDP_DOMAIN}")
+        logger.info(f"  Version: {VERSION}")
+        logger.info(f"  Sync Mode: INCREMENTAL")
+        logger.info("")
+        
+        # Run sync
+        run_sync()
         
     except KeyboardInterrupt:
-        logger.warning("\n⚠️  Sync interrupted by user")
-        print_final_summary()
-        return 130
-    
+        logger.info("\n\nSync interrupted by user")
+        sys.exit(1)
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}", exc_info=True)
-        print_final_summary()
-        return 1
-
-if __name__ == "__main__":
-    sys.exit(main())
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
