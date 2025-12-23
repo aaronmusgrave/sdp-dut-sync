@@ -11,6 +11,11 @@ on:
         type: boolean
         default: false
 
+# Prevent concurrent runs
+concurrency:
+  group: servicedesk-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -48,12 +53,12 @@ jobs:
           ls -lah *.json 2>/dev/null || echo "No JSON files found"
           echo "════════════════════════════════════════════════════════"
 
-      # SHOW ENVIRONMENT (for debugging)
+      # SHOW ENVIRONMENT (for debugging) - NO QUOTES
       - name: Show environment
         run: |
           echo "════════════════════════════════════════════════════════"
           echo "ENVIRONMENT VARIABLE BEING PASSED TO PYTHON:"
-          echo "  FORCE_FULL_SYNC='\${{ github.event.inputs.force_full_sync }}'"
+          echo "  FORCE_FULL_SYNC=\${{ github.event.inputs.force_full_sync }}"
           echo "════════════════════════════════════════════════════════"
 
       # RUN SYNC
