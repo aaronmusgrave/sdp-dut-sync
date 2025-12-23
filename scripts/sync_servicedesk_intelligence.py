@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.7-SPEED
-Dual Data Source + Cloud API + Working Pagination + PARALLEL PROCESSING
+ServiceDesk Intelligence Suite v3.2.8-DEBUG
+Dual Data Source + Cloud API + Working Pagination + ERROR LOGGING
 
-Changes in v3.2.7-SPEED:
-- ADDED: Parallel conversation fetching (20 workers)
-- ADDED: Parallel uploads (10 workers)
-- ADDED: Progress tracking with rate and ETA
-- INCREASED: Batch size from 50 to 100
-- REMOVED: Unnecessary 3s pause between batches
-- Performance: 4-6x faster than v3.2.6 (15-20 min vs 60-90 min)
-- Keeps all fixes: nested pagination, null safety, HTTPError handling
+Changes in v3.2.8-DEBUG:
+- ADDED: Detailed error logging for every failed upload
+- ADDED: Retry logic with exponential backoff for uploads
+- REDUCED: Upload workers from 10 to 5 (avoid rate limits)
+- ADDED: Error messages in progress output
+- FIXED: Progress tracking bug showing 0/100
+- Better visibility into why uploads fail
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -38,7 +37,6 @@ def clean_secret(value: str) -> str:
     """
     if not value:
         return ''
-    # Strip whitespace, then quotes, then backslashes, then whitespace again
     cleaned = value.strip()
     cleaned = cleaned.strip('"').strip("'")
     cleaned = cleaned.replace('\\', '')
@@ -48,8 +46,8 @@ def clean_secret(value: str) -> str:
 # Load and clean all secrets
 DUST_API_KEY = clean_secret(os.getenv('DUST_API_KEY', ''))
 DUST_WORKSPACE_ID = clean_secret(os.getenv('DUST_WORKSPACE_ID', ''))
-DUST_MAIN_DATA_SOURCE = 'servicedesk'          # All tickets
-DUST_ACTIVE_DATA_SOURCE = 'servicedesk-active'  # Active only
+DUST_MAIN_DATA_SOURCE = 'servicedesk'
+DUST_ACTIVE_DATA_SOURCE = 'servicedesk-active'
 
 SDP_DOMAIN = clean_secret(os.getenv('SDP_DOMAIN', ''))
 SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
@@ -57,12 +55,12 @@ SDP_CLIENT_SECRET = clean_secret(os.getenv('SDP_CLIENT_SECRET', ''))
 SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 
 CHECKPOINT_FILE = 'sync_checkpoint.json'
-BATCH_SIZE = 100  # Increased from 50
-MAX_CONCURRENT_CONVERSATIONS = 20  # Parallel conversation workers
-MAX_CONCURRENT_UPLOADS = 10         # Parallel upload workers
+BATCH_SIZE = 100
+MAX_CONCURRENT_CONVERSATIONS = 20
+MAX_CONCURRENT_UPLOADS = 5  # REDUCED from 10 to avoid rate limits
 
 # Version
-VERSION = "v3.2.7-SPEED"
+VERSION = "v3.2.8-DEBUG"
 
 # ============================================================
 # LOGGING SETUP
@@ -130,7 +128,6 @@ def refresh_token():
         expires_in = data.get('expires_in', 3600)
         TOKEN_EXPIRY = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
         
-        # Reset 401 error counter on successful refresh
         CONVERSATION_401_ERRORS = 0
         
         logger.info(f"✓ Token refreshed successfully (expires in {expires_in // 60} minutes)")
@@ -143,12 +140,11 @@ def ensure_token_valid():
     """Ensure token is valid, refresh if expired or expiring soon."""
     global TOKEN, TOKEN_EXPIRY
     
-    # Check if token is expired or expiring in next 10 minutes
     if not TOKEN or not TOKEN_EXPIRY:
         refresh_token()
     else:
         time_remaining = (TOKEN_EXPIRY - datetime.now(timezone.utc)).total_seconds()
-        if time_remaining < 600:  # Less than 10 minutes
+        if time_remaining < 600:
             logger.info(f"Token expiring in {int(time_remaining/60)} minutes - refreshing proactively...")
             refresh_token()
 
@@ -269,8 +265,8 @@ def delete_documents_from_dust_parallel(data_source_id: str, document_ids: List[
     logger.info(f"  ✓ Deleted {deleted_count}/{len(document_ids)} documents ({elapsed:.1f}s, {deleted_count/elapsed:.1f}/sec)")
     return deleted_count
 
-def upload_document_to_dust(data_source_id: str, doc_id: str, content: dict, tags: list) -> bool:
-    """Upload a single document to Dust."""
+def upload_document_to_dust(data_source_id: str, doc_id: str, content: dict, tags: list, max_retries: int = 3) -> Tuple[bool, Optional[str]]:
+    """Upload a single document to Dust with retry logic and error reporting."""
     url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents/{doc_id}"
     headers = {
         "Authorization": f"Bearer {DUST_API_KEY}",
@@ -300,14 +296,52 @@ Resolution: {content.get('resolution', 'N/A')}
         "upsert": True
     }
     
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        stats['api_calls'] += 1
-        return True
-    except Exception as e:
-        stats['upload_failures'] += 1
-        return False
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            
+            if response.status_code in [200, 201]:
+                stats['api_calls'] += 1
+                return True, None
+            
+            elif response.status_code == 429:
+                # Rate limited - wait and retry
+                wait_time = (2 ** attempt) * 2
+                logger.warning(f"    Rate limited on {doc_id}, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                stats['rate_limited'] += 1
+                continue
+            
+            else:
+                # Other HTTP error
+                error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                last_error = error_msg
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                else:
+                    return False, error_msg
+                    
+        except requests.exceptions.Timeout:
+            last_error = "Request timeout"
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            else:
+                return False, last_error
+                
+        except Exception as e:
+            last_error = f"Exception: {str(e)}"
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            else:
+                return False, last_error
+    
+    stats['upload_failures'] += 1
+    return False, last_error
 
 # ============================================================
 # SERVICEDESK API - PARALLEL CONVERSATION FETCHING
@@ -371,13 +405,11 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
             for ticket in tickets
         }
         
-        completed = 0
         for future in as_completed(future_to_ticket):
             ticket_id = future_to_ticket[future]
             try:
                 conversations, error = future.result()
                 
-                # Count exchanges
                 total_exchanges = 0
                 for conv in conversations:
                     replies = conv.get('replies', [])
@@ -387,8 +419,6 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
                     "exchanges": conversations,
                     "count": total_exchanges
                 }
-                
-                completed += 1
                 
             except Exception as e:
                 conversations_map[ticket_id] = {"exchanges": [], "count": 0}
@@ -408,14 +438,12 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     page = 1
     row_count = 100
     
-    # Build headers with proper Accept header
     headers = {
         "Authorization": f"Zoho-oauthtoken {TOKEN}",
         "Content-Type": "application/json",
         "Accept": "application/vnd.manageengine.sdp.v3+json"
     }
     
-    # Build search criteria for incremental sync
     search_criteria = []
     if last_sync:
         last_sync_ms = int(last_sync.timestamp() * 1000)
@@ -436,7 +464,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     else:
         logger.info(f"📊 Fetching all tickets (full sync)...")
     
-    # Build list_info with NESTED structure
     list_info = {
         "list_info": {
             "row_count": row_count,
@@ -447,17 +474,13 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
         }
     }
     
-    # Add search criteria if incremental
     if search_criteria:
         list_info["list_info"]["search_criteria"] = search_criteria
     
     url = f"https://{SDP_DOMAIN}/api/v3/requests"
     
     while True:
-        # Update start index for pagination
         list_info["list_info"]["start_index"] = (page - 1) * row_count + 1
-        
-        # Pass as input_data parameter
         params = {"input_data": json.dumps(list_info)}
         
         try:
@@ -475,7 +498,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             all_tickets.extend(requests_data)
             logger.info(f"  Page {page}: {len(requests_data)} tickets (total: {len(all_tickets)})")
             
-            # Check has_more_rows flag
             list_info_response = data.get('list_info', {})
             has_more = list_info_response.get('has_more_rows', False)
             
@@ -483,13 +505,12 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
                 logger.info(f"  Page {page}: No more pages (has_more_rows=False)")
                 break
             
-            # Also check if we got less than requested
             if len(requests_data) < row_count:
                 logger.info(f"  Page {page}: Last page (got {len(requests_data)} < {row_count})")
                 break
             
             page += 1
-            time.sleep(0.1)  # Small delay between pages
+            time.sleep(0.1)
             
         except Exception as e:
             logger.error(f"Failed to fetch tickets on page {page}: {e}")
@@ -498,7 +519,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
     stats['tickets_fetched'] = len(all_tickets)
     
-    # Determine new vs updated
     if last_sync and all_tickets:
         new_count = 0
         updated_count = 0
@@ -527,12 +547,9 @@ def determine_status_category(status: str, internal_status: str) -> Tuple[str, s
     status_lower = status.lower()
     internal_lower = internal_status.lower()
     
-    # Active keywords
     active_keywords = ['open', 'in progress', 'on hold', 'pending', 'waiting', 'assigned']
-    # Closed keywords
     closed_keywords = ['closed', 'resolved', 'completed', 'cancelled', 'canceled']
     
-    # Check status first
     for keyword in active_keywords:
         if keyword in status_lower:
             return 'active', f'matched active keyword: {keyword}'
@@ -541,7 +558,6 @@ def determine_status_category(status: str, internal_status: str) -> Tuple[str, s
         if keyword in status_lower:
             return 'closed', f'matched closed keyword: {keyword}'
     
-    # Check internal status
     for keyword in active_keywords:
         if keyword in internal_lower:
             return 'active', f'matched active keyword in internal: {keyword}'
@@ -550,15 +566,12 @@ def determine_status_category(status: str, internal_status: str) -> Tuple[str, s
         if keyword in internal_lower:
             return 'closed', f'matched closed keyword in internal: {keyword}'
     
-    # Default to closed if uncertain
     return 'closed', 'defaulted to closed (uncertain)'
 
 def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     """Process a single ticket into Dust document format with null safety."""
     
-    # Helper function to safely get nested values
     def safe_get(obj, key, default=''):
-        """Safely get value from dict, handling None."""
         if not obj:
             return default
         value = obj.get(key)
@@ -567,7 +580,6 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         return value
     
     def safe_get_nested(obj, key, nested_key, default=''):
-        """Safely get nested value, handling None at any level."""
         parent = safe_get(obj, key, {})
         if not isinstance(parent, dict):
             return default
@@ -576,11 +588,9 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
             return default
         return value
     
-    # Extract basic info
     ticket_id = str(ticket.get('id', ''))
     subject = ticket.get('subject', 'No Subject') or 'No Subject'
     
-    # Status determination
     status_obj = safe_get(ticket, 'status', {})
     if isinstance(status_obj, dict):
         status = status_obj.get('name', 'Unknown') or 'Unknown'
@@ -591,13 +601,11 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     
     status_category, status_reason = determine_status_category(status, internal_status)
     
-    # Timestamps - handle None values
     created_time = safe_get_nested(ticket, 'created_time', 'display_value', 'Unknown')
     due_by_time = safe_get_nested(ticket, 'due_by_time', 'display_value', 'Not set')
     resolved_time = safe_get_nested(ticket, 'resolved_time', 'display_value', 'Not resolved')
     closed_time = safe_get_nested(ticket, 'closed_time', 'display_value', 'Not closed')
     
-    # People - handle None values
     technician_obj = safe_get(ticket, 'technician', {})
     if isinstance(technician_obj, dict):
         technician_name = technician_obj.get('name', 'Unassigned') or 'Unassigned'
@@ -614,7 +622,6 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         requester_name = 'Unknown'
         requester_email = ''
     
-    # Classification - handle None values
     priority_obj = safe_get(ticket, 'priority', {})
     priority = (priority_obj.get('name', 'Normal') or 'Normal') if isinstance(priority_obj, dict) else 'Normal'
     
@@ -627,16 +634,13 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     request_type_obj = safe_get(ticket, 'request_type', {})
     request_type = (request_type_obj.get('name', 'Service Request') or 'Service Request') if isinstance(request_type_obj, dict) else 'Service Request'
     
-    # Description and resolution - handle None
     description = ticket.get('description', 'No description') or 'No description'
     
     resolution_obj = safe_get(ticket, 'resolution', {})
     resolution = (resolution_obj.get('content', '') or '') if isinstance(resolution_obj, dict) else ''
     
-    # Conversation data
     conversation_count = conversation_data.get('count', 0) if conversation_data else 0
     
-    # Build tags
     tags = [
         f"ticket-id:{ticket_id}",
         f"status:{status}",
@@ -656,7 +660,6 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         tags.append("IS-OPEN")
         tags.append("NOT-CLOSED")
     
-    # Build content
     content = {
         "ticket_id": ticket_id,
         "subject": subject,
@@ -680,7 +683,6 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{ticket_id}"
     }
     
-    # Track statistics
     if status_category == 'active':
         stats['active_count'] += 1
     else:
@@ -695,34 +697,37 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     
     return content, tags
 
-def upload_documents_parallel(documents: List[Tuple[str, dict, list]], data_source_id: str) -> Tuple[int, int]:
-    """Upload documents in parallel with ThreadPoolExecutor."""
+def upload_documents_parallel(documents: List[Tuple[str, dict, list]], data_source_id: str) -> Tuple[int, int, List[str]]:
+    """Upload documents in parallel with detailed error tracking."""
     if not documents:
-        return 0, 0
+        return 0, 0, []
     
     uploaded = 0
     failed = 0
     upload_lock = Lock()
     start_time = time.time()
+    error_messages = []
     
-    def upload_single(doc_tuple: Tuple[str, dict, list]) -> bool:
+    def upload_single(doc_tuple: Tuple[str, dict, list]) -> Tuple[bool, Optional[str]]:
         nonlocal uploaded, failed
         doc_id, content, tags = doc_tuple
-        success = upload_document_to_dust(data_source_id, doc_id, content, tags)
+        success, error = upload_document_to_dust(data_source_id, doc_id, content, tags)
         
         with upload_lock:
             if success:
                 uploaded += 1
+                if uploaded % 25 == 0:
+                    elapsed = time.time() - start_time
+                    rate = uploaded / elapsed if elapsed > 0 else 0
+                    logger.info(f"    {data_source_id}: {uploaded}/{len(documents)} uploaded ({rate:.1f}/sec)...")
             else:
                 failed += 1
-            
-            # Progress every 50 uploads
-            if uploaded % 50 == 0:
-                elapsed = time.time() - start_time
-                rate = uploaded / elapsed if elapsed > 0 else 0
-                logger.info(f"    Progress: {uploaded}/{len(documents)} uploaded ({rate:.1f}/sec)...")
+                if error:
+                    error_messages.append(f"{doc_id}: {error}")
+                    if failed <= 5:  # Only log first 5 errors to avoid spam
+                        logger.error(f"    ❌ Upload failed for {doc_id}: {error}")
         
-        return success
+        return success, error
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
         futures = [executor.submit(upload_single, doc) for doc in documents]
@@ -730,10 +735,10 @@ def upload_documents_parallel(documents: List[Tuple[str, dict, list]], data_sour
             future.result()
     
     elapsed = time.time() - start_time
-    return uploaded, failed
+    return uploaded, failed, error_messages
 
 def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int, is_full_sync: bool, processing_start_time: float, total_tickets: int):
-    """Process a batch of tickets with parallel operations."""
+    """Process a batch of tickets with parallel operations and error tracking."""
     
     logger.info(f"\n{'=' * 60}")
     logger.info(f"BATCH {batch_num}/{total_batches} ({len(batch_tickets)} tickets)")
@@ -741,14 +746,11 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
     
     batch_start = time.time()
     
-    # Proactive token check
     ensure_token_valid()
     
-    # Fetch conversations in parallel
     conversations_map = fetch_conversations_parallel(batch_tickets)
     stats['conversations_fetched'] += len(batch_tickets)
     
-    # Process tickets
     logger.info("  Processing tickets...")
     documents = []
     active_documents = []
@@ -762,28 +764,40 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
         
         documents.append((doc_id, content, tags))
         
-        # Add to active documents if status_category is active
         if content.get('status_category') == 'active':
             active_documents.append((doc_id, content, tags))
     
-    logger.info(f"  ✓ Processed {len(documents)} documents")
+    logger.info(f"  ✓ Processed {len(documents)} documents ({len(active_documents)} active)")
     stats['tickets_processed'] += len(documents)
     
-    # Upload to BOTH data sources in parallel
     logger.info(f"  Uploading with {MAX_CONCURRENT_UPLOADS} parallel workers...")
     upload_start = time.time()
     
-    # Upload to MAIN source (all tickets)
-    main_uploaded, main_failed = upload_documents_parallel(documents, DUST_MAIN_DATA_SOURCE)
+    # Upload to MAIN source
+    main_uploaded, main_failed, main_errors = upload_documents_parallel(documents, DUST_MAIN_DATA_SOURCE)
     stats['main_uploaded'] += main_uploaded
     
-    # Upload to ACTIVE source (only active tickets)
+    # Upload to ACTIVE source
     if active_documents:
-        active_uploaded, active_failed = upload_documents_parallel(active_documents, DUST_ACTIVE_DATA_SOURCE)
+        active_uploaded, active_failed, active_errors = upload_documents_parallel(active_documents, DUST_ACTIVE_DATA_SOURCE)
         stats['active_uploaded'] += active_uploaded
+    else:
+        active_uploaded = 0
+        active_failed = 0
     
     upload_elapsed = time.time() - upload_start
-    logger.info(f"  ✓ Upload complete: Main {main_uploaded}/{len(documents)}, Active {len(active_documents) if active_documents else 0}/{len(active_documents) if active_documents else 0} ({upload_elapsed:.1f}s)")
+    
+    # Report results
+    logger.info(f"  ✓ Upload complete ({upload_elapsed:.1f}s):")
+    logger.info(f"    Main: {main_uploaded}/{len(documents)} succeeded, {main_failed} failed")
+    if active_documents:
+        logger.info(f"    Active: {active_uploaded}/{len(active_documents)} succeeded, {active_failed} failed")
+    
+    # Log first few errors if any
+    if main_failed > 0 and main_errors:
+        logger.error(f"  ❌ Sample errors from main uploads (showing first 3):")
+        for error in main_errors[:3]:
+            logger.error(f"    {error}")
     
     # Calculate overall progress
     batch_elapsed = time.time() - batch_start
@@ -797,8 +811,6 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
     eta_seconds = remaining_tickets / rate if rate > 0 else 0
     
     logger.info(f"  📊 Progress: {tickets_done}/{total_tickets} tickets ({rate:.1f}/sec, ~{eta_seconds/60:.1f} min remaining)")
-    
-    # NO PAUSE between batches in speed mode!
 
 # ============================================================
 # MAIN SYNC LOGIC
@@ -813,26 +825,23 @@ def run_sync():
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
-    logger.info("🚀 SPEED MODE ENABLED:")
+    logger.info("🐛 DEBUG MODE ENABLED:")
+    logger.info(f"   • Detailed error logging for failed uploads")
+    logger.info(f"   • Retry logic with exponential backoff")
     logger.info(f"   • Parallel conversations: {MAX_CONCURRENT_CONVERSATIONS} workers")
-    logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers")
+    logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers (reduced to avoid rate limits)")
     logger.info(f"   • Batch size: {BATCH_SIZE}")
-    logger.info(f"   • No pauses between batches")
     logger.info("")
     
-    # Initialize token
     refresh_token()
     
-    # Load checkpoint
     last_sync = load_checkpoint()
     
-    # Check for forced full sync
     force_full_sync = os.getenv('FORCE_FULL_SYNC', '').lower() in ['true', '1', 'yes']
     if force_full_sync:
         logger.info("  🔄 Force full sync requested - ignoring checkpoint")
         last_sync = None
     
-    # Determine sync mode
     is_full_sync = (last_sync is None)
     sync_mode = "full" if is_full_sync else "incremental"
     
@@ -844,13 +853,11 @@ def run_sync():
         logger.info("=" * 60)
         logger.info("")
         
-        # Clean MAIN data source
         logger.info("📦 Cleaning MAIN data source (servicedesk)...")
         main_docs = fetch_all_documents_from_dust(DUST_MAIN_DATA_SOURCE)
         if main_docs:
             stats['main_deleted'] = delete_documents_from_dust_parallel(DUST_MAIN_DATA_SOURCE, main_docs)
         
-        # Clean ACTIVE data source
         logger.info("")
         logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
         active_docs = fetch_all_documents_from_dust(DUST_ACTIVE_DATA_SOURCE)
@@ -870,7 +877,6 @@ def run_sync():
         logger.info("  ⚡ Active data source (servicedesk-active) will be rebuilt fresh")
         logger.info("")
         
-        # Clean ONLY active data source (main gets upserts)
         logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
         active_docs = fetch_all_documents_from_dust(DUST_ACTIVE_DATA_SOURCE)
         if active_docs:
@@ -880,7 +886,6 @@ def run_sync():
         logger.info("✓ Active data source cleaned - will rebuild with current active tickets only")
         logger.info("=" * 60)
     
-    # Fetch tickets
     tickets = fetch_tickets(last_sync)
     
     if not tickets:
@@ -889,32 +894,27 @@ def run_sync():
         save_checkpoint(sync_start_time)
         return
     
-    # Process in batches
     total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
     
-    # Time estimate
     if is_full_sync:
-        est_minutes = total_batches * 0.25  # ~15s per batch with parallelization
+        est_minutes = total_batches * 0.3
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync - speed mode)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync - debug mode)")
     else:
-        est_minutes = total_batches * 0.15  # ~9s per batch for incremental
+        est_minutes = total_batches * 0.2
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental - speed mode)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental - debug mode)")
     
-    # Process batches
     processing_start = time.time()
     for i in range(0, len(tickets), BATCH_SIZE):
         batch = tickets[i:i + BATCH_SIZE]
         batch_num = (i // BATCH_SIZE) + 1
         process_batch(batch, batch_num, total_batches, is_full_sync, processing_start, len(tickets))
     
-    # Save checkpoint
     save_checkpoint(sync_start_time)
     
-    # Calculate execution time
     sync_end_time = datetime.now(timezone.utc)
     execution_time = (sync_end_time - sync_start_time).total_seconds()
     execution_minutes = execution_time / 60
@@ -922,7 +922,6 @@ def run_sync():
     logger.info("")
     logger.info(f"⏱️  Total execution time: {execution_minutes:.1f} minutes")
     
-    # Print summary
     logger.info("")
     logger.info("=" * 60)
     logger.info("SYNC COMPLETE - FINAL SUMMARY")
@@ -935,6 +934,7 @@ def run_sync():
     logger.info(f"  Uploaded to Main:  {stats['main_uploaded']}")
     logger.info(f"  Uploaded to Active: {stats['active_uploaded']}")
     logger.info(f"  Upload Failures:   {stats['upload_failures']}")
+    logger.info(f"  Rate Limited:      {stats['rate_limited']}")
     
     if stats['tickets_processed'] > 0:
         success_rate = (stats['main_uploaded'] / stats['tickets_processed']) * 100
@@ -973,7 +973,6 @@ def run_sync():
     logger.info("🔧 API STATISTICS:")
     logger.info(f"  Total API Calls:   {stats['api_calls']}")
     
-    # Calculate performance metrics
     if execution_time > 0:
         tickets_per_sec = stats['tickets_processed'] / execution_time
         logger.info(f"  Processing Rate:   {tickets_per_sec:.1f} tickets/sec")
@@ -981,7 +980,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  SPEED MODE: 4-6x Faster with Parallel Processing")
+    logger.info("  DEBUG MODE: Detailed Error Logging & Retry Logic")
     logger.info("=" * 60)
 
 # ============================================================
@@ -989,7 +988,6 @@ def run_sync():
 # ============================================================
 if __name__ == "__main__":
     try:
-        # Validate configuration
         logger.info("=" * 60)
         logger.info("VALIDATING ENVIRONMENT VARIABLES")
         logger.info("=" * 60)
@@ -1014,7 +1012,6 @@ if __name__ == "__main__":
         logger.info(f"  Version: {VERSION}")
         logger.info("")
         
-        # Run sync
         run_sync()
         
     except KeyboardInterrupt:
