@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.4-CLOUD
-Dual Data Source + Token Retry Logic + Cloud API + Null Safety
+ServiceDesk Intelligence Suite v3.2.5-CLOUD-FINAL
+Dual Data Source + Token Retry + Cloud API + Null Safety + Working Pagination
 
-Changes in v3.2.4-CLOUD:
-- Added null safety for all ticket fields (Cloud API returns null instead of {})
-- Fixed AttributeError when processing tickets with null values
-- Improved error handling for missing nested fields
-
-Changes in v3.2.3-CLOUD:
-- Fixed for ServiceDesk Plus Cloud API (uses /list endpoint and POST)
-- Added fallback methods for different Cloud API versions
-- Improved error logging for API diagnostics
+Changes in v3.2.5-CLOUD-FINAL:
+- Restored working pagination from previous versions
+- Uses input_data parameter with row_count and start_index
+- Keeps all null safety fixes from v3.2.4
+- Should fetch all 4,500+ tickets
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -61,7 +57,7 @@ BATCH_PAUSE_SECONDS = 3.0
 CONVERSATION_FETCH_DELAY = 0.3  # Delay every 10 conversations
 
 # Version
-VERSION = "v3.2.4-CLOUD"
+VERSION = "v3.2.5-CLOUD-FINAL"
 
 # ============================================================
 # LOGGING SETUP
@@ -364,129 +360,54 @@ def fetch_conversations(ticket_id: str, retry_count: int = 0) -> dict:
         return {"exchanges": [], "count": 0}
 
 def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
-    """Fetch tickets from ServiceDesk Plus Cloud API."""
+    """Fetch tickets from ServiceDesk Plus API with working pagination."""
     ensure_token_valid()
     
     all_tickets = []
+    page = 1
+    row_count = 100
     
+    # Build query based on sync mode
     if last_sync:
-        logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
-    else:
-        logger.info(f"📊 Fetching all tickets (full sync)...")
-    
-    # ServiceDesk Plus Cloud API endpoints
-    url = f"https://{SDP_DOMAIN}/api/v3/requests"
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    # Build search criteria if incremental
     if last_sync:
         last_sync_ms = int(last_sync.timestamp() * 1000)
-        list_info = {
-            "list_info": {
-                "row_count": 100,
-                "start_index": 1,
-                "search_criteria": [
-                    {
-                        "field": "last_updated_time",
-                        "condition": "greater than",
-                        "value": str(last_sync_ms)
-                    }
-                ]
-            }
+        logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
+        search_criteria = {
+            "field": "last_updated_time",
+            "condition": "greater than",
+            "value": str(last_sync_ms)
         }
     else:
-        # For full sync - just get all tickets
-        list_info = {
-            "list_info": {
-                "row_count": 100,
-                "start_index": 1
-            }
-        }
-    
-    page = 1
-    success_method = None
+        logger.info(f"📊 Fetching all tickets (full sync)...")
+        search_criteria = None
     
     while True:
-        # Update start index for pagination
-        list_info["list_info"]["start_index"] = (page - 1) * 100 + 1
+        url = f"https://{SDP_DOMAIN}/api/v3/requests"
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {TOKEN}",
+            "Content-Type": "application/json"
+        }
         
-        response = None
+        # Calculate start index for this page
+        start_index = (page - 1) * row_count + 1
         
-        # Try different methods for Cloud API
-        if not success_method or success_method == "POST_LIST":
-            try:
-                # METHOD 1: POST to /list endpoint (most common for Cloud)
-                response = requests.post(
-                    f"{url}/list",
-                    headers=headers,
-                    json=list_info,
-                    timeout=60
-                )
-                if response.status_code == 200:
-                    success_method = "POST_LIST"
-                    if page == 1:
-                        logger.info(f"  ✓ Using POST /api/v3/requests/list")
-                else:
-                    raise Exception(f"Status {response.status_code}")
-            except Exception as e:
-                if page == 1:
-                    logger.info(f"  POST /list failed: {e}")
-                response = None
+        # Build list_info
+        list_info = {
+            "row_count": row_count,
+            "start_index": start_index
+        }
         
-        if not response and (not success_method or success_method == "GET_SIMPLE"):
-            try:
-                # METHOD 2: Simple GET (fallback)
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=60
-                )
-                if response.status_code == 200:
-                    success_method = "GET_SIMPLE"
-                    if page == 1:
-                        logger.info(f"  ✓ Using GET /api/v3/requests")
-                        logger.warning(f"  ⚠️  Simple GET may not support pagination")
-                else:
-                    raise Exception(f"Status {response.status_code}")
-            except Exception as e:
-                if page == 1:
-                    logger.info(f"  GET simple failed: {e}")
-                response = None
+        if search_criteria:
+            list_info["search_criteria"] = search_criteria
         
-        if not response and (not success_method or success_method == "POST_BASE"):
-            try:
-                # METHOD 3: POST to base endpoint
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=list_info,
-                    timeout=60
-                )
-                if response.status_code == 200:
-                    success_method = "POST_BASE"
-                    if page == 1:
-                        logger.info(f"  ✓ Using POST /api/v3/requests")
-                else:
-                    raise Exception(f"Status {response.status_code}")
-            except Exception as e:
-                if page == 1:
-                    logger.info(f"  POST base failed: {e}")
-                response = None
-        
-        # Check if any method worked
-        if not response or response.status_code != 200:
-            if page == 1:
-                logger.error(f"Failed to fetch tickets: All methods failed")
-                if response:
-                    logger.error(f"  Last status code: {response.status_code}")
-                    logger.error(f"  Response: {response.text[:500]}")
-            break
+        # Use input_data parameter (standard ServiceDesk API)
+        params = {"input_data": json.dumps(list_info)}
         
         try:
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
             stats['api_calls'] += 1
+            
             data = response.json()
             requests_data = data.get('requests', [])
             
@@ -498,33 +419,26 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             logger.info(f"  Page {page}: {len(requests_data)} tickets (total: {len(all_tickets)})")
             
             # Check if we got less than requested (last page)
-            if len(requests_data) < 100:
+            if len(requests_data) < row_count:
                 logger.info(f"  Page {page}: Last page reached")
-                break
-            
-            # If using simple GET, we can't paginate
-            if success_method == "GET_SIMPLE":
-                logger.warning(f"  Simple GET doesn't support pagination - got {len(all_tickets)} tickets only")
                 break
             
             page += 1
             
         except Exception as e:
-            logger.error(f"Failed to parse response on page {page}: {e}")
-            if response:
-                logger.error(f"  Response body: {response.text[:500]}")
+            logger.error(f"Failed to fetch tickets on page {page}: {e}")
             break
     
-    # Filter by last_sync if needed (client-side filtering)
+    # Client-side filtering if needed for incremental
     if last_sync and all_tickets:
         last_sync_ms = int(last_sync.timestamp() * 1000)
-        logger.info(f"  Filtering tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
         original_count = len(all_tickets)
         all_tickets = [
             t for t in all_tickets 
             if t.get('last_updated_time', {}).get('value', 0) > last_sync_ms
         ]
-        logger.info(f"  ✓ Filtered from {original_count} to {len(all_tickets)} tickets")
+        if original_count != len(all_tickets):
+            logger.info(f"  ✓ Filtered from {original_count} to {len(all_tickets)} tickets")
     
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
     stats['tickets_fetched'] = len(all_tickets)
@@ -534,16 +448,19 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
         new_count = 0
         updated_count = 0
         for ticket in all_tickets:
-            created_time = ticket.get('created_time', {}).get('value', 0)
-            if created_time > int(last_sync.timestamp() * 1000):
-                new_count += 1
-            else:
-                updated_count += 1
+            created_time_obj = ticket.get('created_time', {})
+            if created_time_obj and isinstance(created_time_obj, dict):
+                created_time = created_time_obj.get('value', 0)
+                if created_time > int(last_sync.timestamp() * 1000):
+                    new_count += 1
+                else:
+                    updated_count += 1
         
-        logger.info(f"  New tickets: {new_count}")
-        logger.info(f"  Updated tickets: {updated_count}")
-        stats['new_tickets'] = new_count
-        stats['updated_tickets'] = updated_count
+        if new_count > 0 or updated_count > 0:
+            logger.info(f"  New tickets: {new_count}")
+            logger.info(f"  Updated tickets: {updated_count}")
+            stats['new_tickets'] = new_count
+            stats['updated_tickets'] = updated_count
     
     return all_tickets
 
@@ -966,7 +883,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  Dual Data Source + Token Retry + Cloud API + Null Safety")
+    logger.info("  Dual Data Source + Token Retry + Cloud API + Working Pagination")
     logger.info("=" * 60)
 
 # ============================================================
