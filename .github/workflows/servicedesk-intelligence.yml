@@ -2,16 +2,15 @@ name: ServiceDesk Intelligence Sync
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       force_full_sync:
-        description: 'Force full sync (delete checkpoint)'
+        description: 'Force full sync'
         required: false
         type: boolean
         default: false
 
-# Prevent concurrent runs
 concurrency:
   group: servicedesk-sync
   cancel-in-progress: false
@@ -19,73 +18,32 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 2 hours max
+    timeout-minutes: 120
     
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests
+        run: pip install requests
 
-      # NEW: Test script syntax
-      - name: Validate script syntax
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "VALIDATING PYTHON SCRIPT SYNTAX"
-          echo "════════════════════════════════════════════════════════"
-          python -m py_compile scripts/sync_servicedesk_intelligence.py
-          echo "✓ Script syntax is valid"
-          echo "════════════════════════════════════════════════════════"
-
-      # NEW: Debug environment variables
-      - name: Debug - Check environment
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "DEBUG: ENVIRONMENT CHECKS"
-          echo "════════════════════════════════════════════════════════"
-          echo "Python version: \$(python --version)"
-          echo "Working directory: \$(pwd)"
-          echo "Script exists: \$(ls -lh scripts/sync_servicedesk_intelligence.py)"
-          echo "Force full sync input: \${{ github.event.inputs.force_full_sync }}"
-          echo "════════════════════════════════════════════════════════"
-
-      # RESTORE CHECKPOINT (if exists and not forcing full sync)
-      - name: Restore checkpoint from previous run
+      - name: Restore checkpoint
         if: github.event.inputs.force_full_sync != 'true'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: sync-checkpoint
 
-      # DELETE CHECKPOINT (only if force full sync)
-      - name: Force Full Sync - Delete checkpoint
+      - name: Delete checkpoint (force full sync)
         if: github.event.inputs.force_full_sync == 'true'
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "🔄 FORCE FULL SYNC - Deleting checkpoint files"
-          echo "════════════════════════════════════════════════════════"
-          rm -f sync_checkpoint.json
-          echo "✓ Checkpoint files deleted"
-          ls -lah *.json 2>/dev/null || echo "No JSON files found"
-          echo "════════════════════════════════════════════════════════"
+        run: rm -f sync_checkpoint.json
 
-      # SHOW ENVIRONMENT (for debugging)
-      - name: Show environment
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "ENVIRONMENT VARIABLE BEING PASSED TO PYTHON:"
-          echo "  FORCE_FULL_SYNC=\${{ github.event.inputs.force_full_sync }}"
-          echo "════════════════════════════════════════════════════════"
-
-      # RUN SYNC (with error capture)
-      - name: Run ServiceDesk Intelligence Sync
+      - name: Run sync
         env:
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
@@ -95,36 +53,11 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync }}
         run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "STARTING SYNC"
-          echo "════════════════════════════════════════════════════════"
-          echo "FORCE_FULL_SYNC environment variable: \$FORCE_FULL_SYNC"
-          echo ""
-          
-          # Run with error capture
-          set +e  # Don't exit on error
-          python scripts/sync_servicedesk_intelligence.py 2>&1 | tee sync_output.log
-          SYNC_EXIT_CODE=\$?
-          set -e  # Re-enable exit on error
-          
-          echo ""
-          echo "════════════════════════════════════════════════════════"
-          echo "SYNC COMPLETED WITH EXIT CODE: \$SYNC_EXIT_CODE"
-          echo "════════════════════════════════════════════════════════"
-          
-          # Show last 50 lines if there was an error
-          if [ \$SYNC_EXIT_CODE -ne 0 ]; then
-            echo ""
-            echo "════════════════════════════════════════════════════════"
-            echo "LAST 50 LINES OF OUTPUT (FOR DEBUGGING):"
-            echo "════════════════════════════════════════════════════════"
-            tail -n 50 sync_output.log
-            echo "════════════════════════════════════════════════════════"
-            exit \$SYNC_EXIT_CODE
-          fi
+          echo "Starting sync..."
+          echo "Force full sync: \$FORCE_FULL_SYNC"
+          python scripts/sync_servicedesk_intelligence.py
 
-      # SAVE CHECKPOINT (for next run)
-      - name: Save checkpoint for next run
+      - name: Save checkpoint
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -132,32 +65,3 @@ jobs:
           path: sync_checkpoint.json
           retention-days: 30
           if-no-files-found: warn
-
-      # NEW: Upload logs if failed
-      - name: Upload sync logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-logs-\${{ github.run_number }}
-          path: sync_output.log
-          retention-days: 7
-          if-no-files-found: warn
-
-      # NEW: Show summary
-      - name: Sync summary
-        if: always()
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "WORKFLOW SUMMARY"
-          echo "════════════════════════════════════════════════════════"
-          echo "Run number: \${{ github.run_number }}"
-          echo "Run ID: \${{ github.run_id }}"
-          echo "Triggered by: \${{ github.event_name }}"
-          if [ -f sync_checkpoint.json ]; then
-            echo "Checkpoint file created: YES"
-            echo "Checkpoint content:"
-            cat sync_checkpoint.json
-          else
-            echo "Checkpoint file created: NO"
-          fi
-          echo "════════════════════════════════════════════════════════"
