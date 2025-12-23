@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.2.3-CLOUD
-Dual Data Source + Token Retry Logic + Rate Limit Handling + Cloud API
+ServiceDesk Intelligence Suite v3.2.4-CLOUD
+Dual Data Source + Token Retry Logic + Cloud API + Null Safety
+
+Changes in v3.2.4-CLOUD:
+- Added null safety for all ticket fields (Cloud API returns null instead of {})
+- Fixed AttributeError when processing tickets with null values
+- Improved error handling for missing nested fields
 
 Changes in v3.2.3-CLOUD:
 - Fixed for ServiceDesk Plus Cloud API (uses /list endpoint and POST)
 - Added fallback methods for different Cloud API versions
 - Improved error logging for API diagnostics
-
-Changes in v3.2.2-FIXED:
-- Re-added secret cleaning (strip quotes, backslashes, whitespace)
-- Added 401 error retry logic with automatic token refresh
-- Proactive token refresh (when < 10 minutes remaining)
-- Rate limit handling (delays between conversation fetches)
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -62,7 +61,7 @@ BATCH_PAUSE_SECONDS = 3.0
 CONVERSATION_FETCH_DELAY = 0.3  # Delay every 10 conversations
 
 # Version
-VERSION = "v3.2.3-CLOUD"
+VERSION = "v3.2.4-CLOUD"
 
 # ============================================================
 # LOGGING SETUP
@@ -584,45 +583,87 @@ def determine_status_category(status: str, internal_status: str) -> Tuple[str, s
     return 'closed', 'defaulted to closed (uncertain)'
 
 def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
-    """Process a single ticket into Dust document format."""
+    """Process a single ticket into Dust document format with null safety."""
+    
+    # Helper function to safely get nested values
+    def safe_get(obj, key, default=''):
+        """Safely get value from dict, handling None."""
+        if not obj:
+            return default
+        value = obj.get(key)
+        if value is None:
+            return default
+        return value
+    
+    def safe_get_nested(obj, key, nested_key, default=''):
+        """Safely get nested value, handling None at any level."""
+        parent = safe_get(obj, key, {})
+        if not isinstance(parent, dict):
+            return default
+        value = parent.get(nested_key)
+        if value is None:
+            return default
+        return value
     
     # Extract basic info
     ticket_id = str(ticket.get('id', ''))
-    subject = ticket.get('subject', 'No Subject')
+    subject = ticket.get('subject', 'No Subject') or 'No Subject'
     
     # Status determination
-    status_obj = ticket.get('status', {})
-    status = status_obj.get('name', 'Unknown')
-    internal_status = status_obj.get('internal_name', status)
+    status_obj = safe_get(ticket, 'status', {})
+    if isinstance(status_obj, dict):
+        status = status_obj.get('name', 'Unknown') or 'Unknown'
+        internal_status = status_obj.get('internal_name', status) or status
+    else:
+        status = 'Unknown'
+        internal_status = 'Unknown'
+    
     status_category, status_reason = determine_status_category(status, internal_status)
     
-    # Timestamps
-    created_time = ticket.get('created_time', {}).get('display_value', 'Unknown')
-    due_by_time = ticket.get('due_by_time', {}).get('display_value', 'Not set')
-    resolved_time = ticket.get('resolved_time', {}).get('display_value', 'Not resolved')
-    closed_time = ticket.get('closed_time', {}).get('display_value', 'Not closed')
+    # Timestamps - handle None values
+    created_time = safe_get_nested(ticket, 'created_time', 'display_value', 'Unknown')
+    due_by_time = safe_get_nested(ticket, 'due_by_time', 'display_value', 'Not set')
+    resolved_time = safe_get_nested(ticket, 'resolved_time', 'display_value', 'Not resolved')
+    closed_time = safe_get_nested(ticket, 'closed_time', 'display_value', 'Not closed')
     
-    # People
-    technician_obj = ticket.get('technician', {})
-    technician_name = technician_obj.get('name', 'Unassigned')
-    technician_email = technician_obj.get('email_id', '')
+    # People - handle None values
+    technician_obj = safe_get(ticket, 'technician', {})
+    if isinstance(technician_obj, dict):
+        technician_name = technician_obj.get('name', 'Unassigned') or 'Unassigned'
+        technician_email = technician_obj.get('email_id', '') or ''
+    else:
+        technician_name = 'Unassigned'
+        technician_email = ''
     
-    requester_obj = ticket.get('requester', {})
-    requester_name = requester_obj.get('name', 'Unknown')
-    requester_email = requester_obj.get('email_id', '')
+    requester_obj = safe_get(ticket, 'requester', {})
+    if isinstance(requester_obj, dict):
+        requester_name = requester_obj.get('name', 'Unknown') or 'Unknown'
+        requester_email = requester_obj.get('email_id', '') or ''
+    else:
+        requester_name = 'Unknown'
+        requester_email = ''
     
-    # Classification
-    priority = ticket.get('priority', {}).get('name', 'Normal')
-    category = ticket.get('category', {}).get('name', 'Uncategorized')
-    subcategory = ticket.get('subcategory', {}).get('name', '')
-    request_type = ticket.get('request_type', {}).get('name', 'Service Request')
+    # Classification - handle None values
+    priority_obj = safe_get(ticket, 'priority', {})
+    priority = (priority_obj.get('name', 'Normal') or 'Normal') if isinstance(priority_obj, dict) else 'Normal'
     
-    # Description and resolution
-    description = ticket.get('description', 'No description')
-    resolution = ticket.get('resolution', {}).get('content', '')
+    category_obj = safe_get(ticket, 'category', {})
+    category = (category_obj.get('name', 'Uncategorized') or 'Uncategorized') if isinstance(category_obj, dict) else 'Uncategorized'
+    
+    subcategory_obj = safe_get(ticket, 'subcategory', {})
+    subcategory = (subcategory_obj.get('name', '') or '') if isinstance(subcategory_obj, dict) else ''
+    
+    request_type_obj = safe_get(ticket, 'request_type', {})
+    request_type = (request_type_obj.get('name', 'Service Request') or 'Service Request') if isinstance(request_type_obj, dict) else 'Service Request'
+    
+    # Description and resolution - handle None
+    description = ticket.get('description', 'No description') or 'No description'
+    
+    resolution_obj = safe_get(ticket, 'resolution', {})
+    resolution = (resolution_obj.get('content', '') or '') if isinstance(resolution_obj, dict) else ''
     
     # Conversation data
-    conversation_count = conversation_data.get('count', 0)
+    conversation_count = conversation_data.get('count', 0) if conversation_data else 0
     
     # Build tags
     tags = [
@@ -925,7 +966,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  Dual Data Source + Token Retry + Cloud API")
+    logger.info("  Dual Data Source + Token Retry + Cloud API + Null Safety")
     logger.info("=" * 60)
 
 # ============================================================
