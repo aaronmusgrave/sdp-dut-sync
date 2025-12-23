@@ -2,7 +2,7 @@ name: ServiceDesk Intelligence Sync
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/30 * * * *'  # Every 30 minutes
   workflow_dispatch:
     inputs:
       force_full_sync:
@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 120
     
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -30,7 +30,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests
 
       - name: Restore checkpoint
         if: github.event.inputs.force_full_sync != 'true'
@@ -39,11 +40,13 @@ jobs:
         with:
           name: sync-checkpoint
 
-      - name: Delete checkpoint (force full sync)
+      - name: Delete checkpoint if force full sync
         if: github.event.inputs.force_full_sync == 'true'
-        run: rm -f sync_checkpoint.json
+        run: |
+          rm -f sync_checkpoint.json
+          echo "✓ Checkpoint deleted"
 
-      - name: Run sync
+      - name: Run ServiceDesk Intelligence Sync
         env:
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
@@ -53,8 +56,28 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync }}
         run: |
-          echo "Starting sync..."
+          echo "════════════════════════════════════════════════════════"
+          echo "STARTING SYNC"
+          echo "════════════════════════════════════════════════════════"
           echo "Force full sync: \$FORCE_FULL_SYNC"
+          echo "Working directory: \$(pwd)"
+          echo ""
+          
+          # Verify script exists
+          if [ ! -f scripts/sync_servicedesk_intelligence.py ]; then
+            echo "❌ ERROR: Script not found!"
+            echo "Looking for: \$(pwd)/scripts/sync_servicedesk_intelligence.py"
+            echo ""
+            echo "Contents of scripts directory:"
+            ls -la scripts/ || echo "scripts/ directory not found!"
+            exit 1
+          fi
+          
+          echo "✓ Script found"
+          echo "Executing sync..."
+          echo ""
+          
+          # THIS IS THE CRITICAL LINE THAT WAS MISSING:
           python scripts/sync_servicedesk_intelligence.py
 
       - name: Save checkpoint
@@ -65,3 +88,17 @@ jobs:
           path: sync_checkpoint.json
           retention-days: 30
           if-no-files-found: warn
+
+      - name: Show results
+        if: always()
+        run: |
+          echo "════════════════════════════════════════════════════════"
+          echo "SYNC STEP COMPLETED"
+          echo "════════════════════════════════════════════════════════"
+          if [ -f sync_checkpoint.json ]; then
+            echo "✓ Checkpoint file created"
+            echo "Content:"
+            cat sync_checkpoint.json
+          else
+            echo "⚠ No checkpoint file created"
+          fi
