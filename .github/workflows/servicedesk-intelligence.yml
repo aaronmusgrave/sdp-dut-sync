@@ -2,7 +2,7 @@ name: Sync ServiceDesk Intelligence
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # Every 2 hours (more reliable than 90 min)
+    - cron: '0 */2 * * *'  # Every 2 hours
   workflow_dispatch:
     inputs:
       force_full_sync:
@@ -20,7 +20,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      # CORRECT: Use dawidd6/action-download-artifact for previous runs
       - name: Download checkpoint from previous run
         uses: dawidd6/action-download-artifact@v3
         with:
@@ -32,18 +31,13 @@ jobs:
       
       - name: Check checkpoint status
         run: |
-          echo "=== Checkpoint Status ==="
+          echo "Checkpoint Status Check"
           if [ -f sync_checkpoint.json ]; then
-            echo "✅ Checkpoint file found!"
-            echo "Contents:"
+            echo "Checkpoint file found"
             cat sync_checkpoint.json
-            LAST_SYNC=\$(jq -r '.last_sync_timestamp' sync_checkpoint.json 2>/dev/null || echo "unknown")
-            echo ""
-            echo "Last sync: \$LAST_SYNC"
           else
-            echo "⚠️ No checkpoint file found - will perform FULL SYNC"
+            echo "No checkpoint file - will perform full sync"
           fi
-          echo "========================="
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -65,12 +59,8 @@ jobs:
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
           FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync || 'false' }}
         run: |
-          echo "🚀 Starting ServiceDesk Intelligence Sync..."
+          echo "Starting ServiceDesk Intelligence Sync..."
           python scripts/sync_servicedesk_intelligence.py
-          SYNC_EXIT_CODE=\$?
-          echo ""
-          echo "Sync completed with exit code: \$SYNC_EXIT_CODE"
-          exit \$SYNC_EXIT_CODE
       
       - name: Upload checkpoint for next run
         uses: actions/upload-artifact@v4
@@ -84,12 +74,10 @@ jobs:
       - name: Sync Summary
         if: always()
         run: |
-          echo ""
-          echo "=== Sync Summary ==="
+          echo "Sync Summary"
           if [ -f sync_checkpoint.json ]; then
-            echo "✅ Checkpoint saved for next run"
+            echo "Checkpoint saved for next run"
             echo "Next sync will be incremental"
           else
-            echo "⚠️ No checkpoint file created"
+            echo "No checkpoint file created"
           fi
-          echo "===================="
