@@ -11,6 +11,11 @@ on:
         type: boolean
         default: false
 
+# ADD THIS: Grant permissions to read workflow runs and artifacts
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -27,6 +32,7 @@ jobs:
           name: sync-checkpoint
           path: .
           if_no_artifact_found: ignore
+          github_token: \${{ secrets.GITHUB_TOKEN }}  # ADD THIS
         continue-on-error: true
       
       - name: Check checkpoint status
