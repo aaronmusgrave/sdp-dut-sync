@@ -1,19 +1,15 @@
-name: ServiceDesk Intelligence Sync
+name: Sync ServiceDesk Intelligence
 
 on:
   schedule:
-    - cron: '*/90 * * * *'
+    - cron: '0 */2 * * *'  # Every 2 hours (more reliable than 90 min)
   workflow_dispatch:
     inputs:
       force_full_sync:
-        description: 'Force full sync'
+        description: 'Force full sync (ignore checkpoint)'
         required: false
         type: boolean
         default: false
-
-concurrency:
-  group: servicedesk-sync
-  cancel-in-progress: false
 
 jobs:
   sync:
@@ -21,45 +17,45 @@ jobs:
     timeout-minutes: 120
     
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Python
+      
+      # CORRECT: Use dawidd6/action-download-artifact for previous runs
+      - name: Download checkpoint from previous run
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: sync-servicedesk-intelligence.yml
+          name: sync-checkpoint
+          path: .
+          if_no_artifact_found: ignore
+        continue-on-error: true
+      
+      - name: Check checkpoint status
+        run: |
+          echo "=== Checkpoint Status ==="
+          if [ -f sync_checkpoint.json ]; then
+            echo "✅ Checkpoint file found!"
+            echo "Contents:"
+            cat sync_checkpoint.json
+            LAST_SYNC=\$(jq -r '.last_sync_timestamp' sync_checkpoint.json 2>/dev/null || echo "unknown")
+            echo ""
+            echo "Last sync: \$LAST_SYNC"
+          else
+            echo "⚠️ No checkpoint file found - will perform FULL SYNC"
+          fi
+          echo "========================="
+      
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
+      
       - name: Install dependencies
-        run: pip install requests
-
-      - name: Diagnostic - Check everything
         run: |
-          echo "=== Python ===" 
-          python --version
-          python -c "import sys; print(sys.executable)"
-          echo ""
-          echo "=== Script ===" 
-          ls -lh scripts/sync_servicedesk_intelligence.py
-          echo ""
-          echo "=== Syntax Check ===" 
-          python -m py_compile scripts/sync_servicedesk_intelligence.py
-          echo "✓ Syntax OK"
-          echo ""
-          echo "=== First 50 lines ===" 
-          head -50 scripts/sync_servicedesk_intelligence.py
-
-      - name: Restore checkpoint
-        if: github.event.inputs.force_full_sync != 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: sync-checkpoint
-
-      - name: Delete checkpoint
-        if: github.event.inputs.force_full_sync == 'true'
-        run: rm -f sync_checkpoint.json
-
-      - name: Run sync with full error capture
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Run sync script
         env:
           DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
           DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
@@ -67,17 +63,33 @@ jobs:
           SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
           SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
-          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync }}
+          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync || 'false' }}
         run: |
-          echo "Starting sync..."
-          python -u scripts/sync_servicedesk_intelligence.py 2>&1
-          echo "Sync completed with exit code: \$?"
-
-      - name: Save checkpoint
-        if: always()
+          echo "🚀 Starting ServiceDesk Intelligence Sync..."
+          python scripts/sync_servicedesk_intelligence.py
+          SYNC_EXIT_CODE=\$?
+          echo ""
+          echo "Sync completed with exit code: \$SYNC_EXIT_CODE"
+          exit \$SYNC_EXIT_CODE
+      
+      - name: Upload checkpoint for next run
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: sync-checkpoint
           path: sync_checkpoint.json
-          retention-days: 30
+          retention-days: 90
           if-no-files-found: warn
+      
+      - name: Sync Summary
+        if: always()
+        run: |
+          echo ""
+          echo "=== Sync Summary ==="
+          if [ -f sync_checkpoint.json ]; then
+            echo "✅ Checkpoint saved for next run"
+            echo "Next sync will be incremental"
+          else
+            echo "⚠️ No checkpoint file created"
+          fi
+          echo "===================="
