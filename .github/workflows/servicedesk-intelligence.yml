@@ -11,10 +11,8 @@ on:
         type: boolean
         default: false
 
-# ADD THIS: Grant permissions to read workflow runs and artifacts
 permissions:
-  actions: read
-  contents: read
+  contents: write  # Need write to commit checkpoint
 
 jobs:
   sync:
@@ -25,21 +23,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Download checkpoint from previous run
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          workflow: sync-servicedesk-intelligence.yml
-          name: sync-checkpoint
-          path: .
-          if_no_artifact_found: ignore
-          github_token: \${{ secrets.GITHUB_TOKEN }}  # ADD THIS
-        continue-on-error: true
-      
-      - name: Check checkpoint status
+      - name: Check for existing checkpoint
         run: |
           echo "Checkpoint Status Check"
           if [ -f sync_checkpoint.json ]; then
-            echo "Checkpoint file found"
+            echo "Checkpoint file found in repository"
             cat sync_checkpoint.json
           else
             echo "No checkpoint file - will perform full sync"
@@ -68,21 +56,27 @@ jobs:
           echo "Starting ServiceDesk Intelligence Sync..."
           python scripts/sync_servicedesk_intelligence.py
       
-      - name: Upload checkpoint for next run
-        uses: actions/upload-artifact@v4
+      - name: Commit checkpoint to repository
         if: always()
-        with:
-          name: sync-checkpoint
-          path: sync_checkpoint.json
-          retention-days: 90
-          if-no-files-found: warn
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          if [ -f sync_checkpoint.json ]; then
+            git add sync_checkpoint.json
+            git diff --staged --quiet || git commit -m "Update sync checkpoint [skip ci]"
+            git push
+            echo "Checkpoint committed to repository"
+          else
+            echo "No checkpoint file to commit"
+          fi
       
       - name: Sync Summary
         if: always()
         run: |
           echo "Sync Summary"
           if [ -f sync_checkpoint.json ]; then
-            echo "Checkpoint saved for next run"
+            echo "Checkpoint saved to repository"
             echo "Next sync will be incremental"
           else
             echo "No checkpoint file created"
