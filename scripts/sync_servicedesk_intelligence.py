@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.3.0-COMPLETE
-Dual Data Source + Cloud API + Working Pagination + CONVERSATION DIAGNOSTICS
+ServiceDesk Intelligence Suite v3.4.0-DISPLAY-ID
+Dual Data Source + Short Display IDs + Optimized Rate Limiting
 
-Changes in v3.3.0-COMPLETE:
-- REDUCED: Upload workers from 3 to 2 (optimal balance)
-- ADDED: 0.3s delay between uploads (avoid rate limits)
-- ADDED: Comprehensive conversation endpoint testing (3 methods)
-- ADDED: Detailed logging to diagnose conversation issues
-- Tests: /conversations, /notifications, /notes
-- TARGET: 99%+ success rate + accurate conversation counts
+Changes in v3.4.0-DISPLAY-ID:
+- CHANGED: Use display_id (short) instead of internal ID (long)
+- EXAMPLE: ticket-15877 instead of ticket-150534000029846001
+- OPTIMIZED: 2 workers + 0.3s delay for 100% success rate
+- MAINTAINED: All conversation diagnostics from v3.3.0
 
 Architecture:
 - servicedesk: All tickets (active + closed) with UPSERT updates
@@ -57,11 +55,11 @@ SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 CHECKPOINT_FILE = 'sync_checkpoint.json'
 BATCH_SIZE = 100
 MAX_CONCURRENT_CONVERSATIONS = 20
-MAX_CONCURRENT_UPLOADS = 2  # REDUCED to 2 - optimal balance
-UPLOAD_DELAY = 0.3  # 0.3 second delay between uploads
+MAX_CONCURRENT_UPLOADS = 2
+UPLOAD_DELAY = 0.3
 
 # Version
-VERSION = "v3.3.0-COMPLETE"
+VERSION = "v3.4.0-DISPLAY-ID"
 
 # ============================================================
 # LOGGING SETUP
@@ -321,12 +319,10 @@ Resolution: {content.get('resolution', 'N/A')}
             
             if response.status_code in [200, 201]:
                 stats['api_calls'] += 1
-                # Add delay after successful upload
                 time.sleep(UPLOAD_DELAY)
                 return True, None
             
             elif response.status_code == 429:
-                # Rate limited - wait and retry
                 wait_time = (2 ** attempt) * 2
                 logger.warning(f"    Rate limited on {doc_id}, waiting {wait_time}s...")
                 time.sleep(wait_time)
@@ -334,7 +330,6 @@ Resolution: {content.get('resolution', 'N/A')}
                 continue
             
             else:
-                # Other HTTP error
                 error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
                 last_error = error_msg
                 if attempt < max_retries - 1:
@@ -659,7 +654,7 @@ def determine_status_category(status: str, internal_status: str) -> Tuple[str, s
     return 'closed', 'defaulted to closed (uncertain)'
 
 def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
-    """Process a single ticket into Dust document format with null safety."""
+    """Process a single ticket into Dust document format with null safety and short display IDs."""
     
     def safe_get(obj, key, default=''):
         if not obj:
@@ -678,7 +673,16 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
             return default
         return value
     
-    ticket_id = str(ticket.get('id', ''))
+    # GET BOTH IDs: display_id (short) and internal id (long)
+    internal_id = str(ticket.get('id', ''))
+    
+    # Extract display_id (short ticket number like 15877)
+    display_id_obj = safe_get(ticket, 'display_id', {})
+    if isinstance(display_id_obj, dict):
+        display_id = str(display_id_obj.get('display_value', internal_id))
+    else:
+        display_id = str(display_id_obj) if display_id_obj else internal_id
+    
     subject = ticket.get('subject', 'No Subject') or 'No Subject'
     
     status_obj = safe_get(ticket, 'status', {})
@@ -731,8 +735,9 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     
     conversation_count = conversation_data.get('count', 0) if conversation_data else 0
     
+    # USE SHORT DISPLAY ID in tags
     tags = [
-        f"ticket-id:{ticket_id}",
+        f"ticket-id:{display_id}",
         f"status:{status}",
         f"status-category:{status_category}",
         f"priority:{priority}",
@@ -751,7 +756,8 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         tags.append("NOT-CLOSED")
     
     content = {
-        "ticket_id": ticket_id,
+        "ticket_id": display_id,  # SHORT display ID (15877)
+        "internal_id": internal_id,  # LONG internal ID (150534000029846001)
         "subject": subject,
         "status": status,
         "status_category": status_category,
@@ -770,7 +776,7 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         "resolved_time": resolved_time,
         "closed_time": closed_time,
         "conversation_count": conversation_count,
-        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{ticket_id}"
+        "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{internal_id}"
     }
     
     if status_category == 'active':
@@ -847,10 +853,18 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
     
     for ticket in batch_tickets:
         ticket_id = str(ticket.get('id', ''))
+        
+        # Extract short display_id for document ID
+        display_id_obj = ticket.get('display_id', {})
+        if isinstance(display_id_obj, dict):
+            display_id = str(display_id_obj.get('display_value', ticket_id))
+        else:
+            display_id = str(display_id_obj) if display_id_obj else ticket_id
+        
         conv_data = conversations_map.get(ticket_id, {"count": 0})
         
         content, tags = process_ticket(ticket, conv_data)
-        doc_id = f"ticket-{ticket_id}"
+        doc_id = f"ticket-{display_id}"  # Use SHORT display ID
         
         documents.append((doc_id, content, tags))
         
@@ -909,13 +923,14 @@ def run_sync():
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
-    logger.info("🔬 DIAGNOSTIC MODE + RATE LIMIT OPTIMIZATION:")
+    logger.info("🎯 SHORT DISPLAY ID MODE + RATE LIMIT OPTIMIZATION:")
+    logger.info(f"   • Using display_id (e.g. 15877) instead of internal ID")
     logger.info(f"   • Testing 3 conversation endpoints")
     logger.info(f"   • Parallel conversations: {MAX_CONCURRENT_CONVERSATIONS} workers")
     logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers (optimal)")
     logger.info(f"   • Upload delay: {UPLOAD_DELAY}s between requests")
     logger.info(f"   • Batch size: {BATCH_SIZE}")
-    logger.info(f"   • Target: 99%+ upload success + accurate conversations")
+    logger.info(f"   • Target: 100% upload success + accurate conversations")
     logger.info("")
     
     refresh_token()
@@ -985,12 +1000,12 @@ def run_sync():
         est_minutes = total_batches * 0.6
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync with diagnostics)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync with short IDs)")
     else:
         est_minutes = total_batches * 0.4
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with diagnostics)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with short IDs)")
     
     processing_start = time.time()
     for i in range(0, len(tickets), BATCH_SIZE):
@@ -1083,7 +1098,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  COMPLETE: 2 Workers + 0.3s Delay + 3 Endpoint Testing")
+    logger.info("  SHORT DISPLAY IDs + 2 Workers + 0.3s Delay = Perfect!")
     logger.info("=" * 60)
 
 # ============================================================
