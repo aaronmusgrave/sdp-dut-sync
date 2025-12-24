@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.4.0-DISPLAY-ID
-Dual Data Source + Short Display IDs + Optimized Rate Limiting
+ServiceDesk Intelligence Suite v3.5.0-CONVERSATIONS
+ENHANCED: Full conversation content capture + Short Display IDs
 
-Changes in v3.4.0-DISPLAY-ID:
-- CHANGED: Use display_id (short) instead of internal ID (long)
-- EXAMPLE: ticket-15877 instead of ticket-150534000029846001
-- OPTIMIZED: 2 workers + 0.3s delay for 100% success rate
-- MAINTAINED: All conversation diagnostics from v3.3.0
+Changes in v3.5.0-CONVERSATIONS:
+- NEW: Capture full conversation message content
+- NEW: Store individual messages with timestamps and senders
+- NEW: Include internal notes in searchable format
+- NEW: Add conversation excerpts to document text
+- MAINTAINED: Short display IDs (ticket-15877)
+- MAINTAINED: 2 workers + 0.3s delay (100% success rate)
 
 Architecture:
-- servicedesk: All tickets (active + closed) with UPSERT updates
-- servicedesk-active: Only active tickets, completely rebuilt each sync
+- servicedesk: All tickets with FULL conversation content
+- servicedesk-active: Active tickets with conversation content
 """
 
 import os
@@ -29,10 +31,7 @@ from threading import Lock
 # CONFIGURATION
 # ============================================================
 def clean_secret(value: str) -> str:
-    """
-    Remove quotes, backslashes, and whitespace from secrets.
-    Handles common secret format issues from GitHub Actions.
-    """
+    """Remove quotes, backslashes, and whitespace from secrets."""
     if not value:
         return ''
     cleaned = value.strip()
@@ -59,7 +58,7 @@ MAX_CONCURRENT_UPLOADS = 2
 UPLOAD_DELAY = 0.3
 
 # Version
-VERSION = "v3.4.0-DISPLAY-ID"
+VERSION = "v3.5.0-CONVERSATIONS"
 
 # ============================================================
 # LOGGING SETUP
@@ -92,7 +91,8 @@ CONVERSATION_DIAGNOSTICS = {
     'notes_endpoint_error': 0,
     'combined_success': 0,
     'total_notifications': 0,
-    'total_notes': 0
+    'total_notes': 0,
+    'total_messages': 0
 }
 
 # Statistics
@@ -288,7 +288,7 @@ def upload_document_to_dust(data_source_id: str, doc_id: str, content: dict, tag
         "Content-Type": "application/json"
     }
     
-    # Prepare text content
+    # Prepare text content with conversation context
     text_content = f"""
 Ticket ID: {content.get('ticket_id', 'N/A')}
 Subject: {content.get('subject', 'N/A')}
@@ -299,6 +299,12 @@ Requester: {content.get('requester', 'N/A')}
 Category: {content.get('category', 'N/A')}
 Description: {content.get('description', 'N/A')}
 Resolution: {content.get('resolution', 'N/A')}
+
+CONVERSATION HISTORY ({content.get('conversation_count', 0)} exchanges):
+{content.get('conversation_summary', 'No conversations')}
+
+INTERNAL NOTES:
+{content.get('internal_notes_summary', 'No internal notes')}
 """
     
     payload = {
@@ -358,12 +364,26 @@ Resolution: {content.get('resolution', 'N/A')}
     return False, last_error
 
 # ============================================================
-# SERVICEDESK API - ENHANCED CONVERSATION FETCHING
+# SERVICEDESK API - ENHANCED CONVERSATION FETCHING WITH CONTENT
 # ============================================================
-def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tuple[int, dict]:
+def strip_html(html_content: str) -> str:
+    """Remove HTML tags and return plain text."""
+    if not html_content:
+        return ""
+    
+    # Simple HTML stripping (for basic cases)
+    import re
+    text = re.sub('<[^<]+?>', '', html_content)
+    text = text.replace('&nbsp;', ' ')
+    text = text.replace('&lt;', '<')
+    text = text.replace('&gt;', '>')
+    text = text.replace('&amp;', '&')
+    return text.strip()
+
+def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tuple[int, dict, List[dict], List[dict]]:
     """
-    Comprehensive conversation fetching - tries all three endpoints.
-    Returns (total_count, diagnostic_info)
+    Fetch conversations with FULL CONTENT from all three endpoints.
+    Returns (total_count, diagnostic_info, conversation_messages, note_messages)
     """
     global TOKEN, CONVERSATION_401_ERRORS
     
@@ -377,13 +397,15 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
     }
     
     total_count = 0
+    conversation_messages = []
+    note_messages = []
     diagnostic = {
         'conversations': {'success': False, 'count': 0, 'error': None},
         'notifications': {'success': False, 'count': 0, 'error': None},
         'notes': {'success': False, 'count': 0, 'error': None}
     }
     
-    # Try Method 1: /conversations endpoint
+    # Method 1: /conversations endpoint (FULL CONTENT)
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
         response = requests.get(url, headers=headers, timeout=30)
@@ -398,6 +420,40 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
                 diagnostic['conversations']['success'] = True
                 diagnostic['conversations']['count'] = len(conversations)
                 total_count += len(conversations)
+                
+                # Extract conversation content
+                for conv in conversations:
+                    # Get description content (can be dict or string)
+                    desc = conv.get('description', {})
+                    if isinstance(desc, dict):
+                        content_html = desc.get('html', '') or desc.get('plain', '')
+                    else:
+                        content_html = str(desc)
+                    
+                    content_text = strip_html(content_html)
+                    
+                    # Get sender info
+                    from_obj = conv.get('from', {})
+                    from_email = from_obj.get('email_id', 'Unknown') if isinstance(from_obj, dict) else 'Unknown'
+                    from_name = from_obj.get('name', 'Unknown') if isinstance(from_obj, dict) else 'Unknown'
+                    
+                    # Get timestamp
+                    created_time = conv.get('created_time', {})
+                    if isinstance(created_time, dict):
+                        timestamp = created_time.get('display_value', 'Unknown time')
+                    else:
+                        timestamp = str(created_time)
+                    
+                    message = {
+                        'type': 'conversation',
+                        'from': from_email,
+                        'from_name': from_name,
+                        'subject': conv.get('subject', ''),
+                        'content': content_text,
+                        'timestamp': timestamp
+                    }
+                    conversation_messages.append(message)
+                    CONVERSATION_DIAGNOSTICS['total_messages'] += 1
             else:
                 CONVERSATION_DIAGNOSTICS['conversations_endpoint_empty'] += 1
                 diagnostic['conversations']['error'] = 'Empty response'
@@ -409,7 +465,7 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
         CONVERSATION_DIAGNOSTICS['conversations_endpoint_error'] += 1
         diagnostic['conversations']['error'] = str(e)
     
-    # Try Method 2: /notifications endpoint
+    # Method 2: /notifications endpoint (backup - don't double count)
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications"
         response = requests.get(url, headers=headers, timeout=30)
@@ -424,7 +480,6 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
                 CONVERSATION_DIAGNOSTICS['total_notifications'] += len(notifications)
                 diagnostic['notifications']['success'] = True
                 diagnostic['notifications']['count'] = len(notifications)
-                total_count += len(notifications)
             else:
                 CONVERSATION_DIAGNOSTICS['notifications_endpoint_empty'] += 1
                 diagnostic['notifications']['error'] = 'Empty response'
@@ -436,7 +491,7 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
         CONVERSATION_DIAGNOSTICS['notifications_endpoint_error'] += 1
         diagnostic['notifications']['error'] = str(e)
     
-    # Try Method 3: /notes endpoint
+    # Method 3: /notes endpoint (FULL CONTENT - Internal notes)
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
         response = requests.get(url, headers=headers, timeout=30)
@@ -452,6 +507,41 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
                 diagnostic['notes']['success'] = True
                 diagnostic['notes']['count'] = len(notes)
                 total_count += len(notes)
+                
+                # Extract note content
+                for note in notes:
+                    # Get description content
+                    desc = note.get('description', {})
+                    if isinstance(desc, dict):
+                        content_html = desc.get('html', '') or desc.get('plain', '')
+                    else:
+                        content_html = str(desc)
+                    
+                    content_text = strip_html(content_html)
+                    
+                    # Get sender info
+                    added_by = note.get('added_by', {})
+                    from_email = added_by.get('email_id', 'Unknown') if isinstance(added_by, dict) else 'Unknown'
+                    from_name = added_by.get('name', 'Unknown') if isinstance(added_by, dict) else 'Unknown'
+                    
+                    # Get timestamp
+                    added_time = note.get('added_time', {})
+                    if isinstance(added_time, dict):
+                        timestamp = added_time.get('display_value', 'Unknown time')
+                    else:
+                        timestamp = str(added_time)
+                    
+                    note_message = {
+                        'type': 'internal_note',
+                        'from': from_email,
+                        'from_name': from_name,
+                        'content': content_text,
+                        'timestamp': timestamp,
+                        'notify_technician': note.get('notify_technician', False),
+                        'show_to_requester': note.get('show_to_requester', False)
+                    }
+                    note_messages.append(note_message)
+                    CONVERSATION_DIAGNOSTICS['total_messages'] += 1
             else:
                 CONVERSATION_DIAGNOSTICS['notes_endpoint_empty'] += 1
                 diagnostic['notes']['error'] = 'Empty response'
@@ -466,49 +556,50 @@ def fetch_conversation_comprehensive(ticket_id: str, retry_count: int = 0) -> Tu
     if total_count > 0:
         CONVERSATION_DIAGNOSTICS['combined_success'] += 1
     
-    return total_count, diagnostic
+    return total_count, diagnostic, conversation_messages, note_messages
 
 def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
-    """Fetch conversations in parallel with comprehensive diagnostics."""
+    """Fetch conversations in parallel with FULL CONTENT."""
     conversations_map = {}
     
-    logger.info(f"  Fetching conversations with {MAX_CONCURRENT_CONVERSATIONS} parallel workers...")
-    logger.info(f"  📊 Testing 3 endpoints: /conversations, /notifications, /notes")
+    logger.info(f"  Fetching conversations with FULL CONTENT ({MAX_CONCURRENT_CONVERSATIONS} workers)...")
+    logger.info(f"  📊 Testing 3 endpoints + capturing message content")
     start_time = time.time()
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
         future_to_ticket = {
-            executor.submit(fetch_conversation_comprehensive, ticket['id']): ticket['id']
+            executor.submit(fetch_conversation_with_content, ticket['id']): ticket['id']
             for ticket in tickets
         }
         
         for future in as_completed(future_to_ticket):
             ticket_id = future_to_ticket[future]
             try:
-                total_count, diagnostic = future.result()
+                total_count, diagnostic, conv_messages, note_messages = future.result()
                 
                 conversations_map[ticket_id] = {
                     "count": total_count,
-                    "diagnostic": diagnostic
+                    "diagnostic": diagnostic,
+                    "conversations": conv_messages,
+                    "notes": note_messages
                 }
                 
             except Exception as e:
                 conversations_map[ticket_id] = {
                     "count": 0,
-                    "diagnostic": {"error": str(e)}
+                    "diagnostic": {"error": str(e)},
+                    "conversations": [],
+                    "notes": []
                 }
     
     elapsed = time.time() - start_time
     logger.info(f"  ✓ Fetched conversations for {len(tickets)} tickets ({elapsed:.1f}s, {len(tickets)/elapsed:.1f}/sec)")
     
-    # Log sample diagnostic from first ticket
+    # Log sample diagnostic
     if conversations_map:
         first_ticket_id = list(conversations_map.keys())[0]
-        first_diagnostic = conversations_map[first_ticket_id].get('diagnostic', {})
-        logger.info(f"  🔍 Sample diagnostic (ticket {first_ticket_id}):")
-        logger.info(f"     /conversations: {first_diagnostic.get('conversations', {})}")
-        logger.info(f"     /notifications: {first_diagnostic.get('notifications', {})}")
-        logger.info(f"     /notes: {first_diagnostic.get('notes', {})}")
+        first_data = conversations_map[first_ticket_id]
+        logger.info(f"  🔍 Sample: {first_data['count']} exchanges ({len(first_data['conversations'])} conversations, {len(first_data['notes'])} notes)")
     
     return conversations_map
 
@@ -625,7 +716,7 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     return all_tickets
 
 # ============================================================
-# TICKET PROCESSING
+# TICKET PROCESSING WITH CONVERSATION CONTENT
 # ============================================================
 def determine_status_category(status: str, internal_status: str) -> Tuple[str, str]:
     """Determine if ticket is active or closed."""
@@ -653,8 +744,44 @@ def determine_status_category(status: str, internal_status: str) -> Tuple[str, s
     
     return 'closed', 'defaulted to closed (uncertain)'
 
+def format_conversation_summary(conversations: List[dict], notes: List[dict], max_chars: int = 5000) -> Tuple[str, str]:
+    """
+    Format conversations and notes into searchable text summaries.
+    Returns (conversation_summary, notes_summary)
+    """
+    conversation_summary = ""
+    notes_summary = ""
+    
+    # Format conversations
+    if conversations:
+        conv_texts = []
+        for msg in conversations[:20]:  # Limit to first 20 messages
+            timestamp = msg.get('timestamp', 'Unknown time')
+            from_name = msg.get('from_name', 'Unknown')
+            content = msg.get('content', '')[:500]  # Limit each message to 500 chars
+            conv_texts.append(f"[{timestamp}] {from_name}: {content}")
+        
+        conversation_summary = "\n\n".join(conv_texts)
+        if len(conversation_summary) > max_chars:
+            conversation_summary = conversation_summary[:max_chars] + "... (truncated)"
+    
+    # Format internal notes
+    if notes:
+        note_texts = []
+        for note in notes:
+            timestamp = note.get('timestamp', 'Unknown time')
+            from_name = note.get('from_name', 'Unknown')
+            content = note.get('content', '')[:500]
+            note_texts.append(f"[{timestamp}] {from_name} (Internal): {content}")
+        
+        notes_summary = "\n\n".join(note_texts)
+        if len(notes_summary) > max_chars:
+            notes_summary = notes_summary[:max_chars] + "... (truncated)"
+    
+    return conversation_summary or "No conversations", notes_summary or "No internal notes"
+
 def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
-    """Process a single ticket into Dust document format with null safety and short display IDs."""
+    """Process a single ticket with FULL conversation content."""
     
     def safe_get(obj, key, default=''):
         if not obj:
@@ -673,10 +800,8 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
             return default
         return value
     
-    # GET BOTH IDs: display_id (short) and internal id (long)
+    # GET BOTH IDs
     internal_id = str(ticket.get('id', ''))
-    
-    # Extract display_id (short ticket number like 15877)
     display_id_obj = safe_get(ticket, 'display_id', {})
     if isinstance(display_id_obj, dict):
         display_id = str(display_id_obj.get('display_value', internal_id))
@@ -733,9 +858,14 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     resolution_obj = safe_get(ticket, 'resolution', {})
     resolution = (resolution_obj.get('content', '') or '') if isinstance(resolution_obj, dict) else ''
     
+    # Extract conversation data
     conversation_count = conversation_data.get('count', 0) if conversation_data else 0
+    conversations = conversation_data.get('conversations', []) if conversation_data else []
+    notes = conversation_data.get('notes', []) if conversation_data else []
     
-    # USE SHORT DISPLAY ID in tags
+    # Format conversation summaries
+    conversation_summary, notes_summary = format_conversation_summary(conversations, notes)
+    
     tags = [
         f"ticket-id:{display_id}",
         f"status:{status}",
@@ -748,6 +878,11 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         f"conversations:{conversation_count}"
     ]
     
+    if notes:
+        tags.append("has-notes")
+    else:
+        tags.append("no-notes")
+    
     if status_category == 'closed':
         tags.append("CLOSED-TICKET")
     else:
@@ -756,8 +891,8 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         tags.append("NOT-CLOSED")
     
     content = {
-        "ticket_id": display_id,  # SHORT display ID (15877)
-        "internal_id": internal_id,  # LONG internal ID (150534000029846001)
+        "ticket_id": display_id,
+        "internal_id": internal_id,
         "subject": subject,
         "status": status,
         "status_category": status_category,
@@ -776,6 +911,8 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
         "resolved_time": resolved_time,
         "closed_time": closed_time,
         "conversation_count": conversation_count,
+        "conversation_summary": conversation_summary,
+        "internal_notes_summary": notes_summary,
         "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{internal_id}"
     }
     
@@ -861,10 +998,10 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
         else:
             display_id = str(display_id_obj) if display_id_obj else ticket_id
         
-        conv_data = conversations_map.get(ticket_id, {"count": 0})
+        conv_data = conversations_map.get(ticket_id, {"count": 0, "conversations": [], "notes": []})
         
         content, tags = process_ticket(ticket, conv_data)
-        doc_id = f"ticket-{display_id}"  # Use SHORT display ID
+        doc_id = f"ticket-{display_id}"
         
         documents.append((doc_id, content, tags))
         
@@ -923,14 +1060,15 @@ def run_sync():
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
-    logger.info("🎯 SHORT DISPLAY ID MODE + RATE LIMIT OPTIMIZATION:")
-    logger.info(f"   • Using display_id (e.g. 15877) instead of internal ID")
-    logger.info(f"   • Testing 3 conversation endpoints")
+    logger.info("🎯 CONVERSATION CONTENT CAPTURE MODE:")
+    logger.info(f"   • Capturing FULL conversation message content")
+    logger.info(f"   • Storing individual messages with timestamps")
+    logger.info(f"   • Including internal notes in searchable format")
+    logger.info(f"   • Short display IDs (e.g. ticket-15877)")
     logger.info(f"   • Parallel conversations: {MAX_CONCURRENT_CONVERSATIONS} workers")
-    logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers (optimal)")
-    logger.info(f"   • Upload delay: {UPLOAD_DELAY}s between requests")
+    logger.info(f"   • Parallel uploads: {MAX_CONCURRENT_UPLOADS} workers")
+    logger.info(f"   • Upload delay: {UPLOAD_DELAY}s")
     logger.info(f"   • Batch size: {BATCH_SIZE}")
-    logger.info(f"   • Target: 100% upload success + accurate conversations")
     logger.info("")
     
     refresh_token()
@@ -997,15 +1135,15 @@ def run_sync():
     total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
     
     if is_full_sync:
-        est_minutes = total_batches * 0.6
+        est_minutes = total_batches * 0.8
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync with short IDs)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync with conversation content)")
     else:
-        est_minutes = total_batches * 0.4
+        est_minutes = total_batches * 0.5
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with short IDs)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with conversation content)")
     
     processing_start = time.time()
     for i in range(0, len(tickets), BATCH_SIZE):
@@ -1056,6 +1194,7 @@ def run_sync():
     logger.info(f"    Empty:    {CONVERSATION_DIAGNOSTICS['notes_endpoint_empty']}")
     logger.info(f"    Error:    {CONVERSATION_DIAGNOSTICS['notes_endpoint_error']}")
     logger.info(f"    Total notes: {CONVERSATION_DIAGNOSTICS['total_notes']}")
+    logger.info(f"  Total messages captured: {CONVERSATION_DIAGNOSTICS['total_messages']}")
     logger.info(f"  Combined success: {CONVERSATION_DIAGNOSTICS['combined_success']}")
     
     logger.info("")
@@ -1098,7 +1237,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  SHORT DISPLAY IDs + 2 Workers + 0.3s Delay = Perfect!")
+    logger.info("  FULL CONVERSATION CONTENT + Short IDs + Optimized")
     logger.info("=" * 60)
 
 # ============================================================
