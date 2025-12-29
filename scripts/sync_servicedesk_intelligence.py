@@ -409,8 +409,15 @@ def run_test():
     
     # Test first ticket only
     test_ticket = tickets[0]
-    ticket_id = test_ticket.get('id')
-    display_id = test_ticket.get('display_id', {}).get('display_value', ticket_id)
+    ticket_id = str(test_ticket.get('id', ''))
+    
+    # FIXED: Safe display_id extraction
+    display_id_obj = test_ticket.get('display_id', {})
+    if isinstance(display_id_obj, dict):
+        display_id = str(display_id_obj.get('display_value', ticket_id))
+    else:
+        display_id = str(display_id_obj) if display_id_obj else ticket_id
+    
     subject = test_ticket.get('subject', 'Unknown')
     
     logger.info("=" * 80)
