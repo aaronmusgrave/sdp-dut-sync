@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.5.1-DEBUG-ENHANCED
+ServiceDesk Intelligence Suite v3.5.1-DEBUG-ENHANCED (FIXED)
 ENHANCED: Full conversation content capture with DEBUG MODE
 
 Changes in v3.5.1-DEBUG-ENHANCED:
@@ -10,6 +10,7 @@ Changes in v3.5.1-DEBUG-ENHANCED:
 - NEW: Fallback handling when parsing fails
 - NEW: Content validation before processing
 - FIXED: Blank conversation content issue
+- FIXED: Type conversion error in created_time comparison
 - MAINTAINED: All v3.5.0 features
 
 Debug Features:
@@ -67,7 +68,7 @@ DEBUG_MODE = True  # Set to False in production after fixing
 DEBUG_SAMPLE_LOGGED = False
 
 # Version
-VERSION = "v3.5.1-DEBUG-ENHANCED"
+VERSION = "v3.5.1-DEBUG-ENHANCED-FIXED"
 
 # ============================================================
 # LOGGING SETUP
@@ -739,7 +740,7 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
     return conversations_map
 
 # ============================================================
-# SERVICEDESK API - TICKET FETCHING
+# SERVICEDESK API - TICKET FETCHING (FIXED)
 # ============================================================
 def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     """Fetch tickets from ServiceDesk Plus API with working pagination."""
@@ -830,14 +831,25 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
     stats['tickets_fetched'] = len(all_tickets)
     
+    # FIXED: Safe type conversion for created_time comparison
     if last_sync and all_tickets:
         new_count = 0
         updated_count = 0
+        last_sync_ms = int(last_sync.timestamp() * 1000)
+        
         for ticket in all_tickets:
             created_time_obj = ticket.get('created_time', {})
             if created_time_obj and isinstance(created_time_obj, dict):
-                created_time = created_time_obj.get('value', 0)
-                if created_time > int(last_sync.timestamp() * 1000):
+                created_time_value = created_time_obj.get('value', 0)
+                
+                # FIXED: Convert to int safely
+                try:
+                    created_time = int(created_time_value) if created_time_value else 0
+                except (ValueError, TypeError):
+                    created_time = 0
+                    logger.debug(f"Could not convert created_time to int: {created_time_value}")
+                
+                if created_time > last_sync_ms:
                     new_count += 1
                 else:
                     updated_count += 1
@@ -1383,7 +1395,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  DEBUG MODE + Enhanced Content Extraction")
+    logger.info("  DEBUG MODE + Enhanced Content Extraction + Type Safety")
     logger.info("=" * 60)
 
 # ============================================================
