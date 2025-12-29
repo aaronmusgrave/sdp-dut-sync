@@ -85,54 +85,67 @@ def refresh_token():
 # ============================================================
 # FIND TICKET BY DISPLAY ID
 # ============================================================
-def find_ticket_by_display_id(display_id: str) -> Optional[dict]:
-    """Find a ticket by its display ID (e.g., 15706)."""
+def find_ticket_by_display_id(target_display_id: str) -> Optional[dict]:
+    """Find a ticket by its display ID by fetching recent tickets."""
     global TOKEN
     
     headers = {
         "Authorization": f"Zoho-oauthtoken {TOKEN}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.manageengine.sdp.v3+json"
     }
     
-    # Search for ticket by display ID
-    list_info = {
-        "list_info": {
-            "row_count": 100,
-            "start_index": 1,
-            "search_criteria": [
-                {
-                    "field": "display_id",
-                    "condition": "is",
-                    "value": display_id
-                }
-            ]
+    logger.info(f"🔍 Searching for ticket #{target_display_id}...")
+    logger.info(f"  Fetching recent tickets to find #{target_display_id}...")
+    
+    # Fetch recent tickets (up to 1000) to find our target
+    for page in range(1, 11):  # Check up to 1000 tickets
+        list_info = {
+            "list_info": {
+                "row_count": 100,
+                "start_index": (page - 1) * 100 + 1,
+                "sort_field": "id",
+                "sort_order": "desc"
+            }
         }
-    }
-    
-    url = f"https://{SDP_DOMAIN}/api/v3/requests"
-    params = {"input_data": json.dumps(list_info)}
-    
-    try:
-        logger.info(f"🔍 Searching for ticket #{display_id}...")
-        response = requests.get(url, headers=headers, params=params, timeout=60)
-        response.raise_for_status()
         
-        data = response.json()
-        requests_data = data.get('requests', [])
+        url = f"https://{SDP_DOMAIN}/api/v3/requests"
+        params = {"input_data": json.dumps(list_info)}
         
-        if requests_data:
-            ticket = requests_data[0]
-            logger.info(f"✓ Found ticket #{display_id}")
-            logger.info(f"  Subject: {ticket.get('subject', 'Unknown')}")
-            logger.info(f"  Internal ID: {ticket.get('id')}")
-            return ticket
-        else:
-            logger.error(f"❌ Ticket #{display_id} not found")
-            return None
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
             
-    except Exception as e:
-        logger.error(f"Failed to find ticket: {e}")
-        return None
+            data = response.json()
+            requests_data = data.get('requests', [])
+            
+            if not requests_data:
+                break
+            
+            logger.info(f"  Checking page {page} ({len(requests_data)} tickets)...")
+            
+            # Look for our target display_id
+            for ticket in requests_data:
+                display_id_obj = ticket.get('display_id', {})
+                if isinstance(display_id_obj, dict):
+                    display_id = str(display_id_obj.get('display_value', ''))
+                else:
+                    display_id = str(display_id_obj)
+                
+                if display_id == target_display_id:
+                    logger.info(f"✓ Found ticket #{target_display_id}!")
+                    logger.info(f"  Subject: {ticket.get('subject', 'Unknown')}")
+                    logger.info(f"  Internal ID: {ticket.get('id')}")
+                    return ticket
+            
+            time.sleep(0.1)
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch page {page}: {e}")
+            break
+    
+    logger.error(f"❌ Ticket #{target_display_id} not found in recent tickets")
+    return None
 
 # ============================================================
 # TEST CONVERSATION FETCHING
@@ -142,9 +155,11 @@ def test_conversations_for_ticket(ticket: dict):
     global TOKEN
     
     ticket_id = str(ticket.get('id', ''))
-    display_id = ticket.get('display_id', {})
-    if isinstance(display_id, dict):
-        display_id = display_id.get('display_value', ticket_id)
+    display_id_obj = ticket.get('display_id', {})
+    if isinstance(display_id_obj, dict):
+        display_id = str(display_id_obj.get('display_value', ticket_id))
+    else:
+        display_id = str(display_id_obj) if display_id_obj else ticket_id
     
     headers = {
         "Authorization": f"Zoho-oauthtoken {TOKEN}",
