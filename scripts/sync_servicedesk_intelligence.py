@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.5.3-TEST-SPECIFIC-TICKET
-TEST: Fetch conversations from ticket #15706 (known to have replies)
+ServiceDesk Intelligence Suite v3.5.4-FIND-CONVERSATIONS
+MISSION: Find where the portal conversation content actually lives in the API
 """
 
 import os
@@ -26,13 +26,12 @@ def clean_secret(value: str) -> str:
     cleaned = cleaned.strip()
     return cleaned
 
-# Load and clean all secrets
 SDP_DOMAIN = clean_secret(os.getenv('SDP_DOMAIN', ''))
 SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
 SDP_CLIENT_SECRET = clean_secret(os.getenv('SDP_CLIENT_SECRET', ''))
 SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 
-VERSION = "v3.5.3-TEST-SPECIFIC-TICKET"
+VERSION = "v3.5.4-FIND-CONVERSATIONS"
 
 # ============================================================
 # LOGGING SETUP
@@ -44,9 +43,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# GLOBAL STATE
-# ============================================================
 TOKEN = None
 TOKEN_EXPIRY = None
 
@@ -54,7 +50,7 @@ TOKEN_EXPIRY = None
 # TOKEN MANAGEMENT
 # ============================================================
 def refresh_token():
-    """Refresh OAuth token and update expiry."""
+    """Refresh OAuth token."""
     global TOKEN, TOKEN_EXPIRY
     
     logger.info("🔑 Fetching new token...")
@@ -83,10 +79,10 @@ def refresh_token():
         raise
 
 # ============================================================
-# FIND TICKET BY DISPLAY ID
+# FIND TICKET
 # ============================================================
-def find_ticket_by_display_id(target_display_id: str) -> Optional[dict]:
-    """Find a ticket by its display ID by fetching recent tickets."""
+def find_ticket_15706() -> Optional[dict]:
+    """Find ticket #15706."""
     global TOKEN
     
     headers = {
@@ -95,11 +91,10 @@ def find_ticket_by_display_id(target_display_id: str) -> Optional[dict]:
         "Accept": "application/vnd.manageengine.sdp.v3+json"
     }
     
-    logger.info(f"🔍 Searching for ticket #{target_display_id}...")
-    logger.info(f"  Fetching recent tickets to find #{target_display_id}...")
+    logger.info("🔍 Searching for ticket #15706...")
     
-    # Fetch recent tickets (up to 1000) to find our target
-    for page in range(1, 11):  # Check up to 1000 tickets
+    # Fetch recent tickets to find #15706
+    for page in range(1, 11):
         list_info = {
             "list_info": {
                 "row_count": 100,
@@ -122,9 +117,6 @@ def find_ticket_by_display_id(target_display_id: str) -> Optional[dict]:
             if not requests_data:
                 break
             
-            logger.info(f"  Checking page {page} ({len(requests_data)} tickets)...")
-            
-            # Look for our target display_id
             for ticket in requests_data:
                 display_id_obj = ticket.get('display_id', {})
                 if isinstance(display_id_obj, dict):
@@ -132,10 +124,8 @@ def find_ticket_by_display_id(target_display_id: str) -> Optional[dict]:
                 else:
                     display_id = str(display_id_obj)
                 
-                if display_id == target_display_id:
-                    logger.info(f"✓ Found ticket #{target_display_id}!")
-                    logger.info(f"  Subject: {ticket.get('subject', 'Unknown')}")
-                    logger.info(f"  Internal ID: {ticket.get('id')}")
+                if display_id == "15706":
+                    logger.info(f"✓ Found ticket #15706!")
                     return ticket
             
             time.sleep(0.1)
@@ -144,14 +134,13 @@ def find_ticket_by_display_id(target_display_id: str) -> Optional[dict]:
             logger.error(f"Failed to fetch page {page}: {e}")
             break
     
-    logger.error(f"❌ Ticket #{target_display_id} not found in recent tickets")
     return None
 
 # ============================================================
-# TEST CONVERSATION FETCHING
+# COMPREHENSIVE CONTENT SEARCH
 # ============================================================
-def test_conversations_for_ticket(ticket: dict):
-    """Test conversation fetching for a specific ticket."""
+def search_for_conversation_content(ticket: dict):
+    """Exhaustive search for conversation content."""
     global TOKEN
     
     ticket_id = str(ticket.get('id', ''))
@@ -168,149 +157,231 @@ def test_conversations_for_ticket(ticket: dict):
     
     logger.info("")
     logger.info("=" * 80)
-    logger.info(f"🔬 TESTING CONVERSATIONS FOR TICKET #{display_id}")
+    logger.info(f"🔬 COMPREHENSIVE CONTENT SEARCH FOR TICKET #{display_id}")
     logger.info("=" * 80)
     logger.info("")
     
-    # Test 1: Fetch conversation list
-    try:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
-        logger.info(f"📋 Endpoint: {url}")
+    # ============================================================
+    # TEST 1: FULL TICKET OBJECT - Check ALL fields
+    # ============================================================
+    logger.info("=" * 80)
+    logger.info("TEST 1: FULL TICKET OBJECT INSPECTION")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    logger.info("📊 TOP-LEVEL TICKET FIELDS:")
+    logger.info(f"  Available fields: {list(ticket.keys())}")
+    logger.info("")
+    
+    # Check description field
+    description = ticket.get('description', '')
+    logger.info(f"📝 DESCRIPTION FIELD:")
+    logger.info(f"  Type: {type(description)}")
+    logger.info(f"  Length: {len(str(description)) if description else 0} chars")
+    if description:
+        logger.info(f"  Content preview (first 500 chars):")
+        logger.info(f"  {str(description)[:500]}")
         logger.info("")
+        logger.info(f"  Full content:")
+        logger.info(f"  {description}")
+    else:
+        logger.info(f"  ❌ Empty or missing")
+    logger.info("")
+    
+    # ============================================================
+    # TEST 2: NOTIFICATIONS ENDPOINT - Full inspection
+    # ============================================================
+    logger.info("=" * 80)
+    logger.info("TEST 2: NOTIFICATIONS ENDPOINT (FULL INSPECTION)")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    try:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications"
+        logger.info(f"Endpoint: {url}")
         
         response = requests.get(url, headers=headers, timeout=30)
-        logger.info(f"Response Status: {response.status_code}")
+        logger.info(f"Status: {response.status_code}")
+        logger.info("")
         
         if response.status_code == 200:
             data = response.json()
-            conversations = data.get('conversations', [])
+            notifications = data.get('notifications', [])
             
-            logger.info(f"✓ Retrieved {len(conversations)} conversations")
+            logger.info(f"✓ Retrieved {len(notifications)} notifications")
             logger.info("")
             
-            if conversations:
-                logger.info("📊 CONVERSATION LIST:")
-                for idx, conv in enumerate(conversations[:10]):  # Show first 10
-                    logger.info(f"\n  Conversation #{idx + 1}:")
-                    logger.info(f"    ID: {conv.get('id')}")
-                    logger.info(f"    Type: {conv.get('type')}")
-                    logger.info(f"    Created by: {conv.get('created_by', {}).get('name', 'Unknown')}")
-                    logger.info(f"    Show to requester: {conv.get('show_to_requester', False)}")
-                    logger.info(f"    Created: {conv.get('created_time', {}).get('display_value', 'Unknown')}")
-                    logger.info(f"    Has description: {'description' in conv}")
-                    logger.info(f"    Has content: {'content' in conv}")
-                    logger.info(f"    Has from: {'from' in conv}")
-                    logger.info(f"    All fields: {list(conv.keys())}")
+            if notifications:
+                logger.info("📊 FIRST 5 NOTIFICATIONS WITH COMPLETE STRUCTURE:")
+                for idx, notif in enumerate(notifications[:5]):
+                    logger.info(f"\n  Notification #{idx + 1}:")
+                    logger.info(f"    All fields: {list(notif.keys())}")
                     
-                    # Show complete JSON for first 3
-                    if idx < 3:
+                    # Check for content fields
+                    content_found = False
+                    for field in ['description', 'content', 'body', 'text', 'message', 'html', 'plain']:
+                        if field in notif and notif[field]:
+                            logger.info(f"    ✅ HAS '{field}' field!")
+                            logger.info(f"       Content: {str(notif[field])[:200]}")
+                            content_found = True
+                    
+                    if not content_found:
+                        logger.info(f"    ❌ No content fields found")
+                    
+                    # Show complete JSON for first 2
+                    if idx < 2:
                         logger.info(f"\n    COMPLETE JSON:")
-                        logger.info(json.dumps(conv, indent=6, default=str))
-                
-                logger.info("")
-                logger.info("=" * 80)
-                logger.info("🔍 ATTEMPTING INDIVIDUAL CONVERSATION FETCH")
-                logger.info("=" * 80)
-                logger.info("")
-                
-                # Try first conversation individually
-                first_conv_id = conversations[0].get('id')
-                if first_conv_id:
-                    individual_url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations/{first_conv_id}"
-                    logger.info(f"Endpoint: {individual_url}")
-                    
-                    response = requests.get(individual_url, headers=headers, timeout=30)
-                    logger.info(f"Response Status: {response.status_code}")
-                    logger.info("")
-                    
-                    if response.status_code == 200:
-                        individual_data = response.json()
-                        logger.info("✅ SUCCESS! Individual conversation retrieved:")
-                        logger.info(json.dumps(individual_data, indent=2, default=str))
-                    else:
-                        logger.info(f"❌ Failed: {response.text}")
+                        logger.info(json.dumps(notif, indent=6, default=str))
             else:
-                logger.info("❌ No conversations found in response")
+                logger.info("❌ No notifications found")
         else:
-            logger.error(f"❌ Failed to fetch conversations: {response.text}")
+            logger.error(f"❌ Failed: {response.text[:500]}")
             
     except Exception as e:
         logger.error(f"❌ Exception: {e}")
     
+    # ============================================================
+    # TEST 3: TRY ALTERNATIVE ENDPOINTS
+    # ============================================================
     logger.info("")
     logger.info("=" * 80)
-    logger.info("🔍 TESTING NOTES ENDPOINT")
+    logger.info("TEST 3: TRYING ALTERNATIVE ENDPOINTS")
     logger.info("=" * 80)
     logger.info("")
     
-    # Test 2: Fetch notes
-    try:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
-        logger.info(f"📋 Endpoint: {url}")
+    alternative_endpoints = [
+        f"/api/v3/requests/{ticket_id}/replies",
+        f"/api/v3/requests/{ticket_id}/threads",
+        f"/api/v3/requests/{ticket_id}/messages",
+        f"/api/v3/requests/{ticket_id}/conversation_threads",
+        f"/api/v3/requests/{ticket_id}/email_conversations",
+        f"/api/v3/requests/{ticket_id}/responses"
+    ]
+    
+    for endpoint_path in alternative_endpoints:
+        url = f"https://{SDP_DOMAIN}{endpoint_path}"
+        logger.info(f"Testing: {endpoint_path}")
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            logger.info(f"  Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                logger.info(f"  ✅ SUCCESS! Endpoint exists!")
+                data = response.json()
+                logger.info(f"  Response keys: {list(data.keys())}")
+                logger.info(f"  Full response:")
+                logger.info(json.dumps(data, indent=4, default=str)[:2000])
+                logger.info("")
+            elif response.status_code == 404:
+                logger.info(f"  ❌ Not found")
+            else:
+                logger.info(f"  Response: {response.text[:200]}")
+            
+        except Exception as e:
+            logger.info(f"  ❌ Error: {e}")
+        
         logger.info("")
+        time.sleep(0.3)
+    
+    # ============================================================
+    # TEST 4: FETCH FULL TICKET DETAILS WITH ALL FIELDS
+    # ============================================================
+    logger.info("=" * 80)
+    logger.info("TEST 4: FETCH COMPLETE TICKET DETAILS")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    try:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}"
+        logger.info(f"Endpoint: {url}")
         
         response = requests.get(url, headers=headers, timeout=30)
-        logger.info(f"Response Status: {response.status_code}")
+        logger.info(f"Status: {response.status_code}")
+        logger.info("")
+        
+        if response.status_code == 200:
+            data = response.json()
+            request_data = data.get('request', data)
+            
+            logger.info("📊 COMPLETE TICKET OBJECT:")
+            logger.info(f"  All fields: {list(request_data.keys())}")
+            logger.info("")
+            
+            # Check ALL fields for content
+            logger.info("🔍 CHECKING ALL FIELDS FOR CONTENT:")
+            for field_name, field_value in request_data.items():
+                if isinstance(field_value, str) and len(field_value) > 50:
+                    logger.info(f"\n  ✅ Field '{field_name}' has text content ({len(field_value)} chars):")
+                    logger.info(f"     {field_value[:300]}")
+            
+            logger.info("")
+            logger.info("COMPLETE TICKET JSON:")
+            logger.info(json.dumps(request_data, indent=2, default=str))
+            
+        else:
+            logger.error(f"❌ Failed: {response.text[:500]}")
+            
+    except Exception as e:
+        logger.error(f"❌ Exception: {e}")
+    
+    # ============================================================
+    # TEST 5: NOTES (we know this works)
+    # ============================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("TEST 5: NOTES ENDPOINT (KNOWN TO WORK)")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    try:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
+        response = requests.get(url, headers=headers, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
             notes = data.get('notes', [])
-            
             logger.info(f"✓ Retrieved {len(notes)} notes")
-            logger.info("")
             
             if notes:
-                logger.info("📊 NOTES:")
-                for idx, note in enumerate(notes[:5]):  # Show first 5
+                for idx, note in enumerate(notes):
                     logger.info(f"\n  Note #{idx + 1}:")
-                    logger.info(f"    ID: {note.get('id')}")
-                    logger.info(f"    Created by: {note.get('created_by', {}).get('name', 'Unknown')}")
-                    logger.info(f"    Description: {note.get('description', 'N/A')[:200]}")
-                    logger.info(f"    Show to requester: {note.get('show_to_requester', False)}")
-                    
-                    if idx == 0:
-                        logger.info(f"\n    COMPLETE JSON:")
-                        logger.info(json.dumps(note, indent=6, default=str))
+                    logger.info(f"    Description: {note.get('description', 'N/A')}")
             else:
                 logger.info("No notes found")
-        else:
-            logger.error(f"❌ Failed to fetch notes: {response.text}")
-            
+                
     except Exception as e:
         logger.error(f"❌ Exception: {e}")
 
 # ============================================================
-# MAIN TEST
+# MAIN
 # ============================================================
 def run_test():
-    """Run the test."""
+    """Run comprehensive content search."""
     
     logger.info("=" * 80)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE {VERSION}")
     logger.info("=" * 80)
-    logger.info("TEST: Specific Ticket #15706 (Known to have conversations)")
+    logger.info("MISSION: Find where portal conversation content lives in the API")
     logger.info("")
     
     refresh_token()
     
-    # Find ticket #15706
-    ticket = find_ticket_by_display_id("15706")
+    ticket = find_ticket_15706()
     
     if not ticket:
         logger.error("Could not find ticket #15706")
         return
     
-    # Test conversations
-    test_conversations_for_ticket(ticket)
+    search_for_conversation_content(ticket)
     
     logger.info("")
     logger.info("=" * 80)
-    logger.info("TEST COMPLETE")
+    logger.info("SEARCH COMPLETE")
     logger.info("=" * 80)
+    logger.info("")
+    logger.info("Review the output above to find where conversation content exists!")
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
 if __name__ == "__main__":
     try:
         logger.info("=" * 60)
