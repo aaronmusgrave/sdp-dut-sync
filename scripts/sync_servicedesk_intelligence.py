@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.5.3-TEST-INDIVIDUAL-CONVERSATIONS
-TEST: Fetch individual conversations by ID to check for content
-
-This is a TEST version that will:
-1. Fetch conversation list (as before)
-2. Take first 3 conversation IDs
-3. Fetch EACH conversation individually
-4. Log complete response to see if content exists
+ServiceDesk Intelligence Suite v3.5.3-TEST-SPECIFIC-TICKET
+TEST: Fetch conversations from ticket #15706 (known to have replies)
 """
 
 import os
@@ -18,10 +12,6 @@ import requests
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
-import re
-from html import unescape
 
 # ============================================================
 # CONFIGURATION
@@ -37,29 +27,12 @@ def clean_secret(value: str) -> str:
     return cleaned
 
 # Load and clean all secrets
-DUST_API_KEY = clean_secret(os.getenv('DUST_API_KEY', ''))
-DUST_WORKSPACE_ID = clean_secret(os.getenv('DUST_WORKSPACE_ID', ''))
-DUST_MAIN_DATA_SOURCE = 'servicedesk'
-DUST_ACTIVE_DATA_SOURCE = 'servicedesk-active'
-
 SDP_DOMAIN = clean_secret(os.getenv('SDP_DOMAIN', ''))
 SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
 SDP_CLIENT_SECRET = clean_secret(os.getenv('SDP_CLIENT_SECRET', ''))
 SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 
-CHECKPOINT_FILE = 'sync_checkpoint.json'
-BATCH_SIZE = 10  # Reduced for testing
-MAX_CONCURRENT_CONVERSATIONS = 5  # Reduced for testing
-MAX_CONCURRENT_UPLOADS = 2
-UPLOAD_DELAY = 0.3
-
-# Debug mode
-DEBUG_MODE = True
-DEBUG_INDIVIDUAL_CONVS = True  # NEW: Test individual conversation fetching
-MAX_INDIVIDUAL_TESTS = 3  # Test first 3 conversations
-
-# Version
-VERSION = "v3.5.3-TEST-INDIVIDUAL-CONVERSATIONS"
+VERSION = "v3.5.3-TEST-SPECIFIC-TICKET"
 
 # ============================================================
 # LOGGING SETUP
@@ -76,35 +49,13 @@ logger = logging.getLogger(__name__)
 # ============================================================
 TOKEN = None
 TOKEN_EXPIRY = None
-CONVERSATION_401_ERRORS = 0
-MAX_401_BEFORE_REFRESH = 5
-
-# Conversation diagnostics
-CONVERSATION_DIAGNOSTICS = {
-    'conversations_list_success': 0,
-    'conversations_individual_success': 0,
-    'conversations_individual_with_content': 0,
-    'conversations_individual_empty': 0,
-    'conversations_individual_error': 0,
-    'notes_success': 0,
-    'total_messages': 0,
-    'content_extracted_success': 0,
-    'content_extracted_empty': 0
-}
-
-# Statistics
-stats = {
-    'tickets_fetched': 0,
-    'tickets_processed': 0,
-    'api_calls': 0
-}
 
 # ============================================================
 # TOKEN MANAGEMENT
 # ============================================================
 def refresh_token():
     """Refresh OAuth token and update expiry."""
-    global TOKEN, TOKEN_EXPIRY, CONVERSATION_401_ERRORS
+    global TOKEN, TOKEN_EXPIRY
     
     logger.info("🔑 Fetching new token...")
     
@@ -125,54 +76,17 @@ def refresh_token():
         expires_in = data.get('expires_in', 3600)
         TOKEN_EXPIRY = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
         
-        CONVERSATION_401_ERRORS = 0
-        
-        logger.info(f"✓ Token refreshed successfully (expires in {expires_in // 60} minutes)")
+        logger.info(f"✓ Token refreshed successfully")
         
     except Exception as e:
         logger.error(f"Failed to refresh token: {e}")
         raise
 
-def ensure_token_valid():
-    """Ensure token is valid, refresh if expired or expiring soon."""
-    global TOKEN, TOKEN_EXPIRY
-    
-    if not TOKEN or not TOKEN_EXPIRY:
-        refresh_token()
-    else:
-        time_remaining = (TOKEN_EXPIRY - datetime.now(timezone.utc)).total_seconds()
-        if time_remaining < 600:
-            logger.info(f"Token expiring in {int(time_remaining/60)} minutes - refreshing proactively...")
-            refresh_token()
-
 # ============================================================
-# CHECKPOINT MANAGEMENT
+# FIND TICKET BY DISPLAY ID
 # ============================================================
-def load_checkpoint() -> Optional[datetime]:
-    """Load last sync timestamp from checkpoint file."""
-    if os.path.exists(CHECKPOINT_FILE):
-        try:
-            with open(CHECKPOINT_FILE, 'r') as f:
-                data = json.load(f)
-                timestamp_str = data.get('last_sync_timestamp')
-                if timestamp_str:
-                    last_sync = datetime.fromisoformat(timestamp_str)
-                    logger.info(f"  Checkpoint found: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
-                    return last_sync
-        except Exception as e:
-            logger.warning(f"Failed to load checkpoint: {e}")
-    
-    logger.info("  No checkpoint found - will perform test sync")
-    return None
-
-# ============================================================
-# TEST: FETCH INDIVIDUAL CONVERSATION BY ID
-# ============================================================
-def fetch_individual_conversation(ticket_id: str, conversation_id: str, conv_number: int) -> Optional[dict]:
-    """
-    TEST: Fetch a single conversation by ID to check for content.
-    This is the key test to see if content exists at the individual level.
-    """
+def find_ticket_by_display_id(display_id: str) -> Optional[dict]:
+    """Find a ticket by its display ID (e.g., 15706)."""
     global TOKEN
     
     headers = {
@@ -180,288 +94,199 @@ def fetch_individual_conversation(ticket_id: str, conversation_id: str, conv_num
         "Content-Type": "application/json"
     }
     
-    # Try the individual conversation endpoint
-    url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations/{conversation_id}"
-    
-    try:
-        logger.info("=" * 80)
-        logger.info(f"🔍 TEST: Fetching INDIVIDUAL Conversation #{conv_number}")
-        logger.info("=" * 80)
-        logger.info(f"Ticket ID: {ticket_id}")
-        logger.info(f"Conversation ID: {conversation_id}")
-        logger.info(f"Endpoint: {url}")
-        logger.info("")
-        
-        response = requests.get(url, headers=headers, timeout=30)
-        stats['api_calls'] += 1
-        
-        logger.info(f"Response Status: {response.status_code}")
-        logger.info("")
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            logger.info("✅ SUCCESS! Retrieved individual conversation")
-            logger.info("")
-            logger.info("COMPLETE JSON RESPONSE:")
-            logger.info(json.dumps(data, indent=2, default=str))
-            logger.info("")
-            
-            # Check for content fields
-            conversation = data.get('conversation', data)  # Might be nested
-            
-            logger.info("📊 CONTENT FIELD ANALYSIS:")
-            logger.info(f"  Response keys: {list(data.keys())}")
-            
-            if 'conversation' in data:
-                logger.info(f"  Conversation object keys: {list(data['conversation'].keys())}")
-                conversation = data['conversation']
-            else:
-                conversation = data
-            
-            # Check all possible content fields
-            content_fields = ['description', 'content', 'body', 'text', 'message', 'html']
-            found_content = False
-            
-            for field in content_fields:
-                if field in conversation:
-                    content_value = conversation[field]
-                    if content_value:
-                        found_content = True
-                        logger.info(f"  ✅ HAS '{field}' field!")
-                        if isinstance(content_value, str):
-                            logger.info(f"     Content length: {len(content_value)} chars")
-                            logger.info(f"     Preview: {content_value[:200]}...")
-                        else:
-                            logger.info(f"     Type: {type(content_value)}")
-                            logger.info(f"     Value: {content_value}")
-            
-            if found_content:
-                CONVERSATION_DIAGNOSTICS['conversations_individual_with_content'] += 1
-                logger.info("")
-                logger.info("🎉 CONTENT FOUND IN INDIVIDUAL CONVERSATION!")
-            else:
-                CONVERSATION_DIAGNOSTICS['conversations_individual_empty'] += 1
-                logger.info("")
-                logger.info("❌ No content fields found in individual conversation")
-            
-            logger.info("=" * 80)
-            logger.info("")
-            
-            CONVERSATION_DIAGNOSTICS['conversations_individual_success'] += 1
-            return conversation
-            
-        else:
-            logger.error(f"❌ Failed to fetch individual conversation: HTTP {response.status_code}")
-            logger.error(f"Response: {response.text[:500]}")
-            logger.info("=" * 80)
-            logger.info("")
-            CONVERSATION_DIAGNOSTICS['conversations_individual_error'] += 1
-            return None
-            
-    except Exception as e:
-        logger.error(f"❌ Exception fetching individual conversation: {e}")
-        logger.info("=" * 80)
-        logger.info("")
-        CONVERSATION_DIAGNOSTICS['conversations_individual_error'] += 1
-        return None
-
-# ============================================================
-# SERVICEDESK API - TEST CONVERSATION FETCHING
-# ============================================================
-def test_fetch_conversations(ticket_id: str) -> Tuple[int, List[dict]]:
-    """
-    TEST: Fetch conversation list, then fetch first 3 individually.
-    """
-    global TOKEN
-    
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    total_count = 0
-    conversation_messages = []
-    
-    # Step 1: Fetch conversation list
-    try:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            stats['api_calls'] += 1
-            data = response.json()
-            conversations = data.get('conversations', [])
-            
-            logger.info(f"📋 Conversation List Endpoint returned {len(conversations)} conversations")
-            logger.info("")
-            
-            if conversations:
-                CONVERSATION_DIAGNOSTICS['conversations_list_success'] += 1
-                total_count = len(conversations)
-                
-                # Step 2: Fetch first 3 individually
-                logger.info(f"🔬 TEST: Fetching first {min(MAX_INDIVIDUAL_TESTS, len(conversations))} conversations INDIVIDUALLY")
-                logger.info("")
-                
-                for idx, conv in enumerate(conversations[:MAX_INDIVIDUAL_TESTS]):
-                    conv_id = conv.get('id')
-                    if conv_id:
-                        individual_conv = fetch_individual_conversation(ticket_id, conv_id, idx + 1)
-                        
-                        if individual_conv:
-                            conversation_messages.append({
-                                'id': conv_id,
-                                'data': individual_conv,
-                                'from_list': conv
-                            })
-                        
-                        # Small delay between requests
-                        time.sleep(0.5)
-                
-                logger.info(f"✓ Tested {len(conversation_messages)} individual conversations")
-                logger.info("")
-                    
-    except Exception as e:
-        logger.error(f"Error fetching conversations for {ticket_id}: {e}")
-    
-    return total_count, conversation_messages
-
-# ============================================================
-# SERVICEDESK API - TICKET FETCHING
-# ============================================================
-def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
-    """Fetch tickets from ServiceDesk Plus API - LIMITED FOR TESTING."""
-    ensure_token_valid()
-    
-    all_tickets = []
-    page = 1
-    row_count = BATCH_SIZE  # Only fetch 10 for testing
-    
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {TOKEN}",
-        "Content-Type": "application/json",
-        "Accept": "application/vnd.manageengine.sdp.v3+json"
-    }
-    
-    logger.info(f"📊 Fetching {BATCH_SIZE} tickets for testing...")
-    
+    # Search for ticket by display ID
     list_info = {
         "list_info": {
-            "row_count": row_count,
+            "row_count": 100,
             "start_index": 1,
-            "get_total_count": True,
-            "sort_field": "created_time",
-            "sort_order": "desc"
+            "search_criteria": [
+                {
+                    "field": "display_id",
+                    "condition": "is",
+                    "value": display_id
+                }
+            ]
         }
     }
     
     url = f"https://{SDP_DOMAIN}/api/v3/requests"
-    
     params = {"input_data": json.dumps(list_info)}
     
     try:
+        logger.info(f"🔍 Searching for ticket #{display_id}...")
         response = requests.get(url, headers=headers, params=params, timeout=60)
         response.raise_for_status()
-        stats['api_calls'] += 1
         
         data = response.json()
         requests_data = data.get('requests', [])
         
-        all_tickets.extend(requests_data)
-        logger.info(f"  ✓ Fetched {len(requests_data)} tickets for testing")
-        
+        if requests_data:
+            ticket = requests_data[0]
+            logger.info(f"✓ Found ticket #{display_id}")
+            logger.info(f"  Subject: {ticket.get('subject', 'Unknown')}")
+            logger.info(f"  Internal ID: {ticket.get('id')}")
+            return ticket
+        else:
+            logger.error(f"❌ Ticket #{display_id} not found")
+            return None
+            
     except Exception as e:
-        logger.error(f"Failed to fetch tickets: {e}")
-    
-    stats['tickets_fetched'] = len(all_tickets)
-    return all_tickets
+        logger.error(f"Failed to find ticket: {e}")
+        return None
 
 # ============================================================
-# TEST MAIN LOGIC
+# TEST CONVERSATION FETCHING
+# ============================================================
+def test_conversations_for_ticket(ticket: dict):
+    """Test conversation fetching for a specific ticket."""
+    global TOKEN
+    
+    ticket_id = str(ticket.get('id', ''))
+    display_id = ticket.get('display_id', {})
+    if isinstance(display_id, dict):
+        display_id = display_id.get('display_value', ticket_id)
+    
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"🔬 TESTING CONVERSATIONS FOR TICKET #{display_id}")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    # Test 1: Fetch conversation list
+    try:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
+        logger.info(f"📋 Endpoint: {url}")
+        logger.info("")
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        logger.info(f"Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            conversations = data.get('conversations', [])
+            
+            logger.info(f"✓ Retrieved {len(conversations)} conversations")
+            logger.info("")
+            
+            if conversations:
+                logger.info("📊 CONVERSATION LIST:")
+                for idx, conv in enumerate(conversations[:10]):  # Show first 10
+                    logger.info(f"\n  Conversation #{idx + 1}:")
+                    logger.info(f"    ID: {conv.get('id')}")
+                    logger.info(f"    Type: {conv.get('type')}")
+                    logger.info(f"    Created by: {conv.get('created_by', {}).get('name', 'Unknown')}")
+                    logger.info(f"    Show to requester: {conv.get('show_to_requester', False)}")
+                    logger.info(f"    Created: {conv.get('created_time', {}).get('display_value', 'Unknown')}")
+                    logger.info(f"    Has description: {'description' in conv}")
+                    logger.info(f"    Has content: {'content' in conv}")
+                    logger.info(f"    Has from: {'from' in conv}")
+                    logger.info(f"    All fields: {list(conv.keys())}")
+                    
+                    # Show complete JSON for first 3
+                    if idx < 3:
+                        logger.info(f"\n    COMPLETE JSON:")
+                        logger.info(json.dumps(conv, indent=6, default=str))
+                
+                logger.info("")
+                logger.info("=" * 80)
+                logger.info("🔍 ATTEMPTING INDIVIDUAL CONVERSATION FETCH")
+                logger.info("=" * 80)
+                logger.info("")
+                
+                # Try first conversation individually
+                first_conv_id = conversations[0].get('id')
+                if first_conv_id:
+                    individual_url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations/{first_conv_id}"
+                    logger.info(f"Endpoint: {individual_url}")
+                    
+                    response = requests.get(individual_url, headers=headers, timeout=30)
+                    logger.info(f"Response Status: {response.status_code}")
+                    logger.info("")
+                    
+                    if response.status_code == 200:
+                        individual_data = response.json()
+                        logger.info("✅ SUCCESS! Individual conversation retrieved:")
+                        logger.info(json.dumps(individual_data, indent=2, default=str))
+                    else:
+                        logger.info(f"❌ Failed: {response.text}")
+            else:
+                logger.info("❌ No conversations found in response")
+        else:
+            logger.error(f"❌ Failed to fetch conversations: {response.text}")
+            
+    except Exception as e:
+        logger.error(f"❌ Exception: {e}")
+    
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🔍 TESTING NOTES ENDPOINT")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    # Test 2: Fetch notes
+    try:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
+        logger.info(f"📋 Endpoint: {url}")
+        logger.info("")
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        logger.info(f"Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            notes = data.get('notes', [])
+            
+            logger.info(f"✓ Retrieved {len(notes)} notes")
+            logger.info("")
+            
+            if notes:
+                logger.info("📊 NOTES:")
+                for idx, note in enumerate(notes[:5]):  # Show first 5
+                    logger.info(f"\n  Note #{idx + 1}:")
+                    logger.info(f"    ID: {note.get('id')}")
+                    logger.info(f"    Created by: {note.get('created_by', {}).get('name', 'Unknown')}")
+                    logger.info(f"    Description: {note.get('description', 'N/A')[:200]}")
+                    logger.info(f"    Show to requester: {note.get('show_to_requester', False)}")
+                    
+                    if idx == 0:
+                        logger.info(f"\n    COMPLETE JSON:")
+                        logger.info(json.dumps(note, indent=6, default=str))
+            else:
+                logger.info("No notes found")
+        else:
+            logger.error(f"❌ Failed to fetch notes: {response.text}")
+            
+    except Exception as e:
+        logger.error(f"❌ Exception: {e}")
+
+# ============================================================
+# MAIN TEST
 # ============================================================
 def run_test():
-    """Test individual conversation fetching."""
+    """Run the test."""
     
-    logger.info("=" * 60)
+    logger.info("=" * 80)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE {VERSION}")
-    logger.info("=" * 60)
-    logger.info("TEST MODE: Individual Conversation Fetching")
-    logger.info("")
-    logger.info("This test will:")
-    logger.info("  1. Fetch conversation list (as before)")
-    logger.info("  2. Take first 3 conversation IDs from list")
-    logger.info("  3. Fetch EACH conversation individually")
-    logger.info("  4. Show if content exists at individual level")
+    logger.info("=" * 80)
+    logger.info("TEST: Specific Ticket #15706 (Known to have conversations)")
     logger.info("")
     
     refresh_token()
     
-    logger.info("Fetching test tickets...")
-    tickets = fetch_tickets(None)
+    # Find ticket #15706
+    ticket = find_ticket_by_display_id("15706")
     
-    if not tickets:
-        logger.info("No tickets to test")
+    if not ticket:
+        logger.error("Could not find ticket #15706")
         return
     
-    logger.info(f"Testing with {len(tickets)} tickets")
-    logger.info("")
-    
-    # Test first ticket only
-    test_ticket = tickets[0]
-    ticket_id = str(test_ticket.get('id', ''))
-    
-    # FIXED: Safe display_id extraction
-    display_id_obj = test_ticket.get('display_id', {})
-    if isinstance(display_id_obj, dict):
-        display_id = str(display_id_obj.get('display_value', ticket_id))
-    else:
-        display_id = str(display_id_obj) if display_id_obj else ticket_id
-    
-    subject = test_ticket.get('subject', 'Unknown')
-    
-    logger.info("=" * 80)
-    logger.info(f"🎯 TESTING TICKET: #{display_id}")
-    logger.info(f"Subject: {subject}")
-    logger.info(f"Internal ID: {ticket_id}")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    # Test conversation fetching
-    total_count, conversations = test_fetch_conversations(ticket_id)
-    
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("TEST RESULTS SUMMARY")
-    logger.info("=" * 80)
-    logger.info("")
-    logger.info("📊 DIAGNOSTICS:")
-    logger.info(f"  Conversation list success: {CONVERSATION_DIAGNOSTICS['conversations_list_success']}")
-    logger.info(f"  Individual fetches attempted: {CONVERSATION_DIAGNOSTICS['conversations_individual_success'] + CONVERSATION_DIAGNOSTICS['conversations_individual_error']}")
-    logger.info(f"  Individual fetches successful: {CONVERSATION_DIAGNOSTICS['conversations_individual_success']}")
-    logger.info(f"  Individual fetches with content: {CONVERSATION_DIAGNOSTICS['conversations_individual_with_content']}")
-    logger.info(f"  Individual fetches empty: {CONVERSATION_DIAGNOSTICS['conversations_individual_empty']}")
-    logger.info(f"  Individual fetch errors: {CONVERSATION_DIAGNOSTICS['conversations_individual_error']}")
-    logger.info("")
-    logger.info(f"  Total API calls: {stats['api_calls']}")
-    logger.info("")
-    
-    if CONVERSATION_DIAGNOSTICS['conversations_individual_with_content'] > 0:
-        logger.info("✅ SUCCESS: Content found in individual conversations!")
-        logger.info("   We can fetch conversation content by requesting each one individually.")
-        logger.info("")
-        logger.info("📝 NEXT STEPS:")
-        logger.info("   1. Modify script to fetch each conversation individually")
-        logger.info("   2. Extract content from individual responses")
-        logger.info("   3. This will add API calls but give us the content")
-    else:
-        logger.info("❌ NO CONTENT: Individual conversations also don't have content")
-        logger.info("   The conversation endpoint may not store message content.")
-        logger.info("")
-        logger.info("📝 ALTERNATIVE APPROACH:")
-        logger.info("   1. Use ticket description field (initial user request)")
-        logger.info("   2. Use notes endpoint (technician comments)")
-        logger.info("   3. These fields DO have content as we saw in previous tests")
+    # Test conversations
+    test_conversations_for_ticket(ticket)
     
     logger.info("")
     logger.info("=" * 80)
@@ -478,11 +303,7 @@ if __name__ == "__main__":
         logger.info("=" * 60)
         logger.info("")
         
-        required_vars = [
-            'DUST_API_KEY', 'DUST_WORKSPACE_ID',
-            'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN'
-        ]
-        
+        required_vars = ['SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN']
         missing = [var for var in required_vars if not os.getenv(var)]
         
         if missing:
@@ -490,8 +311,6 @@ if __name__ == "__main__":
             sys.exit(1)
         
         logger.info("✓ Configuration loaded")
-        logger.info(f"  Version: {VERSION}")
-        logger.info(f"  Test Mode: Individual Conversation Fetching")
         logger.info("")
         
         run_test()
