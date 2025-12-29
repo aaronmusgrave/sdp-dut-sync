@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.5.1-DEBUG-ENHANCED (FIXED)
-ENHANCED: Full conversation content capture with DEBUG MODE
+ServiceDesk Intelligence Suite v3.5.2-FULL-DEBUG
+ENHANCED: Complete conversation object inspection
 
-Changes in v3.5.1-DEBUG-ENHANCED:
-- NEW: Enhanced debug logging for API responses
-- NEW: Improved HTML stripping with multiple strategies
-- NEW: Multiple content field checking (all possible locations)
-- NEW: Fallback handling when parsing fails
-- NEW: Content validation before processing
-- FIXED: Blank conversation content issue
-- FIXED: Type conversion error in created_time comparison
-- MAINTAINED: All v3.5.0 features
-
-Debug Features:
-- Logs first conversation raw JSON for inspection
-- Tests multiple field paths for content extraction
-- Validates content at each step
-- Reports content extraction success/failure per ticket
+Changes in v3.5.2-FULL-DEBUG:
+- NEW: Shows ALL fields in conversation objects
+- NEW: Logs complete structure of first 3 conversations
+- NEW: Shows what fields exist vs what we're checking
+- NEW: Identifies where actual content might be hiding
+- NEW: System notification vs user message tracking
+- MAINTAINED: All v3.5.1 fixes
 """
 
 import os
@@ -64,11 +56,13 @@ MAX_CONCURRENT_UPLOADS = 2
 UPLOAD_DELAY = 0.3
 
 # Debug mode
-DEBUG_MODE = True  # Set to False in production after fixing
+DEBUG_MODE = True
 DEBUG_SAMPLE_LOGGED = False
+DEBUG_SAMPLES_SHOWN = 0
+MAX_DEBUG_SAMPLES = 3  # Show first 3 conversations
 
 # Version
-VERSION = "v3.5.1-DEBUG-ENHANCED-FIXED"
+VERSION = "v3.5.2-FULL-DEBUG"
 
 # ============================================================
 # LOGGING SETUP
@@ -105,7 +99,9 @@ CONVERSATION_DIAGNOSTICS = {
     'total_messages': 0,
     'content_extracted_success': 0,
     'content_extracted_empty': 0,
-    'content_extraction_failed': 0
+    'content_extraction_failed': 0,
+    'system_notifications': 0,
+    'user_messages': 0
 }
 
 # Statistics
@@ -129,7 +125,6 @@ stats = {
     'incidents': 0,
     'total_exchanges': 0
 }
-
 # ============================================================
 # TOKEN MANAGEMENT
 # ============================================================
@@ -207,7 +202,6 @@ def save_checkpoint(timestamp: datetime):
         logger.info(f"  ✓ Checkpoint saved: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
     except Exception as e:
         logger.warning(f"Failed to save checkpoint: {e}")
-
 # ============================================================
 # DUST API - DOCUMENT MANAGEMENT
 # ============================================================
@@ -375,15 +369,11 @@ INTERNAL NOTES:
     
     stats['upload_failures'] += 1
     return False, last_error
-
 # ============================================================
 # ENHANCED CONTENT EXTRACTION
 # ============================================================
 def strip_html_enhanced(html_content: str) -> str:
-    """
-    Enhanced HTML stripping with multiple strategies.
-    Option 2 Implementation - Better HTML Processing
-    """
+    """Enhanced HTML stripping with multiple strategies."""
     if not html_content:
         return ""
     
@@ -400,21 +390,16 @@ def strip_html_enhanced(html_content: str) -> str:
         
         # Strategy 4: If still empty but original had content, return original
         if not text and html_content and len(html_content.strip()) > 0:
-            # Might not be HTML, return as-is
             return html_content.strip()
         
         return text
         
     except Exception as e:
-        # If anything fails, return original
         logger.debug(f"HTML stripping failed: {e}, returning original")
         return html_content
 
 def extract_content_multi_path(data_obj: any, field_name: str = "description") -> str:
-    """
-    Option 3 Implementation - Check Multiple Content Fields
-    Try multiple paths to find content in nested structures.
-    """
+    """Try multiple paths to find content in nested structures."""
     if not data_obj:
         return ""
     
@@ -426,7 +411,7 @@ def extract_content_multi_path(data_obj: any, field_name: str = "description") -
     if not isinstance(data_obj, dict):
         return str(data_obj)
     
-    # Try multiple field paths (Option 3)
+    # Try multiple field paths
     possible_fields = [
         'html',
         'plain',
@@ -451,10 +436,7 @@ def extract_content_multi_path(data_obj: any, field_name: str = "description") -
         return ""
 
 def extract_field_safe(obj: dict, *field_path, default='') -> str:
-    """
-    Safely extract nested field with fallback handling.
-    Option 4 Implementation - Fallback Handling
-    """
+    """Safely extract nested field with fallback handling."""
     try:
         current = obj
         for field in field_path:
@@ -471,16 +453,15 @@ def extract_field_safe(obj: dict, *field_path, default='') -> str:
     except Exception as e:
         logger.debug(f"Field extraction failed for path {field_path}: {e}")
         return default
-
 # ============================================================
-# SERVICEDESK API - ENHANCED CONVERSATION FETCHING WITH DEBUG
+# SERVICEDESK API - ENHANCED CONVERSATION FETCHING WITH FULL DEBUG
 # ============================================================
 def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tuple[int, dict, List[dict], List[dict]]:
     """
-    Fetch conversations with FULL CONTENT and ENHANCED DEBUG.
-    All Options (1-5) Implemented Here
+    Fetch conversations with FULL DEBUG to show ALL fields.
+    This will reveal where the actual content is hiding!
     """
-    global TOKEN, CONVERSATION_401_ERRORS, DEBUG_SAMPLE_LOGGED
+    global TOKEN, CONVERSATION_401_ERRORS, DEBUG_SAMPLE_LOGGED, DEBUG_SAMPLES_SHOWN
     
     if CONVERSATION_401_ERRORS >= MAX_401_BEFORE_REFRESH:
         ensure_token_valid()
@@ -500,7 +481,7 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
         'notes': {'success': False, 'count': 0, 'error': None}
     }
     
-    # Method 1: /conversations endpoint (FULL CONTENT)
+    # Method 1: /conversations endpoint (FULL DEBUG)
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
         response = requests.get(url, headers=headers, timeout=30)
@@ -510,17 +491,52 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
             data = response.json()
             conversations = data.get('conversations', [])
             
-            # OPTION 1: Debug logging for first conversation (once per sync)
-            if DEBUG_MODE and not DEBUG_SAMPLE_LOGGED and conversations:
-                logger.info("=" * 60)
-                logger.info("🔍 DEBUG: FIRST CONVERSATION RAW DATA SAMPLE")
-                logger.info("=" * 60)
+            # ========================================
+            # ENHANCED DEBUG: Show first 3 conversations COMPLETELY
+            # ========================================
+            if DEBUG_MODE and DEBUG_SAMPLES_SHOWN < MAX_DEBUG_SAMPLES and conversations:
+                logger.info("=" * 80)
+                logger.info(f"🔍 FULL DEBUG: CONVERSATION SAMPLE #{DEBUG_SAMPLES_SHOWN + 1}")
+                logger.info("=" * 80)
                 logger.info(f"Ticket ID: {ticket_id}")
-                logger.info(f"Total conversations: {len(conversations)}")
-                logger.info("First conversation structure:")
-                logger.info(json.dumps(conversations[0], indent=2, default=str))
-                logger.info("=" * 60)
-                DEBUG_SAMPLE_LOGGED = True
+                logger.info(f"Total conversations in response: {len(conversations)}")
+                logger.info("")
+                
+                # Show first 3 conversations with ALL fields
+                for idx, conv in enumerate(conversations[:3]):
+                    logger.info(f"--- CONVERSATION #{idx + 1} ---")
+                    logger.info(f"Complete JSON object with ALL FIELDS:")
+                    logger.info(json.dumps(conv, indent=2, default=str))
+                    logger.info("")
+                    
+                    # Detailed field analysis
+                    logger.info(f"📊 Field Analysis for Conversation #{idx + 1}:")
+                    logger.info(f"  Available top-level fields: {list(conv.keys())}")
+                    logger.info(f"  Number of fields: {len(conv.keys())}")
+                    logger.info("")
+                    logger.info(f"  Content-related field checks:")
+                    logger.info(f"    ✓ Has 'description' field: {'description' in conv}")
+                    logger.info(f"    ✓ Has 'content' field: {'content' in conv}")
+                    logger.info(f"    ✓ Has 'body' field: {'body' in conv}")
+                    logger.info(f"    ✓ Has 'text' field: {'text' in conv}")
+                    logger.info(f"    ✓ Has 'message' field: {'message' in conv}")
+                    logger.info("")
+                    logger.info(f"  Metadata:")
+                    logger.info(f"    Conversation type: {conv.get('type', 'UNKNOWN')}")
+                    logger.info(f"    Created by: {conv.get('created_by', {}).get('name', 'UNKNOWN')}")
+                    logger.info(f"    Is technician: {conv.get('created_by', {}).get('is_technician', False)}")
+                    logger.info(f"    Show to requester: {conv.get('show_to_requester', False)}")
+                    
+                    # Check if 'from' field exists
+                    if 'from' in conv:
+                        logger.info(f"    From: {conv.get('from', {}).get('name', 'N/A')} ({conv.get('from', {}).get('email_id', 'N/A')})")
+                    
+                    # Check for attachments
+                    logger.info(f"    Number of attachments: {conv.get('number_of_attachments', 0)}")
+                    logger.info("")
+                
+                logger.info("=" * 80)
+                DEBUG_SAMPLES_SHOWN += 1
             
             if conversations:
                 CONVERSATION_DIAGNOSTICS['conversations_endpoint_success'] += 1
@@ -528,56 +544,65 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
                 diagnostic['conversations']['count'] = len(conversations)
                 total_count += len(conversations)
                 
-                # Extract conversation content with enhanced methods
+                # Extract conversation content
                 for idx, conv in enumerate(conversations):
-                    # Get description content (OPTION 3: Multiple field checks)
+                    # Check if it's a system notification
+                    conv_type = conv.get('type', '')
+                    created_by_name = conv.get('created_by', {}).get('name', '')
+                    
+                    if 'System' in created_by_name or 'Ack' in conv_type:
+                        CONVERSATION_DIAGNOSTICS['system_notifications'] += 1
+                    else:
+                        CONVERSATION_DIAGNOSTICS['user_messages'] += 1
+                    
+                    # Get description content
                     desc = conv.get('description', {})
                     content_text = extract_content_multi_path(desc, 'description')
                     
-                    # OPTION 5: Content validation
                     if content_text and len(content_text.strip()) > 0:
                         CONVERSATION_DIAGNOSTICS['content_extracted_success'] += 1
                     else:
                         CONVERSATION_DIAGNOSTICS['content_extracted_empty'] += 1
-                        # Try alternative fields as fallback (OPTION 4)
+                        # Try all possible content fields as fallback
                         content_text = (
                             extract_field_safe(conv, 'content') or
                             extract_field_safe(conv, 'body') or
                             extract_field_safe(conv, 'text') or
-                            "(No content available)"
+                            extract_field_safe(conv, 'message') or
+                            f"(No content - Type: {conv_type})"
                         )
                     
-                    # Get sender info (OPTION 3: Safe extraction)
+                    # Extract sender info
                     from_obj = conv.get('from', {})
                     from_email = extract_field_safe(from_obj, 'email_id', default='Unknown')
                     from_name = extract_field_safe(from_obj, 'name', default='Unknown')
                     
-                    # Get timestamp (OPTION 3: Multiple paths)
+                    # If no 'from', try 'created_by'
+                    if from_name == 'Unknown':
+                        from_name = extract_field_safe(conv.get('created_by', {}), 'name', default='Unknown')
+                        from_email = extract_field_safe(conv.get('created_by', {}), 'email_id', default='Unknown')
+                    
+                    # Extract timestamp
                     created_time = conv.get('created_time', {})
                     if isinstance(created_time, dict):
                         timestamp = created_time.get('display_value') or created_time.get('value') or 'Unknown time'
                     else:
                         timestamp = str(created_time) if created_time else 'Unknown time'
                     
-                    # Get subject
                     subject = extract_field_safe(conv, 'subject', default='')
                     
                     message = {
                         'type': 'conversation',
+                        'conv_type': conv_type,
                         'from': from_email,
                         'from_name': from_name,
                         'subject': subject,
                         'content': content_text,
                         'timestamp': timestamp,
-                        'raw_available': bool(conv.get('description'))
+                        'is_system': 'System' in created_by_name
                     }
                     conversation_messages.append(message)
                     CONVERSATION_DIAGNOSTICS['total_messages'] += 1
-                    
-                    # Debug log for problematic entries
-                    if DEBUG_MODE and not content_text.strip():
-                        logger.debug(f"⚠️  Empty content at index {idx} for ticket {ticket_id}")
-                        logger.debug(f"   Description object: {desc}")
                         
             else:
                 CONVERSATION_DIAGNOSTICS['conversations_endpoint_empty'] += 1
@@ -591,7 +616,7 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
         diagnostic['conversations']['error'] = str(e)
         logger.error(f"Conversation fetch error for {ticket_id}: {e}")
     
-    # Method 2: /notifications endpoint (backup)
+    # Method 2: /notifications endpoint (backup check)
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications"
         response = requests.get(url, headers=headers, timeout=30)
@@ -617,7 +642,7 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
         CONVERSATION_DIAGNOSTICS['notifications_endpoint_error'] += 1
         diagnostic['notifications']['error'] = str(e)
     
-    # Method 3: /notes endpoint (FULL CONTENT - Internal notes)
+    # Method 3: /notes endpoint (FULL DEBUG for notes too)
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
         response = requests.get(url, headers=headers, timeout=30)
@@ -627,6 +652,24 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
             data = response.json()
             notes = data.get('notes', [])
             
+            # ENHANCED DEBUG: Show first note structure if exists
+            if DEBUG_MODE and DEBUG_SAMPLES_SHOWN <= MAX_DEBUG_SAMPLES and notes and not DEBUG_SAMPLE_LOGGED:
+                logger.info("=" * 80)
+                logger.info("🔍 FULL DEBUG: FIRST NOTE STRUCTURE")
+                logger.info("=" * 80)
+                logger.info(f"Ticket ID: {ticket_id}")
+                logger.info(f"Total notes: {len(notes)}")
+                logger.info("")
+                logger.info("First note complete JSON object:")
+                logger.info(json.dumps(notes[0], indent=2, default=str))
+                logger.info("")
+                logger.info(f"📊 Field Analysis:")
+                logger.info(f"  Available fields: {list(notes[0].keys())}")
+                logger.info(f"  Has 'description' field: {'description' in notes[0]}")
+                logger.info(f"  Has 'content' field: {'content' in notes[0]}")
+                logger.info("=" * 80)
+                DEBUG_SAMPLE_LOGGED = True
+            
             if notes:
                 CONVERSATION_DIAGNOSTICS['notes_endpoint_success'] += 1
                 CONVERSATION_DIAGNOSTICS['total_notes'] += len(notes)
@@ -634,25 +677,21 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
                 diagnostic['notes']['count'] = len(notes)
                 total_count += len(notes)
                 
-                # Extract note content with enhanced methods
+                # Extract note content
                 for note in notes:
-                    # Get description content (OPTION 3)
                     desc = note.get('description', {})
                     content_text = extract_content_multi_path(desc, 'description')
                     
-                    # OPTION 5: Validation
                     if content_text and len(content_text.strip()) > 0:
                         CONVERSATION_DIAGNOSTICS['content_extracted_success'] += 1
                     else:
                         CONVERSATION_DIAGNOSTICS['content_extracted_empty'] += 1
                         content_text = "(No note content)"
                     
-                    # Get sender info
                     added_by = note.get('added_by', {})
                     from_email = extract_field_safe(added_by, 'email_id', default='Unknown')
                     from_name = extract_field_safe(added_by, 'name', default='Unknown')
                     
-                    # Get timestamp
                     added_time = note.get('added_time', {})
                     if isinstance(added_time, dict):
                         timestamp = added_time.get('display_value') or added_time.get('value') or 'Unknown time'
@@ -687,11 +726,11 @@ def fetch_conversation_with_content(ticket_id: str, retry_count: int = 0) -> Tup
     return total_count, diagnostic, conversation_messages, note_messages
 
 def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
-    """Fetch conversations in parallel with FULL CONTENT and DEBUG."""
+    """Fetch conversations in parallel with FULL FIELD DEBUG."""
     conversations_map = {}
     
-    logger.info(f"  Fetching conversations with ENHANCED CONTENT EXTRACTION ({MAX_CONCURRENT_CONVERSATIONS} workers)...")
-    logger.info(f"  📊 Debug mode: {DEBUG_MODE}")
+    logger.info(f"  Fetching conversations with FULL FIELD DEBUG ({MAX_CONCURRENT_CONVERSATIONS} workers)...")
+    logger.info(f"  📊 Debug mode: {DEBUG_MODE} (showing first {MAX_DEBUG_SAMPLES} conversation samples)")
     start_time = time.time()
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
@@ -723,22 +762,20 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
     elapsed = time.time() - start_time
     logger.info(f"  ✓ Fetched conversations for {len(tickets)} tickets ({elapsed:.1f}s, {len(tickets)/elapsed:.1f}/sec)")
     
-    # Enhanced diagnostic logging
+    # Enhanced diagnostic summary
     if conversations_map:
         first_ticket_id = list(conversations_map.keys())[0]
         first_data = conversations_map[first_ticket_id]
         logger.info(f"  🔍 Sample: {first_data['count']} exchanges ({len(first_data['conversations'])} conversations, {len(first_data['notes'])} notes)")
         
-        # Check for content extraction issues
         if first_data['conversations']:
             first_conv = first_data['conversations'][0]
             content_length = len(first_conv.get('content', ''))
             logger.info(f"  📝 First message content length: {content_length} chars")
-            if content_length == 0:
-                logger.warning("  ⚠️  First message has NO CONTENT - check debug logs above")
+            logger.info(f"  🔧 Conversation type: {first_conv.get('conv_type', 'UNKNOWN')}")
+            logger.info(f"  👤 Is system message: {first_conv.get('is_system', False)}")
     
     return conversations_map
-
 # ============================================================
 # SERVICEDESK API - TICKET FETCHING (FIXED)
 # ============================================================
@@ -861,7 +898,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             stats['updated_tickets'] = updated_count
     
     return all_tickets
-
 # ============================================================
 # TICKET PROCESSING WITH CONVERSATION CONTENT
 # ============================================================
@@ -1195,7 +1231,6 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
     eta_seconds = remaining_tickets / rate if rate > 0 else 0
     
     logger.info(f"  📊 Progress: {tickets_done}/{total_tickets} tickets ({rate:.1f}/sec, ~{eta_seconds/60:.1f} min remaining)")
-
 # ============================================================
 # MAIN SYNC LOGIC
 # ============================================================
@@ -1209,12 +1244,14 @@ def run_sync():
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
-    logger.info("🔍 ENHANCED DEBUG + CONVERSATION CONTENT MODE:")
+    logger.info("🔍 FULL DEBUG MODE - COMPLETE CONVERSATION INSPECTION:")
     logger.info(f"   • DEBUG MODE: {'ENABLED' if DEBUG_MODE else 'DISABLED'}")
+    logger.info(f"   • Will show COMPLETE JSON for first {MAX_DEBUG_SAMPLES} conversations")
     logger.info(f"   • Enhanced HTML stripping (multi-strategy)")
     logger.info(f"   • Multiple content field checking")
     logger.info(f"   • Fallback handling for missing data")
     logger.info(f"   • Content validation at extraction")
+    logger.info(f"   • System vs User message tracking")
     logger.info(f"   • Detailed diagnostic logging")
     logger.info(f"   • Short display IDs (e.g. ticket-15877)")
     logger.info(f"   • Parallel conversations: {MAX_CONCURRENT_CONVERSATIONS} workers")
@@ -1288,12 +1325,12 @@ def run_sync():
         est_minutes = total_batches * 0.8
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync with debug)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync with FULL DEBUG)")
     else:
         est_minutes = total_batches * 0.5
         logger.info("")
         logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with debug)")
+        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental with FULL DEBUG)")
     
     processing_start = time.time()
     for i in range(0, len(tickets), BATCH_SIZE):
@@ -1354,6 +1391,15 @@ def run_sync():
     if CONVERSATION_DIAGNOSTICS['total_messages'] > 0:
         extraction_rate = (CONVERSATION_DIAGNOSTICS['content_extracted_success'] / CONVERSATION_DIAGNOSTICS['total_messages']) * 100
         logger.info(f"    Extraction rate:   {extraction_rate:.1f}%")
+    logger.info("")
+    logger.info("  👥 MESSAGE TYPE BREAKDOWN:")
+    logger.info(f"    System notifications: {CONVERSATION_DIAGNOSTICS['system_notifications']}")
+    logger.info(f"    User messages:        {CONVERSATION_DIAGNOSTICS['user_messages']}")
+    if CONVERSATION_DIAGNOSTICS['total_messages'] > 0:
+        system_pct = (CONVERSATION_DIAGNOSTICS['system_notifications'] / CONVERSATION_DIAGNOSTICS['total_messages']) * 100
+        user_pct = (CONVERSATION_DIAGNOSTICS['user_messages'] / CONVERSATION_DIAGNOSTICS['total_messages']) * 100
+        logger.info(f"    System %:             {system_pct:.1f}%")
+        logger.info(f"    User %:               {user_pct:.1f}%")
     
     logger.info("")
     logger.info("📈 TICKET BREAKDOWN:")
@@ -1395,7 +1441,7 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  DEBUG MODE + Enhanced Content Extraction + Type Safety")
+    logger.info("  FULL DEBUG MODE - Complete Conversation Field Inspection")
     logger.info("=" * 60)
 
 # ============================================================
@@ -1426,6 +1472,7 @@ if __name__ == "__main__":
         logger.info(f"  SDP Domain: {SDP_DOMAIN}")
         logger.info(f"  Version: {VERSION}")
         logger.info(f"  Debug Mode: {DEBUG_MODE}")
+        logger.info(f"  Debug Samples: {MAX_DEBUG_SAMPLES}")
         logger.info("")
         
         run_sync()
