@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v3.5.4-FIND-CONVERSATIONS
-MISSION: Find where the portal conversation content actually lives in the API
+ServiceDesk Intelligence Suite v3.5.5-FINAL-EMAIL-CONTENT-TEST
+MISSION: Exhaustive test to find email body content in ManageEngine API
+
+This will test:
+1. Individual notification fetching by ID
+2. Various API parameters (?fields=all, ?include_body=true, etc.)
+3. Different field specifications
+4. Alternative headers/accept types
+5. Raw API responses for hidden fields
 """
 
 import os
@@ -31,7 +38,7 @@ SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
 SDP_CLIENT_SECRET = clean_secret(os.getenv('SDP_CLIENT_SECRET', ''))
 SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 
-VERSION = "v3.5.4-FIND-CONVERSATIONS"
+VERSION = "v3.5.5-FINAL-EMAIL-CONTENT-TEST"
 
 # ============================================================
 # LOGGING SETUP
@@ -82,7 +89,7 @@ def refresh_token():
 # FIND TICKET
 # ============================================================
 def find_ticket_15706() -> Optional[dict]:
-    """Find ticket #15706."""
+    """Find ticket #15706 quickly."""
     global TOKEN
     
     headers = {
@@ -93,7 +100,6 @@ def find_ticket_15706() -> Optional[dict]:
     
     logger.info("🔍 Searching for ticket #15706...")
     
-    # Fetch recent tickets to find #15706
     for page in range(1, 11):
         list_info = {
             "list_info": {
@@ -131,16 +137,16 @@ def find_ticket_15706() -> Optional[dict]:
             time.sleep(0.1)
             
         except Exception as e:
-            logger.error(f"Failed to fetch page {page}: {e}")
+            logger.error(f"Failed: {e}")
             break
     
     return None
 
 # ============================================================
-# COMPREHENSIVE CONTENT SEARCH
+# EXHAUSTIVE EMAIL CONTENT TESTING
 # ============================================================
-def search_for_conversation_content(ticket: dict):
-    """Exhaustive search for conversation content."""
+def test_email_content_retrieval(ticket: dict):
+    """Exhaustive testing for email content in API."""
     global TOKEN
     
     ticket_id = str(ticket.get('id', ''))
@@ -150,219 +156,290 @@ def search_for_conversation_content(ticket: dict):
     else:
         display_id = str(display_id_obj) if display_id_obj else ticket_id
     
-    headers = {
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"🔬 EXHAUSTIVE EMAIL CONTENT TEST FOR TICKET #{display_id}")
+    logger.info("=" * 80)
+    logger.info("")
+    
+    # First, get notification list to get IDs
+    logger.info("Step 1: Fetching notification list to get IDs...")
+    
+    headers_base = {
         "Authorization": f"Zoho-oauthtoken {TOKEN}",
         "Content-Type": "application/json"
     }
     
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info(f"🔬 COMPREHENSIVE CONTENT SEARCH FOR TICKET #{display_id}")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    # ============================================================
-    # TEST 1: FULL TICKET OBJECT - Check ALL fields
-    # ============================================================
-    logger.info("=" * 80)
-    logger.info("TEST 1: FULL TICKET OBJECT INSPECTION")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    logger.info("📊 TOP-LEVEL TICKET FIELDS:")
-    logger.info(f"  Available fields: {list(ticket.keys())}")
-    logger.info("")
-    
-    # Check description field
-    description = ticket.get('description', '')
-    logger.info(f"📝 DESCRIPTION FIELD:")
-    logger.info(f"  Type: {type(description)}")
-    logger.info(f"  Length: {len(str(description)) if description else 0} chars")
-    if description:
-        logger.info(f"  Content preview (first 500 chars):")
-        logger.info(f"  {str(description)[:500]}")
-        logger.info("")
-        logger.info(f"  Full content:")
-        logger.info(f"  {description}")
-    else:
-        logger.info(f"  ❌ Empty or missing")
-    logger.info("")
-    
-    # ============================================================
-    # TEST 2: NOTIFICATIONS ENDPOINT - Full inspection
-    # ============================================================
-    logger.info("=" * 80)
-    logger.info("TEST 2: NOTIFICATIONS ENDPOINT (FULL INSPECTION)")
-    logger.info("=" * 80)
-    logger.info("")
+    url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications"
     
     try:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications"
-        logger.info(f"Endpoint: {url}")
-        
-        response = requests.get(url, headers=headers, timeout=30)
-        logger.info(f"Status: {response.status_code}")
-        logger.info("")
-        
+        response = requests.get(url, headers=headers_base, timeout=30)
         if response.status_code == 200:
             data = response.json()
             notifications = data.get('notifications', [])
             
-            logger.info(f"✓ Retrieved {len(notifications)} notifications")
+            if not notifications:
+                logger.error("No notifications found!")
+                return
+            
+            logger.info(f"✓ Found {len(notifications)} notifications")
+            
+            # Find a REQREPLY notification (actual user reply)
+            reqreply_notif = None
+            for notif in notifications:
+                if notif.get('type') == 'REQREPLY':
+                    reqreply_notif = notif
+                    break
+            
+            if not reqreply_notif:
+                logger.warning("No REQREPLY notifications found, using first notification")
+                reqreply_notif = notifications[0]
+            
+            notif_id = reqreply_notif.get('id')
+            notif_type = reqreply_notif.get('type')
+            notif_sender = reqreply_notif.get('sender', {}).get('name', 'Unknown')
+            
+            logger.info(f"\n📧 Testing with notification:")
+            logger.info(f"  ID: {notif_id}")
+            logger.info(f"  Type: {notif_type}")
+            logger.info(f"  Sender: {notif_sender}")
+            logger.info(f"  Subject: {reqreply_notif.get('subject', 'N/A')}")
+            logger.info(f"  MessageID: {reqreply_notif.get('messageid', 'N/A')}")
             logger.info("")
             
-            if notifications:
-                logger.info("📊 FIRST 5 NOTIFICATIONS WITH COMPLETE STRUCTURE:")
-                for idx, notif in enumerate(notifications[:5]):
-                    logger.info(f"\n  Notification #{idx + 1}:")
-                    logger.info(f"    All fields: {list(notif.keys())}")
-                    
-                    # Check for content fields
-                    content_found = False
-                    for field in ['description', 'content', 'body', 'text', 'message', 'html', 'plain']:
-                        if field in notif and notif[field]:
-                            logger.info(f"    ✅ HAS '{field}' field!")
-                            logger.info(f"       Content: {str(notif[field])[:200]}")
-                            content_found = True
-                    
-                    if not content_found:
-                        logger.info(f"    ❌ No content fields found")
-                    
-                    # Show complete JSON for first 2
-                    if idx < 2:
-                        logger.info(f"\n    COMPLETE JSON:")
-                        logger.info(json.dumps(notif, indent=6, default=str))
-            else:
-                logger.info("❌ No notifications found")
-        else:
-            logger.error(f"❌ Failed: {response.text[:500]}")
+            # ============================================================
+            # TEST 1: Individual Notification by ID
+            # ============================================================
+            logger.info("=" * 80)
+            logger.info("TEST 1: FETCH INDIVIDUAL NOTIFICATION BY ID")
+            logger.info("=" * 80)
+            logger.info("")
             
-    except Exception as e:
-        logger.error(f"❌ Exception: {e}")
-    
-    # ============================================================
-    # TEST 3: TRY ALTERNATIVE ENDPOINTS
-    # ============================================================
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("TEST 3: TRYING ALTERNATIVE ENDPOINTS")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    alternative_endpoints = [
-        f"/api/v3/requests/{ticket_id}/replies",
-        f"/api/v3/requests/{ticket_id}/threads",
-        f"/api/v3/requests/{ticket_id}/messages",
-        f"/api/v3/requests/{ticket_id}/conversation_threads",
-        f"/api/v3/requests/{ticket_id}/email_conversations",
-        f"/api/v3/requests/{ticket_id}/responses"
-    ]
-    
-    for endpoint_path in alternative_endpoints:
-        url = f"https://{SDP_DOMAIN}{endpoint_path}"
-        logger.info(f"Testing: {endpoint_path}")
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            logger.info(f"  Status: {response.status_code}")
+            individual_url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications/{notif_id}"
+            logger.info(f"URL: {individual_url}")
+            
+            try:
+                response = requests.get(individual_url, headers=headers_base, timeout=30)
+                logger.info(f"Status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    logger.info("✅ SUCCESS!")
+                    individual_data = response.json()
+                    logger.info("\nComplete response:")
+                    logger.info(json.dumps(individual_data, indent=2, default=str))
+                    
+                    # Check for content
+                    notif_obj = individual_data.get('notification', individual_data)
+                    if 'description' in notif_obj and notif_obj['description']:
+                        logger.info(f"\n🎉 FOUND CONTENT in description!")
+                        logger.info(f"Content: {notif_obj['description']}")
+                    else:
+                        logger.info(f"\n❌ Still no content in description field")
+                else:
+                    logger.info(f"❌ Failed: {response.text[:500]}")
+            except Exception as e:
+                logger.error(f"❌ Exception: {e}")
+            
+            logger.info("")
+            
+            # ============================================================
+            # TEST 2: Try Different Parameters
+            # ============================================================
+            logger.info("=" * 80)
+            logger.info("TEST 2: TRY VARIOUS API PARAMETERS")
+            logger.info("=" * 80)
+            logger.info("")
+            
+            test_params = [
+                {'fields': 'all'},
+                {'include_body': 'true'},
+                {'include_description': 'true'},
+                {'include_content': 'true'},
+                {'format': 'complete'},
+                {'expand': 'all'},
+                {'view': 'full'},
+                {'details': 'complete'}
+            ]
+            
+            base_url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications/{notif_id}"
+            
+            for params in test_params:
+                param_str = '&'.join([f"{k}={v}" for k, v in params.items()])
+                test_url = f"{base_url}?{param_str}"
+                logger.info(f"Testing: {param_str}")
+                
+                try:
+                    response = requests.get(test_url, headers=headers_base, timeout=30)
+                    logger.info(f"  Status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        notif_obj = data.get('notification', data)
+                        
+                        if 'description' in notif_obj and notif_obj['description']:
+                            logger.info(f"  🎉 SUCCESS! Found content with parameter: {param_str}")
+                            logger.info(f"  Content: {notif_obj['description'][:200]}")
+                            logger.info("")
+                            logger.info("FULL RESPONSE:")
+                            logger.info(json.dumps(data, indent=2, default=str))
+                        else:
+                            logger.info(f"  ❌ Still empty")
+                    else:
+                        logger.info(f"  ❌ Failed: {response.status_code}")
+                        
+                except Exception as e:
+                    logger.info(f"  ❌ Error: {e}")
+                
+                logger.info("")
+                time.sleep(0.3)
+            
+            # ============================================================
+            # TEST 3: Try Different Accept Headers
+            # ============================================================
+            logger.info("=" * 80)
+            logger.info("TEST 3: TRY DIFFERENT ACCEPT HEADERS")
+            logger.info("=" * 80)
+            logger.info("")
+            
+            test_headers = [
+                {"Accept": "application/json"},
+                {"Accept": "application/vnd.manageengine.sdp.v3+json"},
+                {"Accept": "application/vnd.manageengine.sdp.v2+json"},
+                {"Accept": "application/vnd.manageengine.sdp.v1+json"},
+                {"Accept": "application/xml"},
+                {"Accept": "*/*"}
+            ]
+            
+            for test_header in test_headers:
+                headers_test = headers_base.copy()
+                headers_test.update(test_header)
+                
+                logger.info(f"Testing Accept: {test_header['Accept']}")
+                
+                try:
+                    response = requests.get(individual_url, headers=headers_test, timeout=30)
+                    logger.info(f"  Status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            notif_obj = data.get('notification', data)
+                            
+                            if 'description' in notif_obj and notif_obj['description']:
+                                logger.info(f"  🎉 SUCCESS! Found content with Accept: {test_header['Accept']}")
+                                logger.info(f"  Content: {notif_obj['description'][:200]}")
+                            else:
+                                logger.info(f"  ❌ Still empty")
+                        except:
+                            logger.info(f"  Response (non-JSON): {response.text[:200]}")
+                    else:
+                        logger.info(f"  ❌ Failed")
+                        
+                except Exception as e:
+                    logger.info(f"  ❌ Error: {e}")
+                
+                logger.info("")
+                time.sleep(0.3)
+            
+            # ============================================================
+            # TEST 4: Check Conversation Endpoint with Parameters
+            # ============================================================
+            logger.info("=" * 80)
+            logger.info("TEST 4: CONVERSATIONS ENDPOINT WITH PARAMETERS")
+            logger.info("=" * 80)
+            logger.info("")
+            
+            # Get conversation ID (should match notification ID for REQREPLY)
+            conv_url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/conversations"
+            response = requests.get(conv_url, headers=headers_base, timeout=30)
             
             if response.status_code == 200:
-                logger.info(f"  ✅ SUCCESS! Endpoint exists!")
                 data = response.json()
-                logger.info(f"  Response keys: {list(data.keys())}")
-                logger.info(f"  Full response:")
-                logger.info(json.dumps(data, indent=4, default=str)[:2000])
-                logger.info("")
-            elif response.status_code == 404:
-                logger.info(f"  ❌ Not found")
-            else:
-                logger.info(f"  Response: {response.text[:200]}")
-            
-        except Exception as e:
-            logger.info(f"  ❌ Error: {e}")
-        
-        logger.info("")
-        time.sleep(0.3)
-    
-    # ============================================================
-    # TEST 4: FETCH FULL TICKET DETAILS WITH ALL FIELDS
-    # ============================================================
-    logger.info("=" * 80)
-    logger.info("TEST 4: FETCH COMPLETE TICKET DETAILS")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    try:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}"
-        logger.info(f"Endpoint: {url}")
-        
-        response = requests.get(url, headers=headers, timeout=30)
-        logger.info(f"Status: {response.status_code}")
-        logger.info("")
-        
-        if response.status_code == 200:
-            data = response.json()
-            request_data = data.get('request', data)
-            
-            logger.info("📊 COMPLETE TICKET OBJECT:")
-            logger.info(f"  All fields: {list(request_data.keys())}")
-            logger.info("")
-            
-            # Check ALL fields for content
-            logger.info("🔍 CHECKING ALL FIELDS FOR CONTENT:")
-            for field_name, field_value in request_data.items():
-                if isinstance(field_value, str) and len(field_value) > 50:
-                    logger.info(f"\n  ✅ Field '{field_name}' has text content ({len(field_value)} chars):")
-                    logger.info(f"     {field_value[:300]}")
-            
-            logger.info("")
-            logger.info("COMPLETE TICKET JSON:")
-            logger.info(json.dumps(request_data, indent=2, default=str))
-            
-        else:
-            logger.error(f"❌ Failed: {response.text[:500]}")
-            
-    except Exception as e:
-        logger.error(f"❌ Exception: {e}")
-    
-    # ============================================================
-    # TEST 5: NOTES (we know this works)
-    # ============================================================
-    logger.info("")
-    logger.info("=" * 80)
-    logger.info("TEST 5: NOTES ENDPOINT (KNOWN TO WORK)")
-    logger.info("=" * 80)
-    logger.info("")
-    
-    try:
-        url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            notes = data.get('notes', [])
-            logger.info(f"✓ Retrieved {len(notes)} notes")
-            
-            if notes:
-                for idx, note in enumerate(notes):
-                    logger.info(f"\n  Note #{idx + 1}:")
-                    logger.info(f"    Description: {note.get('description', 'N/A')}")
-            else:
-                logger.info("No notes found")
+                conversations = data.get('conversations', [])
                 
+                # Find matching conversation
+                conv_id = None
+                for conv in conversations:
+                    if conv.get('type') == 'REQREPLY':
+                        conv_id = conv.get('id')
+                        break
+                
+                if conv_id:
+                    logger.info(f"Found conversation ID: {conv_id}")
+                    
+                    test_params = [
+                        {},
+                        {'fields': 'all'},
+                        {'include_description': 'true'},
+                        {'expand': 'all'}
+                    ]
+                    
+                    for params in test_params:
+                        param_str = '&'.join([f"{k}={v}" for k, v in params.items()]) if params else 'No params'
+                        logger.info(f"\nTesting conversations with: {param_str}")
+                        
+                        test_url = conv_url if not params else f"{conv_url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+                        
+                        try:
+                            response = requests.get(test_url, headers=headers_base, timeout=30)
+                            if response.status_code == 200:
+                                data = response.json()
+                                conversations = data.get('conversations', [])
+                                
+                                if conversations:
+                                    first_conv = conversations[0]
+                                    has_desc = 'description' in first_conv and first_conv['description']
+                                    logger.info(f"  Status: 200, Has description: {has_desc}")
+                                    
+                                    if has_desc:
+                                        logger.info(f"  🎉 FOUND CONTENT!")
+                                        logger.info(f"  Content: {first_conv['description'][:200]}")
+                                else:
+                                    logger.info(f"  Status: 200, No conversations")
+                            else:
+                                logger.info(f"  Status: {response.status_code}")
+                        except Exception as e:
+                            logger.info(f"  Error: {e}")
+                        
+                        time.sleep(0.3)
+            
+            # ============================================================
+            # TEST 5: Raw Response Inspection
+            # ============================================================
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("TEST 5: RAW RESPONSE INSPECTION")
+            logger.info("=" * 80)
+            logger.info("")
+            
+            logger.info("Checking for hidden/undocumented fields in notification object...")
+            logger.info("\nAll fields in REQREPLY notification:")
+            for key in reqreply_notif.keys():
+                value = reqreply_notif[key]
+                value_type = type(value).__name__
+                value_preview = str(value)[:100] if value else '(empty)'
+                logger.info(f"  {key} ({value_type}): {value_preview}")
+            
     except Exception as e:
-        logger.error(f"❌ Exception: {e}")
+        logger.error(f"Failed to fetch notifications: {e}")
 
 # ============================================================
 # MAIN
 # ============================================================
 def run_test():
-    """Run comprehensive content search."""
+    """Run comprehensive email content test."""
     
     logger.info("=" * 80)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE {VERSION}")
     logger.info("=" * 80)
-    logger.info("MISSION: Find where portal conversation content lives in the API")
+    logger.info("FINAL TEST: Exhaustive search for email body content")
+    logger.info("")
+    logger.info("This will test:")
+    logger.info("  1. Individual notification fetching by ID")
+    logger.info("  2. Various API parameters (?fields=all, etc.)")
+    logger.info("  3. Different Accept headers")
+    logger.info("  4. Conversation endpoint variations")
+    logger.info("  5. Raw response field inspection")
     logger.info("")
     
     refresh_token()
@@ -373,14 +450,37 @@ def run_test():
         logger.error("Could not find ticket #15706")
         return
     
-    search_for_conversation_content(ticket)
+    test_email_content_retrieval(ticket)
     
     logger.info("")
     logger.info("=" * 80)
-    logger.info("SEARCH COMPLETE")
+    logger.info("TEST COMPLETE")
     logger.info("=" * 80)
     logger.info("")
-    logger.info("Review the output above to find where conversation content exists!")
+    logger.info("📚 DOCUMENTATION RESEARCH NEEDED:")
+    logger.info("")
+    logger.info("Check these ManageEngine API documentation sources:")
+    logger.info("")
+    logger.info("1. Official API Docs:")
+    logger.info("   https://www.manageengine.com/products/service-desk/sdpod-v3-api/")
+    logger.info("   https://www.manageengine.com/products/service-desk/sdpod-v3-api/SDPOD-V3-API.html")
+    logger.info("")
+    logger.info("2. Notifications API Section:")
+    logger.info("   Look for: GET /api/v3/requests/{request_id}/notifications/{id}")
+    logger.info("   Check for: fields parameter, expand parameter, include options")
+    logger.info("")
+    logger.info("3. Search for:")
+    logger.info("   - 'email body'")
+    logger.info("   - 'notification content'")
+    logger.info("   - 'reply content'")
+    logger.info("   - 'message body'")
+    logger.info("")
+    logger.info("4. Community Forums:")
+    logger.info("   https://pitstop.manageengine.com/portal/en/community/servicedesk-plus-cloud")
+    logger.info("")
+    logger.info("5. Support Contact:")
+    logger.info("   If email content should be available, open a support ticket")
+    logger.info("   asking how to retrieve email body content via API")
 
 if __name__ == "__main__":
     try:
