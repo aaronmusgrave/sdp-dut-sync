@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v4.0.2-FIXED-INCREMENTAL
-PRODUCTION: Full email conversation content + Working incremental sync
+ServiceDesk Intelligence Suite v4.0.3-COMPLETE-FIX
+PRODUCTION: Full email conversation content + Working incremental + Fixed full sync checkbox
 
-FIX: Removed OR logic from search_criteria
-- Only uses last_updated_time (which captures both new and updated tickets)
-- No more fetching all 4,555 tickets on incremental sync!
+FIXES in v4.0.3:
+1. Robust full sync detection (checks multiple environment variable formats)
+2. Separate query for active tickets (servicedesk-active never empty)
+3. Enhanced debug logging for troubleshooting
 
-Expected behavior:
-- Full sync: Fetches all tickets
-- Incremental sync: Only fetches tickets modified since last checkpoint
+Behavior:
+- Incremental sync: Fetches changed tickets + ALL active tickets (separate queries)
+- Full sync: Complete rebuild when checkbox is checked or no checkpoint exists
 """
 
 import os
@@ -57,7 +58,7 @@ MAX_CONCURRENT_UPLOADS = 2
 UPLOAD_DELAY = 0.3
 
 # Version
-VERSION = "v4.0.2-FIXED-INCREMENTAL"
+VERSION = "v4.0.3-COMPLETE-FIX"
 
 # ============================================================
 # LOGGING SETUP
@@ -114,7 +115,8 @@ stats = {
     'closed_count': 0,
     'service_requests': 0,
     'incidents': 0,
-    'total_exchanges': 0
+    'total_exchanges': 0,
+    'active_tickets_fetched': 0
 }
 
 # ============================================================
@@ -195,6 +197,32 @@ def save_checkpoint(timestamp: datetime):
     except Exception as e:
         logger.warning(f"Failed to save checkpoint: {e}")
 
+def check_force_full_sync() -> bool:
+    """
+    Check if full sync is forced via environment variables.
+    Checks multiple possible formats that different CI/CD systems might use.
+    """
+    possible_vars = [
+        'FORCE_FULL_SYNC',
+        'FULL_SYNC', 
+        'force_full_sync',
+        'full_sync',
+        'INPUT_FORCE_FULL_SYNC',  # GitHub Actions format
+        'INPUT_FULL_SYNC'
+    ]
+    
+    logger.info("  🔍 Checking for full sync environment variables...")
+    for var_name in possible_vars:
+        var_value = os.getenv(var_name, '')
+        if var_value:
+            logger.info(f"    Found {var_name}={var_value}")
+            if var_value.lower() in ['true', '1', 'yes', 'on']:
+                logger.info(f"    ✓ Full sync triggered by {var_name}")
+                return True
+    
+    logger.info("    No full sync environment variables found")
+    return False
+
 # ============================================================
 # HTML STRIPPING AND CONTENT EXTRACTION
 # ============================================================
@@ -204,17 +232,11 @@ def strip_html_enhanced(html_content: str) -> str:
         return ""
     
     try:
-        # Strategy 1: Remove HTML tags
         text = re.sub('<[^<]+?>', '', html_content)
-        
-        # Strategy 2: Decode HTML entities
         text = unescape(text)
-        
-        # Strategy 3: Clean up whitespace
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
         
-        # Strategy 4: If still empty but original had content, return original
         if not text and html_content and len(html_content.strip()) > 0:
             return html_content.strip()
         
@@ -244,12 +266,10 @@ def extract_field_safe(obj: dict, *field_path, default='') -> str:
         return default
 
 # ============================================================
-# SERVICEDESK API - INDIVIDUAL NOTIFICATION FETCHING (BREAKTHROUGH!)
+# SERVICEDESK API - INDIVIDUAL NOTIFICATION FETCHING
 # ============================================================
 def fetch_individual_notification(ticket_id: str, notification_id: str) -> Optional[dict]:
-    """
-    BREAKTHROUGH: Fetch individual notification to get FULL email content.
-    """
+    """Fetch individual notification to get FULL email content."""
     global TOKEN, CONVERSATION_401_ERRORS
     
     if CONVERSATION_401_ERRORS >= MAX_401_BEFORE_REFRESH:
@@ -296,12 +316,7 @@ def fetch_individual_notification(ticket_id: str, notification_id: str) -> Optio
         return None
 
 def fetch_notifications_with_content(ticket_id: str) -> Tuple[List[dict], List[dict]]:
-    """
-    Fetch notifications with FULL content by:
-    1. Getting notification list (IDs only)
-    2. Fetching EACH notification individually (full content)
-    3. Fetching notes separately
-    """
+    """Fetch notifications with FULL content."""
     global TOKEN
     
     headers = {
@@ -312,7 +327,6 @@ def fetch_notifications_with_content(ticket_id: str) -> Tuple[List[dict], List[d
     notifications_with_content = []
     notes = []
     
-    # Step 1: Fetch notification list to get IDs
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notifications"
         response = requests.get(url, headers=headers, timeout=30)
@@ -326,7 +340,6 @@ def fetch_notifications_with_content(ticket_id: str) -> Tuple[List[dict], List[d
                 CONVERSATION_DIAGNOSTICS['notifications_list_success'] += 1
                 CONVERSATION_DIAGNOSTICS['total_notifications'] += len(notification_list)
                 
-                # Step 2: Fetch each notification individually to get full content
                 with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_INDIVIDUAL_NOTIFS) as executor:
                     future_to_id = {
                         executor.submit(fetch_individual_notification, ticket_id, notif.get('id')): notif
@@ -352,7 +365,6 @@ def fetch_notifications_with_content(ticket_id: str) -> Tuple[List[dict], List[d
         CONVERSATION_DIAGNOSTICS['notifications_list_error'] += 1
         logger.debug(f"Failed to fetch notification list for {ticket_id}: {e}")
     
-    # Step 3: Fetch notes
     try:
         url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/notes"
         response = requests.get(url, headers=headers, timeout=30)
@@ -434,7 +446,6 @@ def format_conversation_summary(notifications: List[dict], notes: List[dict], ma
     """Format notifications and notes into searchable conversation summary."""
     all_exchanges = []
     
-    # Process notifications (email exchanges)
     for notif in notifications:
         time_obj = notif.get('time', {})
         if isinstance(time_obj, dict):
@@ -463,7 +474,6 @@ def format_conversation_summary(notifications: List[dict], notes: List[dict], ma
                 'is_public': notif.get('is_public', False)
             })
     
-    # Process notes (internal technician notes)
     for note in notes:
         created_time_obj = note.get('created_time', {})
         if isinstance(created_time_obj, dict):
@@ -489,7 +499,6 @@ def format_conversation_summary(notifications: List[dict], notes: List[dict], ma
                 'show_to_requester': note.get('show_to_requester', False)
             })
     
-    # Format conversation summary
     conversation_lines = []
     note_lines = []
     
@@ -831,11 +840,9 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     resolution_obj = safe_get(ticket, 'resolution', {})
     resolution = (resolution_obj.get('content', '') or '') if isinstance(resolution_obj, dict) else ''
     
-    # Extract conversation data with FULL content
     notifications = conversation_data.get('notifications', []) if conversation_data else []
     notes = conversation_data.get('notes', []) if conversation_data else []
     
-    # Format conversation summaries
     conversation_summary, notes_summary, total_exchanges = format_conversation_summary(notifications, notes)
     
     tags = [
@@ -903,12 +910,15 @@ def process_ticket(ticket: dict, conversation_data: dict) -> Tuple[dict, list]:
     return content, tags
 
 # ============================================================
-# SERVICEDESK API - TICKET FETCHING (FIXED INCREMENTAL!)
+# SERVICEDESK API - TICKET FETCHING (FIXED!)
 # ============================================================
-def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
+def fetch_tickets(last_sync: Optional[datetime] = None, active_only: bool = False) -> List[dict]:
     """
     Fetch tickets from ServiceDesk Plus API.
-    FIXED: Uses only last_updated_time filter (no OR logic).
+    
+    Args:
+        last_sync: If provided, only fetch tickets updated since this time
+        active_only: If True, only fetch currently active tickets (for servicedesk-active)
     """
     ensure_token_valid()
     
@@ -922,9 +932,20 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
         "Accept": "application/vnd.manageengine.sdp.v3+json"
     }
     
-    # FIXED: Only use last_updated_time (no OR logic!)
     search_criteria = []
-    if last_sync:
+    
+    if active_only:
+        # Fetch ALL currently active tickets (no time filter)
+        search_criteria = [
+            {
+                "field": "status",
+                "condition": "is not",
+                "value": "Closed"
+            }
+        ]
+        logger.info(f"📊 Fetching ALL currently active tickets...")
+    elif last_sync:
+        # Fetch only tickets changed since last sync
         last_sync_ms = int(last_sync.timestamp() * 1000)
         search_criteria = [
             {
@@ -991,33 +1012,37 @@ def fetch_tickets(last_sync: Optional[datetime] = None) -> List[dict]:
             break
     
     logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
-    stats['tickets_fetched'] = len(all_tickets)
     
-    if last_sync and all_tickets:
-        new_count = 0
-        updated_count = 0
-        last_sync_ms = int(last_sync.timestamp() * 1000)
+    if active_only:
+        stats['active_tickets_fetched'] = len(all_tickets)
+    else:
+        stats['tickets_fetched'] = len(all_tickets)
         
-        for ticket in all_tickets:
-            created_time_obj = ticket.get('created_time', {})
-            if created_time_obj and isinstance(created_time_obj, dict):
-                created_time_value = created_time_obj.get('value', 0)
-                
-                try:
-                    created_time = int(created_time_value) if created_time_value else 0
-                except (ValueError, TypeError):
-                    created_time = 0
-                
-                if created_time > last_sync_ms:
-                    new_count += 1
-                else:
-                    updated_count += 1
-        
-        if new_count > 0 or updated_count > 0:
-            logger.info(f"  New tickets: {new_count}")
-            logger.info(f"  Updated tickets: {updated_count}")
-            stats['new_tickets'] = new_count
-            stats['updated_tickets'] = updated_count
+        if last_sync and all_tickets:
+            new_count = 0
+            updated_count = 0
+            last_sync_ms = int(last_sync.timestamp() * 1000)
+            
+            for ticket in all_tickets:
+                created_time_obj = ticket.get('created_time', {})
+                if created_time_obj and isinstance(created_time_obj, dict):
+                    created_time_value = created_time_obj.get('value', 0)
+                    
+                    try:
+                        created_time = int(created_time_value) if created_time_value else 0
+                    except (ValueError, TypeError):
+                        created_time = 0
+                    
+                    if created_time > last_sync_ms:
+                        new_count += 1
+                    else:
+                        updated_count += 1
+            
+            if new_count > 0 or updated_count > 0:
+                logger.info(f"  New tickets: {new_count}")
+                logger.info(f"  Updated tickets: {updated_count}")
+                stats['new_tickets'] = new_count
+                stats['updated_tickets'] = updated_count
     
     return all_tickets
 
@@ -1100,7 +1125,7 @@ def process_batch(batch_tickets: List[dict], batch_num: int, total_batches: int,
 # MAIN SYNC LOGIC
 # ============================================================
 def run_sync():
-    """Main sync orchestration."""
+    """Main sync orchestration with FIXED logic."""
     
     sync_start_time = datetime.now(timezone.utc)
     
@@ -1109,36 +1134,29 @@ def run_sync():
     logger.info("=" * 60)
     logger.info(f"Sync starting at {sync_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("")
-    logger.info("✅ FIXED: Incremental sync now works correctly!")
-    logger.info("   - Uses only last_updated_time filter")
-    logger.info("   - No more fetching all 4,555 tickets every time")
-    logger.info("   - Only fetches changed tickets since last sync")
+    logger.info("✅ FIXED: Full sync checkbox detection (multiple formats)")
+    logger.info("✅ FIXED: servicedesk-active never empty (separate query)")
+    logger.info("✅ FIXED: Incremental sync only fetches changed tickets")
     logger.info("")
     logger.info("🎉 BREAKTHROUGH: FULL EMAIL CONVERSATION CONTENT!")
-    logger.info("")
-    logger.info("What We're Capturing:")
-    logger.info("  ✅ Ticket description (initial user request)")
-    logger.info("  ✅ ALL email replies (full content from individual fetch)")
-    logger.info("  ✅ Internal technician notes")
-    logger.info("  ✅ Resolution notes")
-    logger.info("  ✅ Complete conversation threading")
-    logger.info("  ✅ Fully searchable conversation history")
     logger.info("")
     
     refresh_token()
     
     last_sync = load_checkpoint()
     
-    force_full_sync = os.getenv('FORCE_FULL_SYNC', '').lower() in ['true', '1', 'yes']
+    # FIXED: Check multiple environment variable formats
+    force_full_sync = check_force_full_sync()
+    
     if force_full_sync:
-        logger.info("  🔄 Force full sync requested - ignoring checkpoint")
+        logger.info("  🔄 Force full sync requested via environment variable")
         last_sync = None
     
     is_full_sync = (last_sync is None)
     sync_mode = "full" if is_full_sync else "incremental"
     
     if is_full_sync:
-        logger.info("  🔄 No previous sync - performing full sync")
+        logger.info("  🔄 Performing full sync")
         logger.info("")
         logger.info("=" * 60)
         logger.info("FULL SYNC: CLEANING BOTH DATA SOURCES")
@@ -1159,14 +1177,18 @@ def run_sync():
         logger.info("")
         logger.info("✓ Both data sources cleaned - ready for fresh upload")
         logger.info("=" * 60)
+        
+        # Full sync: Fetch all tickets once
+        tickets = fetch_tickets(last_sync=None, active_only=False)
+        
     else:
         logger.info(f"  ✓ Performing incremental sync since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("")
         logger.info("=" * 60)
-        logger.info("INCREMENTAL SYNC: CLEANING ACTIVE DATA SOURCE")
+        logger.info("INCREMENTAL SYNC: DUAL QUERY STRATEGY")
         logger.info("=" * 60)
-        logger.info("  📦 Main data source (servicedesk) will receive upserts only")
-        logger.info("  ⚡ Active data source (servicedesk-active) will be rebuilt fresh")
+        logger.info("  📦 Query 1: Fetch changed tickets (for servicedesk upserts)")
+        logger.info("  ⚡ Query 2: Fetch ALL active tickets (rebuild servicedesk-active)")
         logger.info("")
         
         logger.info("⚡ Cleaning ACTIVE data source (servicedesk-active)...")
@@ -1175,10 +1197,39 @@ def run_sync():
             stats['active_deleted'] = delete_documents_from_dust_parallel(DUST_ACTIVE_DATA_SOURCE, active_docs)
             logger.info(f"  ✓ Deleted {stats['active_deleted']} documents from servicedesk-active")
         
-        logger.info("✓ Active data source cleaned - will rebuild with current active tickets only")
+        logger.info("")
+        
+        # FIXED: Two separate queries
+        # Query 1: Changed tickets for main data source
+        tickets = fetch_tickets(last_sync=last_sync, active_only=False)
+        
+        logger.info("")
+        
+        # Query 2: ALL active tickets for active data source
+        active_tickets = fetch_tickets(last_sync=None, active_only=True)
+        
+        logger.info("")
+        logger.info(f"  ✓ Strategy: Process {len(tickets)} changed + {len(active_tickets)} active tickets")
+        
+        # Combine tickets (remove duplicates by ID)
+        ticket_ids_seen = set()
+        combined_tickets = []
+        
+        for ticket in tickets:
+            ticket_id = ticket.get('id')
+            if ticket_id and ticket_id not in ticket_ids_seen:
+                combined_tickets.append(ticket)
+                ticket_ids_seen.add(ticket_id)
+        
+        for ticket in active_tickets:
+            ticket_id = ticket.get('id')
+            if ticket_id and ticket_id not in ticket_ids_seen:
+                combined_tickets.append(ticket)
+                ticket_ids_seen.add(ticket_id)
+        
+        tickets = combined_tickets
+        logger.info(f"  ✓ Combined total: {len(tickets)} unique tickets to process")
         logger.info("=" * 60)
-    
-    tickets = fetch_tickets(last_sync)
     
     if not tickets:
         logger.info("")
@@ -1188,16 +1239,10 @@ def run_sync():
     
     total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
     
-    if is_full_sync:
-        est_minutes = total_batches * 1.5
-        logger.info("")
-        logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (full sync)")
-    else:
-        est_minutes = total_batches * 1.0
-        logger.info("")
-        logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
-        logger.info(f"Estimated time: {int(est_minutes)} minutes (incremental)")
+    est_minutes = total_batches * (1.5 if is_full_sync else 1.0)
+    logger.info("")
+    logger.info(f"Processing {len(tickets)} tickets in {total_batches} batches of {BATCH_SIZE}")
+    logger.info(f"Estimated time: {int(est_minutes)} minutes ({sync_mode})")
     
     processing_start = time.time()
     for i in range(0, len(tickets), BATCH_SIZE):
@@ -1221,7 +1266,9 @@ def run_sync():
     logger.info("")
     logger.info("📊 TICKET STATISTICS:")
     logger.info(f"  Sync Mode:         {sync_mode}")
-    logger.info(f"  Total Fetched:     {stats['tickets_fetched']}")
+    logger.info(f"  Changed Fetched:   {stats['tickets_fetched']}")
+    if not is_full_sync:
+        logger.info(f"  Active Fetched:    {stats['active_tickets_fetched']}")
     logger.info(f"  Total Processed:   {stats['tickets_processed']}")
     logger.info(f"  Uploaded to Main:  {stats['main_uploaded']}")
     logger.info(f"  Uploaded to Active: {stats['active_uploaded']}")
@@ -1234,30 +1281,18 @@ def run_sync():
     
     logger.info("")
     logger.info("💬 CONVERSATION DIAGNOSTICS:")
-    logger.info(f"  Notification list endpoint:")
-    logger.info(f"    Success:  {CONVERSATION_DIAGNOSTICS['notifications_list_success']}")
-    logger.info(f"    Empty:    {CONVERSATION_DIAGNOSTICS['notifications_list_empty']}")
-    logger.info(f"    Error:    {CONVERSATION_DIAGNOSTICS['notifications_list_error']}")
     logger.info(f"  Individual notification fetches:")
     logger.info(f"    Success:  {CONVERSATION_DIAGNOSTICS['individual_fetch_success']}")
     logger.info(f"    Empty:    {CONVERSATION_DIAGNOSTICS['individual_fetch_empty']}")
     logger.info(f"    Error:    {CONVERSATION_DIAGNOSTICS['individual_fetch_error']}")
-    logger.info(f"  Notes endpoint:")
-    logger.info(f"    Success:  {CONVERSATION_DIAGNOSTICS['notes_success']}")
-    logger.info(f"    Empty:    {CONVERSATION_DIAGNOSTICS['notes_empty']}")
-    logger.info(f"    Error:    {CONVERSATION_DIAGNOSTICS['notes_error']}")
     logger.info(f"  Total notifications fetched: {CONVERSATION_DIAGNOSTICS['total_notifications']}")
     logger.info(f"  Total notes fetched: {CONVERSATION_DIAGNOSTICS['total_notes']}")
-    logger.info(f"  Total conversations: {CONVERSATION_DIAGNOSTICS['total_conversations']}")
     logger.info(f"  Content extracted: {CONVERSATION_DIAGNOSTICS['content_extracted']}")
-    logger.info(f"  Content empty: {CONVERSATION_DIAGNOSTICS['content_empty']}")
     
     logger.info("")
     logger.info("📈 TICKET BREAKDOWN:")
     logger.info(f"  Active Tickets:    {stats['active_count']}")
     logger.info(f"  Closed Tickets:    {stats['closed_count']}")
-    logger.info(f"  Service Requests:  {stats['service_requests']}")
-    logger.info(f"  Incidents:         {stats['incidents']}")
     
     if stats['new_tickets'] > 0 or stats['updated_tickets'] > 0:
         logger.info("")
@@ -1292,7 +1327,8 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  ✅ FIXED: Incremental sync now works!")
+    logger.info("  ✅ FIXED: Full sync checkbox works!")
+    logger.info("  ✅ FIXED: servicedesk-active never empty!")
     logger.info("  🎉 BREAKTHROUGH: Full Email Conversation Content!")
     logger.info("=" * 60)
 
