@@ -2,7 +2,8 @@ name: Sync ServiceDesk Intelligence
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # Every 2 hours
+    - cron: '*/20 * * * *'  # Every 20 minutes (real-time mode)
+  
   workflow_dispatch:
     inputs:
       force_full_sync:
@@ -17,21 +18,25 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    
+    timeout-minutes: 90  # Optimized for v4.0.6 (was 120)
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       
       - name: Check for existing checkpoint
         run: |
-          echo "Checkpoint Status Check"
+          echo "=================================================="
+          echo "REAL-TIME SYNC (Every 20 Minutes)"
+          echo "=================================================="
           if [ -f sync_checkpoint.json ]; then
-            echo "Checkpoint file found in repository"
+            echo "✓ Checkpoint found - incremental sync"
+            echo "Last sync:"
             cat sync_checkpoint.json
           else
-            echo "No checkpoint file - will perform full sync"
+            echo "⚠ No checkpoint - full sync (first run)"
           fi
+          echo "=================================================="
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,15 +50,15 @@ jobs:
       
       - name: Run sync script
         env:
-          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
-          FORCE_FULL_SYNC: \${{ github.event.inputs.force_full_sync || 'false' }}
+          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
+          SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
+          FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
         run: |
-          echo "Starting ServiceDesk Intelligence Sync..."
+          echo "Starting ServiceDesk Intelligence Sync (Real-Time Mode)..."
           python scripts/sync_servicedesk_intelligence.py
       
       - name: Commit checkpoint to repository
@@ -64,20 +69,24 @@ jobs:
           
           if [ -f sync_checkpoint.json ]; then
             git add sync_checkpoint.json
-            git diff --staged --quiet || git commit -m "Update sync checkpoint [skip ci]"
+            git diff --staged --quiet || git commit -m "Update sync checkpoint [skip ci] - $(date -u +"%Y-%m-%d %H:%M UTC")"
             git push
-            echo "Checkpoint committed to repository"
+            echo "✓ Checkpoint committed to repository"
           else
-            echo "No checkpoint file to commit"
+            echo "⚠ No checkpoint file to commit"
           fi
       
       - name: Sync Summary
         if: always()
         run: |
-          echo "Sync Summary"
+          echo "=================================================="
+          echo "SYNC SUMMARY (Real-Time Mode)"
+          echo "=================================================="
           if [ -f sync_checkpoint.json ]; then
-            echo "Checkpoint saved to repository"
-            echo "Next sync will be incremental"
+            echo "✓ Checkpoint saved"
+            echo "Next sync: In 20 minutes"
+            cat sync_checkpoint.json
           else
-            echo "No checkpoint file created"
+            echo "⚠ No checkpoint created"
           fi
+          echo "=================================================="
