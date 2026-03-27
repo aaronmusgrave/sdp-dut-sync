@@ -116,27 +116,48 @@ def ensure_token_valid():
             refresh_token()
 
 # ============================================================
-# HTML STRIPPING
+# HTML STRIPPING (IMPROVED)
 # ============================================================
 def strip_html_enhanced(html_content: str) -> str:
-    """Enhanced HTML stripping."""
+    """Enhanced HTML stripping with better tag removal."""
     if not html_content:
         return ""
     
     try:
-        text = re.sub('<[^<]+?>', '', html_content)
+        # First pass: Remove script and style tags with their content
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Second pass: Remove all HTML tags (including attributes)
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Third pass: Handle self-closing tags
+        text = re.sub(r'<[^>]*/?>', '', text)
+        
+        # Decode HTML entities (&nbsp;, &lt;, etc.)
         text = unescape(text)
+        
+        # Remove excessive whitespace
         text = re.sub(r'\s+', ' ', text)
+        
+        # Clean up line breaks
+        text = text.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
+        
+        # Final trim
         text = text.strip()
         
+        # If stripping resulted in empty string but original had content, return cleaned original
         if not text and html_content and len(html_content.strip()) > 0:
-            return html_content.strip()
+            # Last resort: just remove angle brackets
+            fallback = re.sub(r'[<>]', '', html_content)
+            return fallback.strip()
         
         return text
         
     except Exception as e:
         logger.debug(f"HTML stripping failed: {e}")
-        return html_content
+        # Fallback: just remove all angle brackets
+        return re.sub(r'[<>]', '', html_content).strip()
 
 # ============================================================
 # SERVICEDESK API - CONVERSATIONS
