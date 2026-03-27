@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus UNIFIED CSV Exporter v2.0
-ONE FILE with tickets + categories + descriptions + conversations
+ServiceDesk Plus UNIFIED CSV Exporter v2.1
+ONE FILE with FULL ticket details (category + description) + conversations
 """
 
 import os
@@ -36,7 +36,7 @@ SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
 SDP_CLIENT_SECRET = clean_secret(os.getenv('SDP_CLIENT_SECRET', ''))
 SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 
-# CSV Export Settings - SINGLE OUTPUT FILE
+# CSV Export Settings
 EXPORT_DAYS_BACK = int(os.getenv('EXPORT_DAYS_BACK', '365'))
 OUTPUT_FILE = os.getenv('OUTPUT_FILE', 'servicedesk_unified_export.csv')
 MAX_CONVERSATION_COLUMNS = int(os.getenv('MAX_CONVERSATION_COLUMNS', '50'))
@@ -44,8 +44,9 @@ MAX_CONVERSATION_COLUMNS = int(os.getenv('MAX_CONVERSATION_COLUMNS', '50'))
 BATCH_SIZE = 100
 MAX_CONCURRENT_CONVERSATIONS = 10
 MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
+MAX_CONCURRENT_TICKET_DETAILS = 20  # NEW: Fetch ticket details in parallel
 
-VERSION = "v2.0-UNIFIED-SINGLE-FILE"
+VERSION = "v2.1-UNIFIED-FULL-DETAILS"
 
 # ============================================================
 # LOGGING SETUP
@@ -65,6 +66,7 @@ TOKEN_EXPIRY = None
 
 stats = {
     'tickets_fetched': 0,
+    'tickets_detailed': 0,
     'tickets_processed': 0,
     'conversations_fetched': 0,
     'total_exchanges': 0,
@@ -179,6 +181,66 @@ def strip_html_enhanced(html_content: str) -> str:
             return fallback.strip()
         except:
             return html_content.strip()
+
+# ============================================================
+# SERVICEDESK API - TICKET DETAILS (NEW)
+# ============================================================
+def fetch_ticket_details(ticket_id: str) -> Optional[dict]:
+    """Fetch FULL ticket details including category and description."""
+    global TOKEN
+    
+    ensure_token_valid()
+    
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.manageengine.sdp.v3+json"
+    }
+    
+    url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        stats['api_calls'] += 1
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('request', data)
+        else:
+            logger.debug(f"Failed to fetch details for ticket {ticket_id}: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logger.debug(f"Failed to fetch details for ticket {ticket_id}: {e}")
+        return None
+
+def fetch_ticket_details_parallel(ticket_ids: List[str]) -> Dict[str, dict]:
+    """Fetch full ticket details in parallel."""
+    details_map = {}
+    
+    logger.info(f"  Fetching full ticket details ({MAX_CONCURRENT_TICKET_DETAILS} workers)...")
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TICKET_DETAILS) as executor:
+        future_to_id = {
+            executor.submit(fetch_ticket_details, ticket_id): ticket_id
+            for ticket_id in ticket_ids
+        }
+        
+        for future in as_completed(future_to_id):
+            ticket_id = future_to_id[future]
+            try:
+                ticket_details = future.result()
+                if ticket_details:
+                    details_map[ticket_id] = ticket_details
+                    stats['tickets_detailed'] += 1
+            except Exception as e:
+                logger.debug(f"Failed to get details for {ticket_id}: {e}")
+    
+    elapsed = time.time() - start_time
+    logger.info(f"  ✓ Fetched {len(details_map)} ticket details ({elapsed:.1f}s, {len(details_map)/elapsed:.1f}/sec)")
+    
+    return details_map
 
 # ============================================================
 # SERVICEDESK API - CONVERSATIONS
@@ -372,10 +434,10 @@ def parse_conversations_detailed(notifications: List[dict], notes: List[dict]) -
     return all_exchanges
 
 # ============================================================
-# TICKET PROCESSING - UNIFIED (ALL DATA IN ONE ROW)
+# TICKET PROCESSING - USING FULL DETAILS
 # ============================================================
 def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
-    """Process ticket - EVERYTHING in one row: metadata + description + category + conversations."""
+    """Process ticket using FULL details - category and description included."""
     
     def safe_get(obj, key, default=''):
         """Safely get a value from dict."""
@@ -421,42 +483,25 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
     priority_obj = safe_get(ticket, 'priority', {})
     priority = priority_obj.get('name', 'Normal') if isinstance(priority_obj, dict) else 'Normal'
     
-    # Category - IMPROVED EXTRACTION
+    # Category - NOW FROM FULL DETAILS
     category_obj = safe_get(ticket, 'category', {})
     if isinstance(category_obj, dict):
         category = category_obj.get('name', '')
+        if not category:
+            category = category_obj.get('display_value', 'Uncategorized')
     else:
-        category = str(category_obj) if category_obj else ''
+        category = str(category_obj) if category_obj else 'Uncategorized'
     
-    # If still empty, try alternative paths
-    if not category:
-        subcategory_obj = safe_get(ticket, 'subcategory', {})
-        if isinstance(subcategory_obj, dict):
-            category = subcategory_obj.get('name', 'Uncategorized')
-        else:
-            category = 'Uncategorized'
-    
-    # Description - IMPROVED EXTRACTION
+    # Description - NOW FROM FULL DETAILS
     description = ticket.get('description', '')
     
-    # If description is None or empty, try short_description
-    if not description:
-        description = ticket.get('short_description', '')
-    
-    # If still empty, check if it's in a nested structure
-    if not description:
-        description_obj = ticket.get('description', {})
-        if isinstance(description_obj, dict):
-            description = description_obj.get('value', '')
-    
-    # Final fallback
-    if not description or not description.strip():
-        description = 'No description provided'
-    
     # Clean the description
-    description_clean = strip_html_enhanced(description)
+    if description:
+        description_clean = strip_html_enhanced(description)
+    else:
+        description_clean = ''
     
-    # If cleaning resulted in empty string, use fallback
+    # If still empty, mark as such
     if not description_clean or not description_clean.strip():
         description_clean = 'No description provided'
     
@@ -492,7 +537,7 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
 # SERVICEDESK API - TICKET FETCHING
 # ============================================================
 def fetch_tickets(days_back: int = 365) -> List[dict]:
-    """Fetch tickets from ServiceDesk Plus API."""
+    """Fetch ticket IDs from ServiceDesk Plus API."""
     ensure_token_valid()
     
     all_tickets = []
@@ -563,24 +608,24 @@ def fetch_tickets(days_back: int = 365) -> List[dict]:
             logger.error(f"Failed to fetch tickets on page {page}: {e}")
             break
     
-    logger.info(f"✓ Fetched {len(all_tickets)} tickets total")
+    logger.info(f"✓ Fetched {len(all_tickets)} ticket IDs")
     stats['tickets_fetched'] = len(all_tickets)
     
     return all_tickets
 
 # ============================================================
-# CSV EXPORT - SINGLE UNIFIED FILE
+# CSV EXPORT - SINGLE UNIFIED FILE WITH FULL DETAILS
 # ============================================================
 def export_to_csv(tickets: List[dict], output_file: str):
-    """Export tickets to SINGLE CSV file with ALL data (tickets + conversations)."""
+    """Export tickets to SINGLE CSV file with FULL data (category, description, conversations)."""
     
     logger.info(f"\n{'=' * 60}")
-    logger.info(f"EXPORTING TO SINGLE UNIFIED CSV: {output_file}")
+    logger.info(f"EXPORTING TO UNIFIED CSV WITH FULL DETAILS: {output_file}")
     logger.info(f"{'=' * 60}")
     
     csv_rows = []
     
-    # Process in batches for conversation fetching
+    # Process in batches
     total_batches = (len(tickets) + BATCH_SIZE - 1) // BATCH_SIZE
     
     for i in range(0, len(tickets), BATCH_SIZE):
@@ -589,16 +634,26 @@ def export_to_csv(tickets: List[dict], output_file: str):
         
         logger.info(f"\nBatch {batch_num}/{total_batches} ({len(batch)} tickets)")
         
+        # Extract ticket IDs
+        ticket_ids = [str(ticket.get('id', '')) for ticket in batch]
+        
+        # Fetch FULL ticket details (category + description)
+        ticket_details_map = fetch_ticket_details_parallel(ticket_ids)
+        
         # Fetch conversations for batch
         conversations_map = fetch_conversations_parallel(batch)
         stats['conversations_fetched'] += len(batch)
         
-        # Process each ticket
+        # Process each ticket using FULL details
         for ticket in batch:
             ticket_id = str(ticket.get('id', ''))
+            
+            # Use full details if available, otherwise use list data
+            full_ticket = ticket_details_map.get(ticket_id, ticket)
+            
             conv_data = conversations_map.get(ticket_id, {"count": 0, "notifications": [], "notes": []})
             
-            row_data = process_ticket_for_csv(ticket, conv_data)
+            row_data = process_ticket_for_csv(full_ticket, conv_data)
             csv_rows.append(row_data)
             stats['tickets_processed'] += 1
     
@@ -631,7 +686,6 @@ def export_to_csv(tickets: List[dict], output_file: str):
     # Write to CSV
     logger.info(f"\n✍️  Writing {len(csv_rows)} rows to {output_file}...")
     logger.info(f"  Max conversations per ticket: {stats['max_conversations_per_ticket']}")
-    logger.info(f"  Using {MAX_CONVERSATION_COLUMNS} conversation column sets")
     
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
@@ -648,11 +702,10 @@ def export_to_csv(tickets: List[dict], output_file: str):
     logger.info(f"  File size: {file_size_mb:.2f} MB")
     
     logger.info(f"\n📋 CSV CONTAINS:")
-    logger.info(f"  ✅ Ticket metadata (number, date, subject, status, priority)")
-    logger.info(f"  ✅ Category (from ticket)")
-    logger.info(f"  ✅ Initial description (cleaned)")
-    logger.info(f"  ✅ All conversations (up to {MAX_CONVERSATION_COLUMNS} exchanges)")
-    logger.info(f"  ✅ Everything in ONE file!")
+    logger.info(f"  ✅ Ticket metadata with FULL DETAILS")
+    logger.info(f"  ✅ Category (from individual ticket API)")
+    logger.info(f"  ✅ Initial description (from individual ticket API)")
+    logger.info(f"  ✅ All conversations")
 
 # ============================================================
 # MAIN
@@ -691,7 +744,7 @@ def main():
         logger.info("No tickets found to export")
         return
     
-    # Export to SINGLE CSV
+    # Export to SINGLE CSV with FULL details
     export_to_csv(tickets, OUTPUT_FILE)
     
     # Final summary
@@ -700,13 +753,13 @@ def main():
     
     logger.info("")
     logger.info("=" * 60)
-    logger.info("✅ EXPORT COMPLETE - ONE UNIFIED FILE")
+    logger.info("✅ EXPORT COMPLETE - FULL DETAILS")
     logger.info("=" * 60)
     logger.info(f"  File: {OUTPUT_FILE}")
     logger.info(f"  Tickets Fetched: {stats['tickets_fetched']}")
+    logger.info(f"  Tickets Detailed: {stats['tickets_detailed']}")
     logger.info(f"  Tickets Processed: {stats['tickets_processed']}")
     logger.info(f"  Total Conversations: {stats['total_exchanges']}")
-    logger.info(f"  Max Conversations: {stats['max_conversations_per_ticket']}")
     logger.info(f"  API Calls: {stats['api_calls']}")
     logger.info(f"  Execution Time: {elapsed:.1f} minutes")
     logger.info("=" * 60)
