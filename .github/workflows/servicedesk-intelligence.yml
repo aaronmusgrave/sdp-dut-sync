@@ -1,92 +1,60 @@
-name: Sync ServiceDesk Intelligence
+name: Export ServiceDesk Tickets to CSV
 
 on:
+  # Run weekly on Sunday at midnight
   schedule:
-    - cron: '*/20 * * * *'  # Every 20 minutes (real-time mode)
+    - cron: '0 0 * * 0'
   
+  # Allow manual trigger
   workflow_dispatch:
     inputs:
-      force_full_sync:
-        description: 'Force full sync (ignore checkpoint)'
+      days_back:
+        description: 'Number of days back to export'
         required: false
-        type: boolean
-        default: false
-
-permissions:
-  contents: write  # Need write to commit checkpoint
+        default: '365'
+      output_file:
+        description: 'Output CSV filename'
+        required: false
+        default: 'servicedesk_export.csv'
 
 jobs:
-  sync:
+  export:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # Optimized for v4.0.6 (was 120)
-
+    
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Check for existing checkpoint
-        run: |
-          echo "=================================================="
-          echo "REAL-TIME SYNC (Every 20 Minutes)"
-          echo "=================================================="
-          if [ -f sync_checkpoint.json ]; then
-            echo "✓ Checkpoint found - incremental sync"
-            echo "Last sync:"
-            cat sync_checkpoint.json
-          else
-            echo "⚠ No checkpoint - full sync (first run)"
-          fi
-          echo "=================================================="
+        uses: actions/checkout@v3
       
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
       
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install requests
       
-      - name: Run sync script
+      - name: Run CSV export
         env:
-          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
           SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
           SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
           SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
-          FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
-        run: |
-          echo "Starting ServiceDesk Intelligence Sync (Real-Time Mode)..."
-          python scripts/sync_servicedesk_intelligence.py
+          EXPORT_DAYS_BACK: ${{ github.event.inputs.days_back || '365' }}
+          OUTPUT_FILE: ${{ github.event.inputs.output_file || 'servicedesk_export.csv' }}
+        run: python export_servicedesk_to_csv.py
       
-      - name: Commit checkpoint to repository
-        if: always()
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          
-          if [ -f sync_checkpoint.json ]; then
-            git add sync_checkpoint.json
-            git diff --staged --quiet || git commit -m "Update sync checkpoint [skip ci] - $(date -u +"%Y-%m-%d %H:%M UTC")"
-            git push
-            echo "✓ Checkpoint committed to repository"
-          else
-            echo "⚠ No checkpoint file to commit"
-          fi
+      - name: Upload CSV as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: servicedesk-export-${{ github.run_number }}
+          path: '*.csv'
+          retention-days: 90
       
-      - name: Sync Summary
-        if: always()
+      - name: Get CSV info
         run: |
-          echo "=================================================="
-          echo "SYNC SUMMARY (Real-Time Mode)"
-          echo "=================================================="
-          if [ -f sync_checkpoint.json ]; then
-            echo "✓ Checkpoint saved"
-            echo "Next sync: In 20 minutes"
-            cat sync_checkpoint.json
-          else
-            echo "⚠ No checkpoint created"
-          fi
-          echo "=================================================="
+          echo "CSV File Info:"
+          ls -lh *.csv
+          echo ""
+          echo "First 5 rows:"
+          head -n 6 *.csv || true
