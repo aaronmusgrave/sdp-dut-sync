@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus CSV Exporter v1.1
-Export ServiceDesk Plus tickets to CSV with full conversation content in separate columns
-Based on ServiceDesk Intelligence Suite v4.0.6
+ServiceDesk Plus UNIFIED CSV Exporter v2.0
+ONE FILE with tickets + categories + descriptions + conversations
 """
 
 import os
@@ -37,16 +36,16 @@ SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
 SDP_CLIENT_SECRET = clean_secret(os.getenv('SDP_CLIENT_SECRET', ''))
 SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 
-# CSV Export Settings
+# CSV Export Settings - SINGLE OUTPUT FILE
 EXPORT_DAYS_BACK = int(os.getenv('EXPORT_DAYS_BACK', '365'))
-OUTPUT_FILE = os.getenv('OUTPUT_FILE', 'servicedesk_export.csv')
-MAX_CONVERSATION_COLUMNS = int(os.getenv('MAX_CONVERSATION_COLUMNS', '50'))  # Max conversation columns
+OUTPUT_FILE = os.getenv('OUTPUT_FILE', 'servicedesk_unified_export.csv')
+MAX_CONVERSATION_COLUMNS = int(os.getenv('MAX_CONVERSATION_COLUMNS', '50'))
 
 BATCH_SIZE = 100
 MAX_CONCURRENT_CONVERSATIONS = 10
 MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
 
-VERSION = "v1.1-CSV-EXPORT-DETAILED"
+VERSION = "v2.0-UNIFIED-SINGLE-FILE"
 
 # ============================================================
 # LOGGING SETUP
@@ -373,10 +372,10 @@ def parse_conversations_detailed(notifications: List[dict], notes: List[dict]) -
     return all_exchanges
 
 # ============================================================
-# TICKET PROCESSING - WITH DETAILED CONVERSATIONS
+# TICKET PROCESSING - UNIFIED (ALL DATA IN ONE ROW)
 # ============================================================
 def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
-    """Process ticket and return CSV row data with separate conversation columns."""
+    """Process ticket - EVERYTHING in one row: metadata + description + category + conversations."""
     
     def safe_get(obj, key, default=''):
         """Safely get a value from dict."""
@@ -431,7 +430,6 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
     
     # If still empty, try alternative paths
     if not category:
-        # Try subcategory which might have the full path
         subcategory_obj = safe_get(ticket, 'subcategory', {})
         if isinstance(subcategory_obj, dict):
             category = subcategory_obj.get('name', 'Uncategorized')
@@ -467,17 +465,17 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
     notes = conversation_data.get('notes', [])
     conversations = parse_conversations_detailed(notifications, notes)
     
-    # Build row with base fields
+    # Build UNIFIED row with ALL data
     row = {
         'ticket_number': display_id,
-        'date': created_time,
+        'created_date': created_time,
         'subject': subject,
         'status': status,
         'priority': priority,
         'category': category,
         'technician': technician_name,
         'requester': requester_name,
-        'initial_request': description_clean,
+        'initial_description': description_clean,
         'conversation_count': len(conversations)
     }
     
@@ -571,44 +569,13 @@ def fetch_tickets(days_back: int = 365) -> List[dict]:
     return all_tickets
 
 # ============================================================
-# DEBUG UTILITIES
-# ============================================================
-def debug_ticket_structure(ticket: dict):
-    """Print ticket structure for debugging."""
-    logger.info("=" * 60)
-    logger.info("SAMPLE TICKET STRUCTURE (First Ticket)")
-    logger.info("=" * 60)
-    
-    # Show all top-level keys
-    logger.info(f"Available fields: {list(ticket.keys())}")
-    
-    # Show category structure
-    if 'category' in ticket:
-        logger.info(f"Category: {ticket['category']}")
-    if 'subcategory' in ticket:
-        logger.info(f"Subcategory: {ticket['subcategory']}")
-    
-    # Show description structure
-    if 'description' in ticket:
-        desc = ticket['description']
-        if isinstance(desc, dict):
-            logger.info(f"Description (dict): {list(desc.keys())}")
-        else:
-            logger.info(f"Description (string): {desc[:100]}..." if len(str(desc)) > 100 else f"Description: {desc}")
-    
-    if 'short_description' in ticket:
-        logger.info(f"Short Description: {ticket['short_description']}")
-    
-    logger.info("=" * 60)
-
-# ============================================================
-# CSV EXPORT - WITH DYNAMIC COLUMNS
+# CSV EXPORT - SINGLE UNIFIED FILE
 # ============================================================
 def export_to_csv(tickets: List[dict], output_file: str):
-    """Export tickets to CSV file with detailed conversation columns."""
+    """Export tickets to SINGLE CSV file with ALL data (tickets + conversations)."""
     
     logger.info(f"\n{'=' * 60}")
-    logger.info(f"EXPORTING TO CSV: {output_file}")
+    logger.info(f"EXPORTING TO SINGLE UNIFIED CSV: {output_file}")
     logger.info(f"{'=' * 60}")
     
     csv_rows = []
@@ -638,14 +605,14 @@ def export_to_csv(tickets: List[dict], output_file: str):
     # Build dynamic fieldnames
     base_fields = [
         'ticket_number',
-        'date',
+        'created_date',
         'subject',
         'status',
         'priority',
         'category',
         'technician',
         'requester',
-        'initial_request',
+        'initial_description',
         'conversation_count'
     ]
     
@@ -671,13 +638,21 @@ def export_to_csv(tickets: List[dict], output_file: str):
         writer.writeheader()
         writer.writerows(csv_rows)
     
-    logger.info(f"✓ CSV export complete: {output_file}")
+    logger.info(f"\n✅ UNIFIED CSV EXPORT COMPLETE!")
+    logger.info(f"  Output file: {output_file}")
     logger.info(f"  Total rows: {len(csv_rows)}")
     logger.info(f"  Total columns: {len(fieldnames)}")
     
     # Calculate file size
     file_size_mb = os.path.getsize(output_file) / (1024 * 1024)
     logger.info(f"  File size: {file_size_mb:.2f} MB")
+    
+    logger.info(f"\n📋 CSV CONTAINS:")
+    logger.info(f"  ✅ Ticket metadata (number, date, subject, status, priority)")
+    logger.info(f"  ✅ Category (from ticket)")
+    logger.info(f"  ✅ Initial description (cleaned)")
+    logger.info(f"  ✅ All conversations (up to {MAX_CONVERSATION_COLUMNS} exchanges)")
+    logger.info(f"  ✅ Everything in ONE file!")
 
 # ============================================================
 # MAIN
@@ -688,9 +663,10 @@ def main():
     start_time = datetime.now(timezone.utc)
     
     logger.info("=" * 60)
-    logger.info(f"SERVICEDESK PLUS CSV EXPORTER {VERSION}")
+    logger.info(f"SERVICEDESK PLUS UNIFIED EXPORTER {VERSION}")
     logger.info("=" * 60)
     logger.info(f"Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Output: {OUTPUT_FILE}")
     logger.info("")
     
     # Validate environment
@@ -715,11 +691,7 @@ def main():
         logger.info("No tickets found to export")
         return
     
-    # Debug first ticket to see structure
-    if tickets and len(tickets) > 0:
-        debug_ticket_structure(tickets[0])
-    
-    # Export to CSV
+    # Export to SINGLE CSV
     export_to_csv(tickets, OUTPUT_FILE)
     
     # Final summary
@@ -728,15 +700,15 @@ def main():
     
     logger.info("")
     logger.info("=" * 60)
-    logger.info("EXPORT COMPLETE")
+    logger.info("✅ EXPORT COMPLETE - ONE UNIFIED FILE")
     logger.info("=" * 60)
+    logger.info(f"  File: {OUTPUT_FILE}")
     logger.info(f"  Tickets Fetched: {stats['tickets_fetched']}")
     logger.info(f"  Tickets Processed: {stats['tickets_processed']}")
-    logger.info(f"  Total Exchanges: {stats['total_exchanges']}")
+    logger.info(f"  Total Conversations: {stats['total_exchanges']}")
     logger.info(f"  Max Conversations: {stats['max_conversations_per_ticket']}")
     logger.info(f"  API Calls: {stats['api_calls']}")
     logger.info(f"  Execution Time: {elapsed:.1f} minutes")
-    logger.info(f"  Output: {OUTPUT_FILE}")
     logger.info("=" * 60)
 
 if __name__ == "__main__":
