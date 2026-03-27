@@ -379,45 +379,88 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
     """Process ticket and return CSV row data with separate conversation columns."""
     
     def safe_get(obj, key, default=''):
+        """Safely get a value from dict."""
         if not obj:
             return default
         value = obj.get(key)
         return value if value is not None else default
     
     def safe_get_nested(obj, key, nested_key, default=''):
+        """Safely get nested value from dict."""
         parent = safe_get(obj, key, {})
         if not isinstance(parent, dict):
             return default
         value = parent.get(nested_key)
         return value if value is not None else default
     
-    # Extract ticket data
+    # Extract ticket ID
     ticket_id = str(ticket.get('id', ''))
     
+    # Display ID
     display_id_obj = safe_get(ticket, 'display_id', {})
     display_id = str(display_id_obj.get('display_value', ticket_id)) if isinstance(display_id_obj, dict) else str(display_id_obj)
     
+    # Subject
     subject = ticket.get('subject', 'No Subject') or 'No Subject'
     
+    # Status
     status_obj = safe_get(ticket, 'status', {})
     status = status_obj.get('name', 'Unknown') if isinstance(status_obj, dict) else 'Unknown'
     
+    # Created time
     created_time = safe_get_nested(ticket, 'created_time', 'display_value', 'Unknown')
     
+    # Technician
     technician_obj = safe_get(ticket, 'technician', {})
     technician_name = technician_obj.get('name', 'Unassigned') if isinstance(technician_obj, dict) else 'Unassigned'
     
+    # Requester
     requester_obj = safe_get(ticket, 'requester', {})
     requester_name = requester_obj.get('name', 'Unknown') if isinstance(requester_obj, dict) else 'Unknown'
     
+    # Priority
     priority_obj = safe_get(ticket, 'priority', {})
     priority = priority_obj.get('name', 'Normal') if isinstance(priority_obj, dict) else 'Normal'
     
+    # Category - IMPROVED EXTRACTION
     category_obj = safe_get(ticket, 'category', {})
-    category = category_obj.get('name', 'Uncategorized') if isinstance(category_obj, dict) else 'Uncategorized'
+    if isinstance(category_obj, dict):
+        category = category_obj.get('name', '')
+    else:
+        category = str(category_obj) if category_obj else ''
     
-    description = ticket.get('description', 'No description') or 'No description'
+    # If still empty, try alternative paths
+    if not category:
+        # Try subcategory which might have the full path
+        subcategory_obj = safe_get(ticket, 'subcategory', {})
+        if isinstance(subcategory_obj, dict):
+            category = subcategory_obj.get('name', 'Uncategorized')
+        else:
+            category = 'Uncategorized'
+    
+    # Description - IMPROVED EXTRACTION
+    description = ticket.get('description', '')
+    
+    # If description is None or empty, try short_description
+    if not description:
+        description = ticket.get('short_description', '')
+    
+    # If still empty, check if it's in a nested structure
+    if not description:
+        description_obj = ticket.get('description', {})
+        if isinstance(description_obj, dict):
+            description = description_obj.get('value', '')
+    
+    # Final fallback
+    if not description or not description.strip():
+        description = 'No description provided'
+    
+    # Clean the description
     description_clean = strip_html_enhanced(description)
+    
+    # If cleaning resulted in empty string, use fallback
+    if not description_clean or not description_clean.strip():
+        description_clean = 'No description provided'
     
     # Parse conversations into detailed structure
     notifications = conversation_data.get('notifications', [])
@@ -526,6 +569,37 @@ def fetch_tickets(days_back: int = 365) -> List[dict]:
     stats['tickets_fetched'] = len(all_tickets)
     
     return all_tickets
+
+# ============================================================
+# DEBUG UTILITIES
+# ============================================================
+def debug_ticket_structure(ticket: dict):
+    """Print ticket structure for debugging."""
+    logger.info("=" * 60)
+    logger.info("SAMPLE TICKET STRUCTURE (First Ticket)")
+    logger.info("=" * 60)
+    
+    # Show all top-level keys
+    logger.info(f"Available fields: {list(ticket.keys())}")
+    
+    # Show category structure
+    if 'category' in ticket:
+        logger.info(f"Category: {ticket['category']}")
+    if 'subcategory' in ticket:
+        logger.info(f"Subcategory: {ticket['subcategory']}")
+    
+    # Show description structure
+    if 'description' in ticket:
+        desc = ticket['description']
+        if isinstance(desc, dict):
+            logger.info(f"Description (dict): {list(desc.keys())}")
+        else:
+            logger.info(f"Description (string): {desc[:100]}..." if len(str(desc)) > 100 else f"Description: {desc}")
+    
+    if 'short_description' in ticket:
+        logger.info(f"Short Description: {ticket['short_description']}")
+    
+    logger.info("=" * 60)
 
 # ============================================================
 # CSV EXPORT - WITH DYNAMIC COLUMNS
@@ -640,6 +714,10 @@ def main():
     if not tickets:
         logger.info("No tickets found to export")
         return
+    
+    # Debug first ticket to see structure
+    if tickets and len(tickets) > 0:
+        debug_ticket_structure(tickets[0])
     
     # Export to CSV
     export_to_csv(tickets, OUTPUT_FILE)
