@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Plus CSV Exporter v1.0
-Export ServiceDesk Plus tickets to CSV with full conversation content
+ServiceDesk Plus CSV Exporter v1.1
+Export ServiceDesk Plus tickets to CSV with full conversation content in separate columns
 Based on ServiceDesk Intelligence Suite v4.0.6
 """
 
@@ -40,12 +40,13 @@ SDP_REFRESH_TOKEN = clean_secret(os.getenv('SDP_REFRESH_TOKEN', ''))
 # CSV Export Settings
 EXPORT_DAYS_BACK = int(os.getenv('EXPORT_DAYS_BACK', '365'))
 OUTPUT_FILE = os.getenv('OUTPUT_FILE', 'servicedesk_export.csv')
+MAX_CONVERSATION_COLUMNS = int(os.getenv('MAX_CONVERSATION_COLUMNS', '50'))  # Max conversation columns
 
 BATCH_SIZE = 100
 MAX_CONCURRENT_CONVERSATIONS = 10
 MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
 
-VERSION = "v1.0-CSV-EXPORT"
+VERSION = "v1.1-CSV-EXPORT-DETAILED"
 
 # ============================================================
 # LOGGING SETUP
@@ -68,7 +69,8 @@ stats = {
     'tickets_processed': 0,
     'conversations_fetched': 0,
     'total_exchanges': 0,
-    'api_calls': 0
+    'api_calls': 0,
+    'max_conversations_per_ticket': 0
 }
 
 # ============================================================
@@ -116,10 +118,10 @@ def ensure_token_valid():
             refresh_token()
 
 # ============================================================
-# HTML STRIPPING (IMPROVED)
+# HTML STRIPPING (ENHANCED)
 # ============================================================
 def strip_html_enhanced(html_content: str) -> str:
-    """Enhanced HTML stripping with better tag removal."""
+    """Enhanced HTML stripping with better tag removal and entity decoding."""
     if not html_content:
         return ""
     
@@ -134,8 +136,21 @@ def strip_html_enhanced(html_content: str) -> str:
         # Third pass: Handle self-closing tags
         text = re.sub(r'<[^>]*/?>', '', text)
         
-        # Decode HTML entities (&nbsp;, &lt;, etc.)
-        text = unescape(text)
+        # IMPORTANT: Decode HTML entities MULTIPLE times (some are double-encoded)
+        for _ in range(3):  # Decode up to 3 times for nested encoding
+            decoded = unescape(text)
+            if decoded == text:  # No more changes
+                break
+            text = decoded
+        
+        # Additional common entity replacements
+        text = text.replace('&nbsp;', ' ')
+        text = text.replace('&amp;', '&')
+        text = text.replace('&lt;', '<')
+        text = text.replace('&gt;', '>')
+        text = text.replace('&quot;', '"')
+        text = text.replace('&#39;', "'")
+        text = text.replace('&apos;', "'")
         
         # Remove excessive whitespace
         text = re.sub(r'\s+', ' ', text)
@@ -143,21 +158,28 @@ def strip_html_enhanced(html_content: str) -> str:
         # Clean up line breaks
         text = text.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
         
+        # Remove any remaining HTML-like artifacts
+        text = re.sub(r'&[a-zA-Z0-9#]+;?', '', text)
+        
         # Final trim
         text = text.strip()
         
-        # If stripping resulted in empty string but original had content, return cleaned original
+        # If stripping resulted in empty string but original had content
         if not text and html_content and len(html_content.strip()) > 0:
-            # Last resort: just remove angle brackets
             fallback = re.sub(r'[<>]', '', html_content)
+            fallback = re.sub(r'&[a-zA-Z0-9#]+;?', '', fallback)
             return fallback.strip()
         
         return text
         
     except Exception as e:
         logger.debug(f"HTML stripping failed: {e}")
-        # Fallback: just remove all angle brackets
-        return re.sub(r'[<>]', '', html_content).strip()
+        try:
+            fallback = re.sub(r'[<>]', '', html_content)
+            fallback = re.sub(r'&[a-zA-Z0-9#]+;?', '', fallback)
+            return fallback.strip()
+        except:
+            return html_content.strip()
 
 # ============================================================
 # SERVICEDESK API - CONVERSATIONS
@@ -267,6 +289,10 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
                 
                 stats['total_exchanges'] += len(notifications) + len(notes)
                 
+                # Track max conversations
+                if len(notifications) + len(notes) > stats['max_conversations_per_ticket']:
+                    stats['max_conversations_per_ticket'] = len(notifications) + len(notes)
+                
             except Exception as e:
                 conversations_map[ticket_id] = {
                     "count": 0,
@@ -281,51 +307,76 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
     return conversations_map
 
 # ============================================================
-# CONVERSATION FORMATTING
+# CONVERSATION PARSING - DETAILED
 # ============================================================
-def format_conversation_for_csv(notifications: List[dict], notes: List[dict]) -> str:
-    """Format conversations into compact CSV-friendly string."""
+def parse_conversations_detailed(notifications: List[dict], notes: List[dict]) -> List[dict]:
+    """Parse conversations into detailed list with timestamp, sender, type, content."""
     all_exchanges = []
     
-    # Process notifications
+    # Process notifications (emails)
     for notif in notifications:
         time_obj = notif.get('time', {})
-        timestamp = time_obj.get('display_value', 'Unknown') if isinstance(time_obj, dict) else str(time_obj)
+        if isinstance(time_obj, dict):
+            timestamp = time_obj.get('display_value', 'Unknown')
+            timestamp_ms = time_obj.get('value', 0)
+        else:
+            timestamp = str(time_obj)
+            timestamp_ms = 0
         
         sender_obj = notif.get('sender', {})
         sender_name = sender_obj.get('name', 'Unknown') if isinstance(sender_obj, dict) else 'Unknown'
+        sender_email = sender_obj.get('email_id', '') if isinstance(sender_obj, dict) else ''
         
         description = notif.get('description', '')
         content = strip_html_enhanced(description)
         
         if content and len(content.strip()) > 0:
-            if len(content) > 500:  # Truncate for CSV
-                content = content[:500] + "..."
-            all_exchanges.append(f"[{timestamp}] {sender_name}: {content}")
+            all_exchanges.append({
+                'timestamp': timestamp,
+                'timestamp_ms': timestamp_ms,
+                'sender': sender_name,
+                'sender_email': sender_email,
+                'type': 'Email',
+                'content': content
+            })
     
-    # Process notes
+    # Process notes (internal)
     for note in notes:
         created_time_obj = note.get('created_time', {})
-        timestamp = created_time_obj.get('display_value', 'Unknown') if isinstance(created_time_obj, dict) else str(created_time_obj)
+        if isinstance(created_time_obj, dict):
+            timestamp = created_time_obj.get('display_value', 'Unknown')
+            timestamp_ms = created_time_obj.get('value', 0)
+        else:
+            timestamp = str(created_time_obj)
+            timestamp_ms = 0
         
         created_by_obj = note.get('created_by', {})
         creator_name = created_by_obj.get('name', 'Unknown') if isinstance(created_by_obj, dict) else 'Unknown'
+        creator_email = created_by_obj.get('email_id', '') if isinstance(created_by_obj, dict) else ''
         
         description = note.get('description', '')
         content = strip_html_enhanced(description)
         
         if content and len(content.strip()) > 0:
-            if len(content) > 500:
-                content = content[:500] + "..."
-            all_exchanges.append(f"[{timestamp}] {creator_name} (Note): {content}")
+            all_exchanges.append({
+                'timestamp': timestamp,
+                'timestamp_ms': timestamp_ms,
+                'sender': creator_name,
+                'sender_email': creator_email,
+                'type': 'Note',
+                'content': content
+            })
     
-    return " | ".join(all_exchanges) if all_exchanges else "No conversations"
+    # Sort by timestamp
+    all_exchanges.sort(key=lambda x: x.get('timestamp_ms', 0))
+    
+    return all_exchanges
 
 # ============================================================
-# TICKET PROCESSING
+# TICKET PROCESSING - WITH DETAILED CONVERSATIONS
 # ============================================================
 def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
-    """Process ticket and return CSV row data."""
+    """Process ticket and return CSV row data with separate conversation columns."""
     
     def safe_get(obj, key, default=''):
         if not obj:
@@ -368,12 +419,13 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
     description = ticket.get('description', 'No description') or 'No description'
     description_clean = strip_html_enhanced(description)
     
-    # Format conversations
+    # Parse conversations into detailed structure
     notifications = conversation_data.get('notifications', [])
     notes = conversation_data.get('notes', [])
-    conversation_summary = format_conversation_for_csv(notifications, notes)
+    conversations = parse_conversations_detailed(notifications, notes)
     
-    return {
+    # Build row with base fields
+    row = {
         'ticket_number': display_id,
         'date': created_time,
         'subject': subject,
@@ -383,9 +435,17 @@ def process_ticket_for_csv(ticket: dict, conversation_data: dict) -> dict:
         'technician': technician_name,
         'requester': requester_name,
         'initial_request': description_clean,
-        'conversation_count': len(notifications) + len(notes),
-        'conversations': conversation_summary
+        'conversation_count': len(conversations)
     }
+    
+    # Add conversation columns (up to MAX_CONVERSATION_COLUMNS)
+    for i, conv in enumerate(conversations[:MAX_CONVERSATION_COLUMNS], start=1):
+        row[f'conv_{i}_timestamp'] = conv.get('timestamp', '')
+        row[f'conv_{i}_sender'] = conv.get('sender', '')
+        row[f'conv_{i}_type'] = conv.get('type', '')
+        row[f'conv_{i}_content'] = conv.get('content', '')
+    
+    return row
 
 # ============================================================
 # SERVICEDESK API - TICKET FETCHING
@@ -468,10 +528,10 @@ def fetch_tickets(days_back: int = 365) -> List[dict]:
     return all_tickets
 
 # ============================================================
-# CSV EXPORT
+# CSV EXPORT - WITH DYNAMIC COLUMNS
 # ============================================================
 def export_to_csv(tickets: List[dict], output_file: str):
-    """Export tickets to CSV file."""
+    """Export tickets to CSV file with detailed conversation columns."""
     
     logger.info(f"\n{'=' * 60}")
     logger.info(f"EXPORTING TO CSV: {output_file}")
@@ -501,10 +561,8 @@ def export_to_csv(tickets: List[dict], output_file: str):
             csv_rows.append(row_data)
             stats['tickets_processed'] += 1
     
-    # Write to CSV
-    logger.info(f"\n✍️  Writing {len(csv_rows)} rows to {output_file}...")
-    
-    fieldnames = [
+    # Build dynamic fieldnames
+    base_fields = [
         'ticket_number',
         'date',
         'subject',
@@ -514,17 +572,34 @@ def export_to_csv(tickets: List[dict], output_file: str):
         'technician',
         'requester',
         'initial_request',
-        'conversation_count',
-        'conversations'
+        'conversation_count'
     ]
     
-    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    # Add conversation columns
+    conversation_fields = []
+    for i in range(1, MAX_CONVERSATION_COLUMNS + 1):
+        conversation_fields.extend([
+            f'conv_{i}_timestamp',
+            f'conv_{i}_sender',
+            f'conv_{i}_type',
+            f'conv_{i}_content'
+        ])
+    
+    fieldnames = base_fields + conversation_fields
+    
+    # Write to CSV
+    logger.info(f"\n✍️  Writing {len(csv_rows)} rows to {output_file}...")
+    logger.info(f"  Max conversations per ticket: {stats['max_conversations_per_ticket']}")
+    logger.info(f"  Using {MAX_CONVERSATION_COLUMNS} conversation column sets")
+    
+    with open(output_file, 'w', newline='', encoding='utf-8-sig') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
         writer.writeheader()
         writer.writerows(csv_rows)
     
     logger.info(f"✓ CSV export complete: {output_file}")
     logger.info(f"  Total rows: {len(csv_rows)}")
+    logger.info(f"  Total columns: {len(fieldnames)}")
     
     # Calculate file size
     file_size_mb = os.path.getsize(output_file) / (1024 * 1024)
@@ -556,6 +631,7 @@ def main():
     logger.info(f"  SDP Domain: {SDP_DOMAIN}")
     logger.info(f"  Export Days Back: {EXPORT_DAYS_BACK}")
     logger.info(f"  Output File: {OUTPUT_FILE}")
+    logger.info(f"  Max Conversation Columns: {MAX_CONVERSATION_COLUMNS}")
     logger.info("")
     
     # Fetch tickets
@@ -579,6 +655,7 @@ def main():
     logger.info(f"  Tickets Fetched: {stats['tickets_fetched']}")
     logger.info(f"  Tickets Processed: {stats['tickets_processed']}")
     logger.info(f"  Total Exchanges: {stats['total_exchanges']}")
+    logger.info(f"  Max Conversations: {stats['max_conversations_per_ticket']}")
     logger.info(f"  API Calls: {stats['api_calls']}")
     logger.info(f"  Execution Time: {elapsed:.1f} minutes")
     logger.info(f"  Output: {OUTPUT_FILE}")
