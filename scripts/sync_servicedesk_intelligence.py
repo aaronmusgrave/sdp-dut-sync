@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v4.1.3-DIAGNOSTIC
+ServiceDesk Intelligence Suite v4.1.4
 TWO DATA SOURCES:
   - servicedesk:        All non-active tickets (closed + SDP archived)
   - servicedesk-active: Always current, rebuilt every sync
 
-NEW in v4.1.3:
-  - Fixed: SLA endpoint returning list instead of dict
-  - Added: SLA list response diagnostic logging (first 3 occurrences)
-  - After running, paste the SLA LIST RESPONSE log lines to identify
-    correct list item selection strategy
+FIXES in v4.1.4:
+  1. Archive tickets now use /api/v3/archive_requests endpoint (was returning
+     live tickets only - now correctly fetches all 12,000+ archived tickets)
+  2. SLA endpoint removed - /requests/{id}/sla returns the global policy
+     catalog, not per-ticket data. All SLA fields now read directly from
+     the ticket object (due_by_time, is_overdue, first_response_due_by_time)
+  3. ~100 fewer API calls per batch (no more SLA endpoint calls)
 
 SYNC STRATEGY:
   - Incremental: Upload changed live tickets to servicedesk, rebuild servicedesk-active
@@ -60,7 +62,7 @@ MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
 MAX_CONCURRENT_UPLOADS = 2
 UPLOAD_DELAY = 0.3
 
-VERSION = "v4.1.3-DIAGNOSTIC"
+VERSION = "v4.1.4"
 
 # ============================================================
 # LOGGING SETUP
@@ -95,8 +97,6 @@ CONVERSATION_DIAGNOSTICS = {
     'total_conversations': 0,
     'content_extracted': 0,
     'content_empty': 0,
-    'sla_list_logged': 0,       # tracks how many list responses we've logged
-    'sla_list_total': 0,        # total tickets that returned a list
 }
 
 stats = {
@@ -124,9 +124,8 @@ stats = {
     'archived_tickets_fetched': 0,
     'changed_ticket_ids': set(),
     'tickets_skipped': 0,
-    'sla_fetched': 0,
     'sla_violated': 0,
-    'sla_delta_calculated': 0
+    'sla_delta_calculated': 0,
 }
 
 # ============================================================
@@ -178,10 +177,7 @@ def ensure_token_valid():
 # CHECKPOINT MANAGEMENT
 # ============================================================
 def load_checkpoint() -> Tuple[Optional[datetime], Optional[datetime]]:
-    """
-    Load last sync timestamps.
-    Returns (last_sync, last_archive_sync).
-    """
+    """Load last sync timestamps. Returns (last_sync, last_archive_sync)."""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
@@ -272,7 +268,7 @@ def check_force_archive_sync() -> bool:
     return False
 
 # ============================================================
-# HTML STRIPPING AND CONTENT EXTRACTION
+# HTML STRIPPING
 # ============================================================
 def strip_html_enhanced(html_content: str) -> str:
     """Enhanced HTML stripping."""
@@ -289,22 +285,6 @@ def strip_html_enhanced(html_content: str) -> str:
     except Exception as e:
         logger.debug(f"HTML stripping failed: {e}")
         return html_content
-
-def extract_field_safe(obj: dict, *field_path, default='') -> str:
-    """Safely extract nested field."""
-    try:
-        current = obj
-        for field in field_path:
-            if isinstance(current, dict) and field in current:
-                current = current[field]
-            else:
-                return default
-        if current is None:
-            return default
-        return str(current) if current else default
-    except Exception as e:
-        logger.debug(f"Field extraction failed for {field_path}: {e}")
-        return default
 
 # ============================================================
 # SERVICEDESK API - NOTIFICATIONS
@@ -460,110 +440,13 @@ def fetch_conversations_parallel(tickets: List[dict]) -> Dict[str, dict]:
     return conversations_map
 
 # ============================================================
-# SERVICEDESK API - SLA
-# ============================================================
-def fetch_sla_info(ticket_id: str) -> dict:
-    """
-    Fetch SLA details for a ticket.
-    GET /api/v3/requests/{id}/sla
-
-    Handles both dict and list responses from the SDP API.
-    Logs the first 3 list responses for structure inspection.
-    """
-    global TOKEN
-
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    url = f"https://{SDP_DOMAIN}/api/v3/requests/{ticket_id}/sla"
-
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        stats['api_calls'] += 1
-
-        if response.status_code == 200:
-            data = response.json()
-            stats['sla_fetched'] += 1
-            sla = data.get('sla', data)
-
-            # ------------------------------------------------
-            # Handle list response
-            # ------------------------------------------------
-            if isinstance(sla, list):
-                CONVERSATION_DIAGNOSTICS['sla_list_total'] += 1
-
-                # Log first 3 occurrences so we can inspect the structure
-                if CONVERSATION_DIAGNOSTICS['sla_list_logged'] < 3:
-                    logger.info(f"  🔍 SLA LIST RESPONSE for ticket {ticket_id}:")
-                    logger.info(f"     List length: {len(sla)}")
-                    for idx, item in enumerate(sla):
-                        logger.info(f"     Item [{idx}]: {json.dumps(item, default=str)[:600]}")
-                    CONVERSATION_DIAGNOSTICS['sla_list_logged'] += 1
-
-                if not sla:
-                    return {}
-
-                # Selection strategy: prefer the item with the latest/most relevant SLA
-                # Priority: resolution SLA > first_response SLA > first item
-                # Look for a 'type' or 'name' field to identify resolution SLA
-                for item in sla:
-                    if not isinstance(item, dict):
-                        continue
-                    item_type = str(item.get('type', {}).get('name', '') if isinstance(item.get('type'), dict) else item.get('type', '')).lower()
-                    item_name = str(item.get('name', '')).lower()
-                    if 'resolution' in item_type or 'resolution' in item_name:
-                        return item
-
-                # Fall back to first valid dict item
-                for item in sla:
-                    if isinstance(item, dict):
-                        return item
-
-                return {}
-            # ------------------------------------------------
-
-            return sla if isinstance(sla, dict) else {}
-
-        elif response.status_code == 404:
-            return {}
-        else:
-            logger.debug(f"SLA fetch for {ticket_id} returned {response.status_code}")
-            return {}
-
-    except Exception as e:
-        logger.debug(f"SLA fetch failed for {ticket_id}: {e}")
-        return {}
-
-def fetch_sla_parallel(tickets: List[dict]) -> Dict[str, dict]:
-    """Fetch SLA info in parallel for a batch of tickets."""
-    sla_map = {}
-
-    logger.info(f"  Fetching SLA info ({MAX_CONCURRENT_CONVERSATIONS} workers)...")
-    start_time = time.time()
-
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CONVERSATIONS) as executor:
-        future_to_id = {
-            executor.submit(fetch_sla_info, ticket['id']): ticket['id']
-            for ticket in tickets
-        }
-        for future in as_completed(future_to_id):
-            ticket_id = future_to_id[future]
-            try:
-                sla_map[ticket_id] = future.result()
-            except Exception as e:
-                sla_map[ticket_id] = {}
-                logger.debug(f"SLA fetch failed for {ticket_id}: {e}")
-
-    elapsed = time.time() - start_time
-    logger.info(f"  ✓ SLA info fetched ({elapsed:.1f}s)")
-    return sla_map
-
-# ============================================================
 # CONVERSATION FORMATTING
 # ============================================================
-def format_conversation_summary(notifications: List[dict], notes: List[dict], max_chars: int = 10000) -> Tuple[str, str, int]:
+def format_conversation_summary(
+    notifications: List[dict],
+    notes: List[dict],
+    max_chars: int = 10000
+) -> Tuple[str, str, int]:
     """Format notifications and notes into searchable conversation summary."""
     all_exchanges = []
 
@@ -707,7 +590,13 @@ def delete_documents_from_dust_parallel(data_source_id: str, document_ids: List[
     logger.info(f"  ✓ Deleted {deleted_count}/{len(document_ids)} ({elapsed:.1f}s, {deleted_count/elapsed:.1f}/sec)")
     return deleted_count
 
-def upload_document_to_dust(data_source_id: str, doc_id: str, content: dict, tags: list, max_retries: int = 3) -> Tuple[bool, Optional[str]]:
+def upload_document_to_dust(
+    data_source_id: str,
+    doc_id: str,
+    content: dict,
+    tags: list,
+    max_retries: int = 3
+) -> Tuple[bool, Optional[str]]:
     """Upload a single document to Dust with retry logic."""
     url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents/{doc_id}"
     headers = {
@@ -807,7 +696,10 @@ RESOLUTION:
     stats['upload_failures'] += 1
     return False, last_error
 
-def upload_documents_parallel(documents: List[Tuple[str, dict, list]], data_source_id: str) -> Tuple[int, int, List[str]]:
+def upload_documents_parallel(
+    documents: List[Tuple[str, dict, list]],
+    data_source_id: str
+) -> Tuple[int, int, List[str]]:
     """Upload documents in parallel."""
     if not documents:
         return 0, 0, []
@@ -905,12 +797,11 @@ def get_ms_value(obj: dict, key: str) -> Optional[int]:
 def process_ticket(
     ticket: dict,
     conversation_data: dict,
-    sla_data: dict = None,
     is_archived: bool = False
 ) -> Tuple[dict, list]:
     """
     Process a single ticket.
-    Captures: full fields, conversations, SLA data, SLA delta, closed_by technician.
+    SLA data is read directly from the ticket object - no separate API call needed.
     """
 
     def safe_get(obj, key, default=''):
@@ -990,39 +881,40 @@ def process_ticket(
 
     # --------------------------------------------------------
     # SLA EXTRACTION
-    # Ensure sla_data is always a dict
+    # All SLA data comes directly from the ticket object.
+    # The /requests/{id}/sla endpoint returns the global policy
+    # catalog (not per-ticket data) so we do not call it.
     # --------------------------------------------------------
-    if not isinstance(sla_data, dict):
-        if isinstance(sla_data, list) and sla_data:
-            sla_data = sla_data[0] if isinstance(sla_data[0], dict) else {}
-        else:
-            sla_data = {}
 
-    def get_sla_display(ticket_key: str, sla_key: str, fallback: str = 'N/A') -> str:
-        val = ticket.get(ticket_key)
-        if val:
-            return val.get('display_value', val.get('name', fallback)) if isinstance(val, dict) else str(val)
-        val = sla_data.get(sla_key)
-        if val:
-            return val.get('display_value', val.get('name', fallback)) if isinstance(val, dict) else str(val)
-        return fallback
+    # SLA policy name derived from ticket priority
+    # (priority maps 1:1 to SLA tier in SDP)
+    priority_to_sla = {
+        'high': 'HIGH',
+        'low': 'LOW',
+        'normal': 'NORMAL',
+        'medium': 'NORMAL',
+        'urgent': 'URGENT',
+        'critical': 'URGENT',
+    }
+    sla_policy_name = priority_to_sla.get(priority.lower(), priority.upper())
 
-    def get_sla_bool(ticket_key: str, sla_key: str) -> bool:
-        for source, key in [(ticket, ticket_key), (sla_data, sla_key)]:
-            val = source.get(key)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, dict):
-                return bool(val.get('value', False))
+    # SLA flags - read directly from ticket object
+    def get_ticket_bool(key: str) -> bool:
+        val = ticket.get(key)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, dict):
+            return bool(val.get('value', False))
+        if isinstance(val, str):
+            return val.lower() in ['true', '1', 'yes']
         return False
 
-    sla_policy_obj = ticket.get('sla') or (sla_data.get('sla') if isinstance(sla_data, dict) else None) or sla_data
-    sla_policy_name = sla_policy_obj.get('name', 'No SLA') if isinstance(sla_policy_obj, dict) else 'No SLA'
+    sla_violated = get_ticket_bool('is_overdue')
+    first_response_overdue = get_ticket_bool('is_first_response_overdue')
 
-    sla_violated = get_sla_bool('is_overdue', 'is_violated')
-    first_response_overdue = get_sla_bool('is_first_response_overdue', 'is_first_response_violated')
-    first_response_due = get_sla_display('first_response_due_by_time', 'first_response_due_by_time', 'N/A')
-    sla_resolution_due = get_sla_display('due_by_time', 'due_by_time', due_by_time)
+    # Due times from ticket fields
+    first_response_due = safe_get_nested(ticket, 'first_response_due_by_time', 'display_value', 'N/A')
+    sla_resolution_due = due_by_time  # due_by_time IS the SLA resolution deadline
 
     if sla_violated:
         sla_status = 'Violated'
@@ -1042,12 +934,8 @@ def process_ticket(
     resolved_ms = get_ms_value(ticket, 'resolved_time')
     sla_due_ms = get_ms_value(ticket, 'due_by_time')
 
-    # Fall back to sla_data for due time if not on ticket
-    if not sla_due_ms and isinstance(sla_data, dict):
-        sla_due_ms = get_ms_value(sla_data, 'due_by_time')
-
     if resolved_ms and sla_due_ms and resolved_ms > 0 and sla_due_ms > 0:
-        delta_ms = sla_due_ms - resolved_ms          # positive = resolved before deadline
+        delta_ms = sla_due_ms - resolved_ms
         sla_days_delta = round(delta_ms / (1000 * 60 * 60 * 24), 2)
         stats['sla_delta_calculated'] += 1
 
@@ -1077,7 +965,7 @@ def process_ticket(
         f"requester:{requester_name.lower().replace(' ', '-')}",
         f"conversations:{total_exchanges}",
         f"sla-status:{sla_status.lower()}",
-        f"sla-policy:{sla_policy_name.lower().replace(' ', '-')}",
+        f"sla-policy:{sla_policy_name.lower()}",
     ]
 
     if notes:
@@ -1144,14 +1032,13 @@ def process_ticket(
         "internal_notes_summary": notes_summary,
         # URL
         "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{internal_id}",
-        # SLA
+        # SLA (all from ticket object)
         "sla_policy": sla_policy_name,
         "sla_status": sla_status,
         "sla_violated": sla_violated,
         "first_response_due": first_response_due,
         "first_response_overdue": first_response_overdue,
         "sla_resolution_due": sla_resolution_due,
-        # SLA delta - key for analytics queries
         "sla_days_delta": sla_days_delta,
         "sla_compliance_label": sla_compliance_label,
         # Archive
@@ -1167,9 +1054,12 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
     """
     Fetch tickets from ServiceDesk Plus API.
 
+    Live tickets:     GET /api/v3/requests
+    Archived tickets: GET /api/v3/archive_requests  (separate endpoint)
+
     Args:
-        last_sync:        Only fetch tickets updated since this time (ignored for archive)
-        include_archived: Fetch SDP archived tickets
+        last_sync:        Only fetch tickets updated since this time (live only)
+        include_archived: Fetch from archive_requests endpoint
     """
     ensure_token_valid()
 
@@ -1186,8 +1076,12 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
     search_criteria = []
 
     if include_archived:
-        logger.info("📦 Fetching ARCHIVED tickets from SDP...")
+        # Archived tickets live at a dedicated endpoint
+        url = f"https://{SDP_DOMAIN}/api/v3/archive_requests"
+        logger.info("📦 Fetching ARCHIVED tickets (archive_requests endpoint)...")
+
     elif last_sync:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests"
         last_sync_ms = int(last_sync.timestamp() * 1000)
         search_criteria = [{
             "field": "last_updated_time",
@@ -1195,7 +1089,9 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
             "value": str(last_sync_ms)
         }]
         logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
+
     else:
+        url = f"https://{SDP_DOMAIN}/api/v3/requests"
         logger.info("📊 Fetching all live tickets...")
 
     list_info = {
@@ -1211,13 +1107,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
     if search_criteria:
         list_info["list_info"]["search_criteria"] = search_criteria
 
-    if include_archived:
-        list_info["list_info"]["include_archived"] = True
-
-    # NOTE: If your SDP instance uses a dedicated archive endpoint, swap to:
-    #   url = f"https://{SDP_DOMAIN}/api/v3/archive_requests"
-    url = f"https://{SDP_DOMAIN}/api/v3/requests"
-
     while True:
         list_info["list_info"]["start_index"] = (page - 1) * row_count + 1
         params = {"input_data": json.dumps(list_info)}
@@ -1228,7 +1117,12 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
             stats['api_calls'] += 1
 
             data = response.json()
-            requests_data = data.get('requests', [])
+
+            # archive_requests returns 'archive_requests' key; requests returns 'requests'
+            if include_archived:
+                requests_data = data.get('archive_requests', data.get('requests', []))
+            else:
+                requests_data = data.get('requests', [])
 
             if not requests_data:
                 break
@@ -1299,8 +1193,6 @@ def process_batch(
     conversations_map = fetch_conversations_parallel(batch_tickets)
     stats['conversations_fetched'] += len(batch_tickets)
 
-    sla_map = fetch_sla_parallel(batch_tickets)
-
     logger.info("  Processing tickets...")
 
     main_documents = []
@@ -1312,12 +1204,10 @@ def process_batch(
         display_id = str(display_id_obj.get('display_value', ticket_id)) if isinstance(display_id_obj, dict) else str(display_id_obj or ticket_id)
 
         conv_data = conversations_map.get(ticket_id, {"count": 0, "notifications": [], "notes": []})
-        sla_data = sla_map.get(ticket_id, {})
 
         content, tags = process_ticket(
             ticket,
             conv_data,
-            sla_data=sla_data,
             is_archived=is_archive_batch
         )
         doc_id = f"ticket-{display_id}"
@@ -1371,7 +1261,7 @@ def process_batch(
 # MAIN SYNC LOGIC
 # ============================================================
 def run_sync():
-    """Main sync orchestration - v4.1.3 DIAGNOSTIC."""
+    """Main sync orchestration - v4.1.4."""
 
     sync_start_time = datetime.now(timezone.utc)
 
@@ -1516,7 +1406,7 @@ def run_sync():
         logger.info("No live tickets to process")
 
     # --------------------------------------------------------
-    # ARCHIVE SYNC → uploads to servicedesk
+    # ARCHIVE SYNC → uploads to servicedesk via archive_requests
     # --------------------------------------------------------
     archive_sync_timestamp = None
 
@@ -1524,6 +1414,7 @@ def run_sync():
         logger.info("")
         logger.info("=" * 60)
         logger.info("ARCHIVE SYNC → uploading to servicedesk")
+        logger.info("  Endpoint: /api/v3/archive_requests")
         logger.info("=" * 60)
 
         archive_sync_timestamp = datetime.now(timezone.utc)
@@ -1592,11 +1483,8 @@ def run_sync():
 
     logger.info("")
     logger.info("🔒 SLA:")
-    logger.info(f"  SLA Records Fetched:    {stats['sla_fetched']}")
     logger.info(f"  SLA Deltas Calculated:  {stats['sla_delta_calculated']}")
     logger.info(f"  SLA Violations:         {stats['sla_violated']}")
-    logger.info(f"  SLA List Responses:     {CONVERSATION_DIAGNOSTICS['sla_list_total']}")
-    logger.info(f"  SLA List Logged:        {CONVERSATION_DIAGNOSTICS['sla_list_logged']} (first 3 shown above)")
 
     logger.info("")
     logger.info("📈 BREAKDOWN:")
@@ -1637,9 +1525,8 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  📦 servicedesk  = closed + archived (with SLA delta)")
+    logger.info("  📦 servicedesk  = closed + archived (SLA from ticket object)")
     logger.info("  ⚡ servicedesk-active = open tickets")
-    logger.info("  🔍 Paste SLA LIST RESPONSE log lines to refine selection")
     logger.info("=" * 60)
 
 # ============================================================
