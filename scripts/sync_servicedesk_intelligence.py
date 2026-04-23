@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v4.1.2-FINAL
+ServiceDesk Intelligence Suite v4.1.3-DIAGNOSTIC
 TWO DATA SOURCES:
   - servicedesk:        All non-active tickets (closed + SDP archived)
   - servicedesk-active: Always current, rebuilt every sync
 
-NEW in v4.1.2:
-  - SLA delta calculation (days early/late as numeric value)
-  - sla_compliance_label for human-readable SLA status
-  - closed_by field captured for accurate technician close tracking
-  - Supports: tickets closed per technician, avg SLA compliance per technician
+NEW in v4.1.3:
+  - Fixed: SLA endpoint returning list instead of dict
+  - Added: SLA list response diagnostic logging (first 3 occurrences)
+  - After running, paste the SLA LIST RESPONSE log lines to identify
+    correct list item selection strategy
 
 SYNC STRATEGY:
   - Incremental: Upload changed live tickets to servicedesk, rebuild servicedesk-active
@@ -60,7 +60,7 @@ MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
 MAX_CONCURRENT_UPLOADS = 2
 UPLOAD_DELAY = 0.3
 
-VERSION = "v4.1.2-FINAL"
+VERSION = "v4.1.3-DIAGNOSTIC"
 
 # ============================================================
 # LOGGING SETUP
@@ -94,7 +94,9 @@ CONVERSATION_DIAGNOSTICS = {
     'total_notes': 0,
     'total_conversations': 0,
     'content_extracted': 0,
-    'content_empty': 0
+    'content_empty': 0,
+    'sla_list_logged': 0,       # tracks how many list responses we've logged
+    'sla_list_total': 0,        # total tickets that returned a list
 }
 
 stats = {
@@ -464,6 +466,9 @@ def fetch_sla_info(ticket_id: str) -> dict:
     """
     Fetch SLA details for a ticket.
     GET /api/v3/requests/{id}/sla
+
+    Handles both dict and list responses from the SDP API.
+    Logs the first 3 list responses for structure inspection.
     """
     global TOKEN
 
@@ -481,7 +486,46 @@ def fetch_sla_info(ticket_id: str) -> dict:
         if response.status_code == 200:
             data = response.json()
             stats['sla_fetched'] += 1
-            return data.get('sla', data)
+            sla = data.get('sla', data)
+
+            # ------------------------------------------------
+            # Handle list response
+            # ------------------------------------------------
+            if isinstance(sla, list):
+                CONVERSATION_DIAGNOSTICS['sla_list_total'] += 1
+
+                # Log first 3 occurrences so we can inspect the structure
+                if CONVERSATION_DIAGNOSTICS['sla_list_logged'] < 3:
+                    logger.info(f"  🔍 SLA LIST RESPONSE for ticket {ticket_id}:")
+                    logger.info(f"     List length: {len(sla)}")
+                    for idx, item in enumerate(sla):
+                        logger.info(f"     Item [{idx}]: {json.dumps(item, default=str)[:600]}")
+                    CONVERSATION_DIAGNOSTICS['sla_list_logged'] += 1
+
+                if not sla:
+                    return {}
+
+                # Selection strategy: prefer the item with the latest/most relevant SLA
+                # Priority: resolution SLA > first_response SLA > first item
+                # Look for a 'type' or 'name' field to identify resolution SLA
+                for item in sla:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get('type', {}).get('name', '') if isinstance(item.get('type'), dict) else item.get('type', '')).lower()
+                    item_name = str(item.get('name', '')).lower()
+                    if 'resolution' in item_type or 'resolution' in item_name:
+                        return item
+
+                # Fall back to first valid dict item
+                for item in sla:
+                    if isinstance(item, dict):
+                        return item
+
+                return {}
+            # ------------------------------------------------
+
+            return sla if isinstance(sla, dict) else {}
+
         elif response.status_code == 404:
             return {}
         else:
@@ -847,6 +891,8 @@ def is_ticket_active(ticket: dict) -> bool:
 
 def get_ms_value(obj: dict, key: str) -> Optional[int]:
     """Extract raw millisecond timestamp value from an SDP time field."""
+    if not isinstance(obj, dict):
+        return None
     field = obj.get(key, {})
     if isinstance(field, dict):
         try:
@@ -915,7 +961,6 @@ def process_ticket(
     if isinstance(closed_by_obj, dict) and closed_by_obj.get('name'):
         closed_by_name = closed_by_obj.get('name', 'Unknown')
     else:
-        # Fall back to assigned technician if closed_by not available
         closed_by_name = technician_name
 
     requester_obj = safe_get(ticket, 'requester', {})
@@ -945,8 +990,13 @@ def process_ticket(
 
     # --------------------------------------------------------
     # SLA EXTRACTION
+    # Ensure sla_data is always a dict
     # --------------------------------------------------------
-    sla_data = sla_data or {}
+    if not isinstance(sla_data, dict):
+        if isinstance(sla_data, list) and sla_data:
+            sla_data = sla_data[0] if isinstance(sla_data[0], dict) else {}
+        else:
+            sla_data = {}
 
     def get_sla_display(ticket_key: str, sla_key: str, fallback: str = 'N/A') -> str:
         val = ticket.get(ticket_key)
@@ -966,7 +1016,7 @@ def process_ticket(
                 return bool(val.get('value', False))
         return False
 
-    sla_policy_obj = ticket.get('sla') or sla_data.get('sla') or sla_data
+    sla_policy_obj = ticket.get('sla') or (sla_data.get('sla') if isinstance(sla_data, dict) else None) or sla_data
     sla_policy_name = sla_policy_obj.get('name', 'No SLA') if isinstance(sla_policy_obj, dict) else 'No SLA'
 
     sla_violated = get_sla_bool('is_overdue', 'is_violated')
@@ -993,7 +1043,7 @@ def process_ticket(
     sla_due_ms = get_ms_value(ticket, 'due_by_time')
 
     # Fall back to sla_data for due time if not on ticket
-    if not sla_due_ms and sla_data:
+    if not sla_due_ms and isinstance(sla_data, dict):
         sla_due_ms = get_ms_value(sla_data, 'due_by_time')
 
     if resolved_ms and sla_due_ms and resolved_ms > 0 and sla_due_ms > 0:
@@ -1321,7 +1371,7 @@ def process_batch(
 # MAIN SYNC LOGIC
 # ============================================================
 def run_sync():
-    """Main sync orchestration - v4.1.2 FINAL."""
+    """Main sync orchestration - v4.1.3 DIAGNOSTIC."""
 
     sync_start_time = datetime.now(timezone.utc)
 
@@ -1545,6 +1595,8 @@ def run_sync():
     logger.info(f"  SLA Records Fetched:    {stats['sla_fetched']}")
     logger.info(f"  SLA Deltas Calculated:  {stats['sla_delta_calculated']}")
     logger.info(f"  SLA Violations:         {stats['sla_violated']}")
+    logger.info(f"  SLA List Responses:     {CONVERSATION_DIAGNOSTICS['sla_list_total']}")
+    logger.info(f"  SLA List Logged:        {CONVERSATION_DIAGNOSTICS['sla_list_logged']} (first 3 shown above)")
 
     logger.info("")
     logger.info("📈 BREAKDOWN:")
@@ -1587,6 +1639,7 @@ def run_sync():
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
     logger.info("  📦 servicedesk  = closed + archived (with SLA delta)")
     logger.info("  ⚡ servicedesk-active = open tickets")
+    logger.info("  🔍 Paste SLA LIST RESPONSE log lines to refine selection")
     logger.info("=" * 60)
 
 # ============================================================
