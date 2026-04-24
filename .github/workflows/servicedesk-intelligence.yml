@@ -3,7 +3,6 @@ name: Sync ServiceDesk Intelligence
 on:
   schedule:
     - cron: '*/20 * * * *'  # Every 20 minutes (real-time mode)
-  
   workflow_dispatch:
     inputs:
       force_full_sync:
@@ -11,19 +10,24 @@ on:
         required: false
         type: boolean
         default: false
+      force_archive_sync:
+        description: 'Force archive sync only (without full sync)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: write  # Need write to commit checkpoint
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # Optimized for v4.0.6 (was 120)
+    timeout-minutes: 360   # 6 hours - required for full sync + 12,000+ archive tickets
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Check for existing checkpoint
         run: |
           echo "=================================================="
@@ -37,17 +41,17 @@ jobs:
             echo "⚠ No checkpoint - full sync (first run)"
           fi
           echo "=================================================="
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
-      
+
       - name: Run sync script
         env:
           DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
@@ -57,17 +61,19 @@ jobs:
           SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
           FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
+          FORCE_ARCHIVE_SYNC: ${{ github.event.inputs.force_archive_sync || 'false' }}
         run: |
           echo "Starting ServiceDesk Intelligence Sync (Real-Time Mode)..."
           python scripts/sync_servicedesk_intelligence.py
-      
+
       - name: Commit checkpoint to repository
         if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
+
           if [ -f sync_checkpoint.json ]; then
+            git pull --rebase origin main
             git add sync_checkpoint.json
             git diff --staged --quiet || git commit -m "Update sync checkpoint [skip ci] - $(date -u +"%Y-%m-%d %H:%M UTC")"
             git push
@@ -75,7 +81,7 @@ jobs:
           else
             echo "⚠ No checkpoint file to commit"
           fi
-      
+
       - name: Sync Summary
         if: always()
         run: |
