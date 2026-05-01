@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v4.1.5
+ServiceDesk Intelligence Suite v4.1.6
 TWO DATA SOURCES:
   - servicedesk:        All non-active tickets (closed + SDP archived)
   - servicedesk-active: Always current, rebuilt every sync
 
+FIXES in v4.1.6:
+  - SLA delta now falls back to closed_time if resolved_time is missing
+    (SDP list API does not always return resolved_time)
+  - Removed SLA diagnostic block (field structure confirmed)
+
 FIXES in v4.1.5:
-  - Added SLA delta diagnostic logging for first 3 closed tickets
-    to identify why resolved_time / due_by_time aren't parsing
-  - Remove diagnostic block after confirming field structure
+  - SLA delta diagnostic logging added (now removed)
 
 FIXES in v4.1.4:
   1. Archive tickets now use /api/v3/archive_requests endpoint
@@ -64,7 +67,7 @@ MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
 MAX_CONCURRENT_UPLOADS = 1      # sequential to avoid Dust rate limiting
 UPLOAD_DELAY = 0.75             # steady pace under rate limit
 
-VERSION = "v4.1.5"
+VERSION = "v4.1.6"
 
 # ============================================================
 # LOGGING SETUP
@@ -128,7 +131,7 @@ stats = {
     'tickets_skipped': 0,
     'sla_violated': 0,
     'sla_delta_calculated': 0,
-    'sla_diag_logged': 0,       # diagnostic counter - remove after field structure confirmed
+    'sla_delta_used_closed_time': 0,  # tracks fallback usage
 }
 
 # ============================================================
@@ -712,7 +715,7 @@ def upload_documents_parallel(
     start_time = time.time()
     error_messages = []
 
-    for idx, doc_tuple in enumerate(documents):
+    for doc_tuple in documents:
         doc_id, content, tags = doc_tuple
         success, error = upload_document_to_dust(data_source_id, doc_id, content, tags)
 
@@ -803,6 +806,7 @@ def process_ticket(
     """
     Process a single ticket.
     SLA data is read directly from the ticket object.
+    SLA delta uses resolved_time with closed_time as fallback.
     """
 
     def safe_get(obj, key, default=''):
@@ -917,11 +921,19 @@ def process_ticket(
     # --------------------------------------------------------
     # SLA DELTA CALCULATION
     # Positive = resolved early (good), Negative = resolved late (bad)
+    # Falls back to closed_time if resolved_time not in list API response
     # --------------------------------------------------------
     sla_days_delta = None
     sla_compliance_label = 'Unknown'
+    used_closed_time_fallback = False
 
     resolved_ms = get_ms_value(ticket, 'resolved_time')
+    if not resolved_ms:
+        resolved_ms = get_ms_value(ticket, 'closed_time')
+        if resolved_ms:
+            used_closed_time_fallback = True
+            stats['sla_delta_used_closed_time'] += 1
+
     sla_due_ms = get_ms_value(ticket, 'due_by_time')
 
     if resolved_ms and sla_due_ms and resolved_ms > 0 and sla_due_ms > 0:
@@ -940,22 +952,6 @@ def process_ticket(
         sla_compliance_label = "Violated (exact delta unavailable)"
     else:
         sla_compliance_label = "Met (no timestamp available)"
-
-    # --------------------------------------------------------
-    # SLA DELTA DIAGNOSTIC
-    # Logs raw time field structure for first 3 closed tickets.
-    # Remove this block once field structure is confirmed.
-    # --------------------------------------------------------
-    if not is_archived and status_category == 'closed' and stats['sla_diag_logged'] < 3:
-        rt_raw = ticket.get('resolved_time', 'MISSING')
-        dt_raw = ticket.get('due_by_time', 'MISSING')
-        logger.info(f"  🔍 SLA DELTA DIAG ticket {display_id}:")
-        logger.info(f"     resolved_time raw: {json.dumps(rt_raw, default=str)[:200]}")
-        logger.info(f"     due_by_time raw:   {json.dumps(dt_raw, default=str)[:200]}")
-        logger.info(f"     resolved_ms:       {resolved_ms}")
-        logger.info(f"     sla_due_ms:        {sla_due_ms}")
-        logger.info(f"     delta:             {sla_days_delta}")
-        stats['sla_diag_logged'] += 1
     # --------------------------------------------------------
 
     # Build tags
@@ -1242,7 +1238,7 @@ def process_batch(
 # MAIN SYNC LOGIC
 # ============================================================
 def run_sync():
-    """Main sync orchestration - v4.1.5."""
+    """Main sync orchestration - v4.1.6."""
 
     sync_start_time = datetime.now(timezone.utc)
 
@@ -1465,6 +1461,7 @@ def run_sync():
     logger.info("")
     logger.info("🔒 SLA:")
     logger.info(f"  SLA Deltas Calculated:  {stats['sla_delta_calculated']}")
+    logger.info(f"  SLA Delta (closed_time fallback): {stats['sla_delta_used_closed_time']}")
     logger.info(f"  SLA Violations:         {stats['sla_violated']}")
 
     logger.info("")
