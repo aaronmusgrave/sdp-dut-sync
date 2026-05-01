@@ -73,9 +73,9 @@ jobs:
           git config --local user.name "github-actions[bot]"
 
           if [ -f sync_checkpoint.json ]; then
-            git pull --rebase origin main
             git add sync_checkpoint.json
             git diff --staged --quiet || git commit -m "Update sync checkpoint [skip ci] - $(date -u +"%Y-%m-%d %H:%M UTC")"
+            git pull --rebase origin main
             git push
             echo "✓ Checkpoint committed to repository"
           else
