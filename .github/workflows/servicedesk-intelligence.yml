@@ -22,7 +22,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # 6 hours - required for full sync + 12,000+ archive tickets
+    timeout-minutes: 540   # 9 hours - required for full sync + 12,000+ archive tickets
 
     steps:
       - name: Checkout repository
