@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-ServiceDesk Intelligence Suite v4.1.4
+ServiceDesk Intelligence Suite v4.1.5
 TWO DATA SOURCES:
   - servicedesk:        All non-active tickets (closed + SDP archived)
   - servicedesk-active: Always current, rebuilt every sync
 
+FIXES in v4.1.5:
+  - Added SLA delta diagnostic logging for first 3 closed tickets
+    to identify why resolved_time / due_by_time aren't parsing
+  - Remove diagnostic block after confirming field structure
+
 FIXES in v4.1.4:
-  1. Archive tickets now use /api/v3/archive_requests endpoint (was returning
-     live tickets only - now correctly fetches all 12,000+ archived tickets)
-  2. SLA endpoint removed - /requests/{id}/sla returns the global policy
-     catalog, not per-ticket data. All SLA fields now read directly from
-     the ticket object (due_by_time, is_overdue, first_response_due_by_time)
-  3. ~100 fewer API calls per batch (no more SLA endpoint calls)
+  1. Archive tickets now use /api/v3/archive_requests endpoint
+  2. SLA endpoint removed - all SLA fields read from ticket object
+  3. ~100 fewer API calls per batch
 
 SYNC STRATEGY:
   - Incremental: Upload changed live tickets to servicedesk, rebuild servicedesk-active
@@ -59,10 +61,10 @@ CHECKPOINT_FILE = 'sync_checkpoint.json'
 BATCH_SIZE = 100
 MAX_CONCURRENT_CONVERSATIONS = 10
 MAX_CONCURRENT_INDIVIDUAL_NOTIFS = 5
-MAX_CONCURRENT_UPLOADS = 2
-UPLOAD_DELAY = 0.3
+MAX_CONCURRENT_UPLOADS = 1      # sequential to avoid Dust rate limiting
+UPLOAD_DELAY = 0.75             # steady pace under rate limit
 
-VERSION = "v4.1.4"
+VERSION = "v4.1.5"
 
 # ============================================================
 # LOGGING SETUP
@@ -126,6 +128,7 @@ stats = {
     'tickets_skipped': 0,
     'sla_violated': 0,
     'sla_delta_calculated': 0,
+    'sla_diag_logged': 0,       # diagnostic counter - remove after field structure confirmed
 }
 
 # ============================================================
@@ -700,41 +703,31 @@ def upload_documents_parallel(
     documents: List[Tuple[str, dict, list]],
     data_source_id: str
 ) -> Tuple[int, int, List[str]]:
-    """Upload documents in parallel."""
+    """Upload documents sequentially to avoid rate limiting."""
     if not documents:
         return 0, 0, []
 
     uploaded = 0
     failed = 0
-    upload_lock = Lock()
     start_time = time.time()
     error_messages = []
 
-    def upload_single(doc_tuple):
-        nonlocal uploaded, failed
+    for idx, doc_tuple in enumerate(documents):
         doc_id, content, tags = doc_tuple
         success, error = upload_document_to_dust(data_source_id, doc_id, content, tags)
 
-        with upload_lock:
-            if success:
-                uploaded += 1
-                if uploaded % 25 == 0:
-                    elapsed = time.time() - start_time
-                    rate = uploaded / elapsed if elapsed > 0 else 0
-                    logger.info(f"    {data_source_id}: {uploaded}/{len(documents)} ({rate:.1f}/sec)...")
-            else:
-                failed += 1
-                if error:
-                    error_messages.append(f"{doc_id}: {error}")
-                    if failed <= 5:
-                        logger.error(f"    ❌ Upload failed for {doc_id}: {error}")
-
-        return success, error
-
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_UPLOADS) as executor:
-        futures = [executor.submit(upload_single, doc) for doc in documents]
-        for future in as_completed(futures):
-            future.result()
+        if success:
+            uploaded += 1
+            if uploaded % 25 == 0:
+                elapsed = time.time() - start_time
+                rate = uploaded / elapsed if elapsed > 0 else 0
+                logger.info(f"    {data_source_id}: {uploaded}/{len(documents)} ({rate:.1f}/sec)...")
+        else:
+            failed += 1
+            if error:
+                error_messages.append(f"{doc_id}: {error}")
+                if failed <= 5:
+                    logger.error(f"    ❌ Upload failed for {doc_id}: {error}")
 
     elapsed = time.time() - start_time
     return uploaded, failed, error_messages
@@ -789,9 +782,17 @@ def get_ms_value(obj: dict, key: str) -> Optional[int]:
     if isinstance(field, dict):
         try:
             val = field.get('value', 0)
-            return int(val) if val else None
+            if val is None or val == '' or val == 0 or val == '0':
+                return None
+            return int(str(val).strip())
         except (ValueError, TypeError):
             return None
+    # Handle case where field is directly a string/int timestamp
+    if isinstance(field, (int, float)) and field > 0:
+        return int(field)
+    if isinstance(field, str) and field.strip().isdigit():
+        v = int(field.strip())
+        return v if v > 0 else None
     return None
 
 def process_ticket(
@@ -801,7 +802,7 @@ def process_ticket(
 ) -> Tuple[dict, list]:
     """
     Process a single ticket.
-    SLA data is read directly from the ticket object - no separate API call needed.
+    SLA data is read directly from the ticket object.
     """
 
     def safe_get(obj, key, default=''):
@@ -842,12 +843,10 @@ def process_ticket(
     resolved_time = safe_get_nested(ticket, 'resolved_time', 'display_value', 'Not resolved')
     closed_time = safe_get_nested(ticket, 'closed_time', 'display_value', 'Not closed')
 
-    # Assigned technician
     technician_obj = safe_get(ticket, 'technician', {})
     technician_name = (technician_obj.get('name', 'Unassigned') or 'Unassigned') if isinstance(technician_obj, dict) else 'Unassigned'
     technician_email = (technician_obj.get('email_id', '') or '') if isinstance(technician_obj, dict) else ''
 
-    # Closed by - may differ from assigned technician if reassigned before closure
     closed_by_obj = safe_get(ticket, 'closed_by', {})
     if isinstance(closed_by_obj, dict) and closed_by_obj.get('name'):
         closed_by_name = closed_by_obj.get('name', 'Unknown')
@@ -880,14 +879,8 @@ def process_ticket(
     conversation_summary, notes_summary, total_exchanges = format_conversation_summary(notifications, notes)
 
     # --------------------------------------------------------
-    # SLA EXTRACTION
-    # All SLA data comes directly from the ticket object.
-    # The /requests/{id}/sla endpoint returns the global policy
-    # catalog (not per-ticket data) so we do not call it.
+    # SLA EXTRACTION - all from ticket object
     # --------------------------------------------------------
-
-    # SLA policy name derived from ticket priority
-    # (priority maps 1:1 to SLA tier in SDP)
     priority_to_sla = {
         'high': 'HIGH',
         'low': 'LOW',
@@ -898,7 +891,6 @@ def process_ticket(
     }
     sla_policy_name = priority_to_sla.get(priority.lower(), priority.upper())
 
-    # SLA flags - read directly from ticket object
     def get_ticket_bool(key: str) -> bool:
         val = ticket.get(key)
         if isinstance(val, bool):
@@ -911,10 +903,8 @@ def process_ticket(
 
     sla_violated = get_ticket_bool('is_overdue')
     first_response_overdue = get_ticket_bool('is_first_response_overdue')
-
-    # Due times from ticket fields
     first_response_due = safe_get_nested(ticket, 'first_response_due_by_time', 'display_value', 'N/A')
-    sla_resolution_due = due_by_time  # due_by_time IS the SLA resolution deadline
+    sla_resolution_due = due_by_time
 
     if sla_violated:
         sla_status = 'Violated'
@@ -950,6 +940,22 @@ def process_ticket(
         sla_compliance_label = "Violated (exact delta unavailable)"
     else:
         sla_compliance_label = "Met (no timestamp available)"
+
+    # --------------------------------------------------------
+    # SLA DELTA DIAGNOSTIC
+    # Logs raw time field structure for first 3 closed tickets.
+    # Remove this block once field structure is confirmed.
+    # --------------------------------------------------------
+    if not is_archived and status_category == 'closed' and stats['sla_diag_logged'] < 3:
+        rt_raw = ticket.get('resolved_time', 'MISSING')
+        dt_raw = ticket.get('due_by_time', 'MISSING')
+        logger.info(f"  🔍 SLA DELTA DIAG ticket {display_id}:")
+        logger.info(f"     resolved_time raw: {json.dumps(rt_raw, default=str)[:200]}")
+        logger.info(f"     due_by_time raw:   {json.dumps(dt_raw, default=str)[:200]}")
+        logger.info(f"     resolved_ms:       {resolved_ms}")
+        logger.info(f"     sla_due_ms:        {sla_due_ms}")
+        logger.info(f"     delta:             {sla_days_delta}")
+        stats['sla_diag_logged'] += 1
     # --------------------------------------------------------
 
     # Build tags
@@ -1001,7 +1007,6 @@ def process_ticket(
     stats['total_exchanges'] += total_exchanges
 
     content = {
-        # Core
         "ticket_id": display_id,
         "internal_id": internal_id,
         "subject": subject,
@@ -1011,28 +1016,21 @@ def process_ticket(
         "category": category,
         "subcategory": subcategory,
         "request_type": request_type,
-        # Technician tracking
         "technician": technician_name,
         "technician_email": technician_email,
         "closed_by": closed_by_name,
-        # Requester
         "requester": requester_name,
         "requester_email": requester_email,
-        # Content
         "description": strip_html_enhanced(description),
         "resolution": strip_html_enhanced(resolution),
-        # Timestamps
         "created_time": created_time,
         "due_by_time": due_by_time,
         "resolved_time": resolved_time,
         "closed_time": closed_time,
-        # Conversations
         "conversation_count": total_exchanges,
         "conversation_summary": conversation_summary,
         "internal_notes_summary": notes_summary,
-        # URL
         "source_url": f"https://{SDP_DOMAIN}/app/itdesk/requests/{internal_id}",
-        # SLA (all from ticket object)
         "sla_policy": sla_policy_name,
         "sla_status": sla_status,
         "sla_violated": sla_violated,
@@ -1041,7 +1039,6 @@ def process_ticket(
         "sla_resolution_due": sla_resolution_due,
         "sla_days_delta": sla_days_delta,
         "sla_compliance_label": sla_compliance_label,
-        # Archive
         "is_archived": is_archived,
     }
 
@@ -1056,10 +1053,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
 
     Live tickets:     GET /api/v3/requests
     Archived tickets: GET /api/v3/archive_requests  (separate endpoint)
-
-    Args:
-        last_sync:        Only fetch tickets updated since this time (live only)
-        include_archived: Fetch from archive_requests endpoint
     """
     ensure_token_valid()
 
@@ -1076,10 +1069,8 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
     search_criteria = []
 
     if include_archived:
-        # Archived tickets live at a dedicated endpoint
         url = f"https://{SDP_DOMAIN}/api/v3/archive_requests"
         logger.info("📦 Fetching ARCHIVED tickets (archive_requests endpoint)...")
-
     elif last_sync:
         url = f"https://{SDP_DOMAIN}/api/v3/requests"
         last_sync_ms = int(last_sync.timestamp() * 1000)
@@ -1089,7 +1080,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
             "value": str(last_sync_ms)
         }]
         logger.info(f"📊 Fetching tickets updated since {last_sync.strftime('%Y-%m-%d %H:%M:%S')}...")
-
     else:
         url = f"https://{SDP_DOMAIN}/api/v3/requests"
         logger.info("📊 Fetching all live tickets...")
@@ -1118,7 +1108,6 @@ def fetch_tickets(last_sync: Optional[datetime] = None, include_archived: bool =
 
             data = response.json()
 
-            # archive_requests returns 'archive_requests' key; requests returns 'requests'
             if include_archived:
                 requests_data = data.get('archive_requests', data.get('requests', []))
             else:
@@ -1175,19 +1164,12 @@ def process_batch(
     total_tickets_to_process: int,
     is_archive_batch: bool = False
 ):
-    """
-    Process and upload a batch of tickets.
-
-    Routing:
-      - is_archive_batch=True  → servicedesk only, tagged ARCHIVED
-      - is_archive_batch=False → changed tickets to servicedesk, active to servicedesk-active
-    """
+    """Process and upload a batch of tickets."""
     label = f"ARCHIVE BATCH {batch_num}/{total_batches}" if is_archive_batch else f"BATCH {batch_num}/{total_batches}"
     logger.info(f"\n{'=' * 60}")
     logger.info(f"{label} ({len(batch_tickets)} tickets)")
     logger.info(f"{'=' * 60}")
 
-    batch_start = time.time()
     ensure_token_valid()
 
     conversations_map = fetch_conversations_parallel(batch_tickets)
@@ -1221,7 +1203,6 @@ def process_batch(
             if content.get('status_category') == 'active':
                 active_documents.append(doc_tuple)
 
-    # Reporting
     if is_archive_batch:
         logger.info(f"  ✓ {len(main_documents)} archived → servicedesk")
         stats['tickets_processed'] += len(main_documents)
@@ -1261,7 +1242,7 @@ def process_batch(
 # MAIN SYNC LOGIC
 # ============================================================
 def run_sync():
-    """Main sync orchestration - v4.1.4."""
+    """Main sync orchestration - v4.1.5."""
 
     sync_start_time = datetime.now(timezone.utc)
 
@@ -1406,7 +1387,7 @@ def run_sync():
         logger.info("No live tickets to process")
 
     # --------------------------------------------------------
-    # ARCHIVE SYNC → uploads to servicedesk via archive_requests
+    # ARCHIVE SYNC
     # --------------------------------------------------------
     archive_sync_timestamp = None
 
@@ -1559,6 +1540,7 @@ if __name__ == "__main__":
         logger.info(f"  Conversation Workers:   {MAX_CONCURRENT_CONVERSATIONS}")
         logger.info(f"  Notif Workers:          {MAX_CONCURRENT_INDIVIDUAL_NOTIFS}")
         logger.info(f"  Upload Workers:         {MAX_CONCURRENT_UPLOADS}")
+        logger.info(f"  Upload Delay:           {UPLOAD_DELAY}s")
         logger.info("")
 
         run_sync()
