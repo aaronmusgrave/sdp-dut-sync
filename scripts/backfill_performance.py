@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v17.1.3 - MEETINGS, PROFILE, CLOSED TICKETS & PERFORMANCE SCORING
+Performance Data Backfill Script v17.1.4 - MEETINGS, PROFILE, CLOSED TICKETS & PERFORMANCE SCORING
 Tracks meeting load, enhanced Azure AD profile, tickets closed, and role-weighted performance
 Ticket details (complexity, SLA, conversations) handled by ServiceDesk Intelligence script
 Enhanced: Manager, location details, account status, tenure, CLOSED ticket tracking with scoring
-Processes historical dates sequentially
+Processes historical dates sequentially (NEWEST TO OLDEST)
 Optimized: Fast parallel processing
 
-v17.1.3 Changes:
-- CLOSED tickets instead of open tickets (historically queryable!)
-- Role-based performance scoring with ticket expectations
-- Meeting impact penalties based on role
-- Weighted performance scores for fair comparison across roles
-- 24-HOUR MEETING TRACKING: Counts all meetings (not just business hours)
+v17.1.4 Changes:
+- FIXED: Changed resolved_time to completed_time for accurate closed ticket counts
+- FIXED: Added pagination to count_closed_tickets (was capped at 250)
+- FIXED: Added status.name = "Closed" filter to ensure only closed tickets counted
+- ADDED: --force flag to re-process all dates (ignore progress file)
+- ADDED: Process dates newest to oldest (most recent data corrected first)
+- Improved error handling and logging in count_closed_tickets
 """
 
 import os
@@ -374,7 +375,7 @@ def count_closed_tickets(tech_email, sdp_token, target_date):
     """
     Count tickets CLOSED on specific date - works for ANY historical date!
     This is retrospectively queryable - shows productivity/throughput
-    v17.1.3: Tracks CLOSED/RESOLVED tickets instead of open tickets
+    v17.1.4: FIXED - Uses completed_time instead of resolved_time + pagination
     """
     if not tech_email:
         return 0
@@ -392,49 +393,97 @@ def count_closed_tickets(tech_email, sdp_token, target_date):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
     
-    # Query for tickets RESOLVED on this date by this technician
-    list_info = {
-        "list_info": {
-            "row_count": 250,
-            "start_index": 1,
-            "search_criteria": [
-                {
-                    "field": "technician.email_id",
-                    "condition": "is",
-                    "values": [tech_email]
-                },
-                {
-                    "field": "resolved_time",
-                    "condition": "between",
-                    "logical_operator": "AND",
-                    "values": [start_ms, end_ms]
-                }
-            ]
+    total_tickets = 0
+    start_index = 1
+    row_count = 100
+    
+    # Paginate through all results
+    while True:
+        # Query for tickets COMPLETED (closed) on this date by this technician
+        list_info = {
+            "list_info": {
+                "row_count": row_count,
+                "start_index": start_index,
+                "search_criteria": [
+                    {
+                        "field": "technician.email_id",
+                        "condition": "is",
+                        "values": [tech_email]
+                    },
+                    {
+                        "field": "completed_time",  # FIXED: was resolved_time
+                        "condition": "between",
+                        "logical_operator": "AND",
+                        "values": [start_ms, end_ms]
+                    },
+                    {
+                        "field": "status.name",
+                        "condition": "is",
+                        "logical_operator": "AND",
+                        "values": ["Closed"]  # Only count actually closed tickets
+                    }
+                ]
+            }
         }
-    }
+        
+        url = f"{SDP_API_BASE}/requests"
+        params = {'input_data': json.dumps(list_info)}
+        
+        max_retries = 3
+        page_success = False
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    tickets = data.get('requests', [])
+                    
+                    if not tickets:
+                        # No more results
+                        page_success = True
+                        break
+                    
+                    total_tickets += len(tickets)
+                    
+                    # If we got less than row_count, we're done
+                    if len(tickets) < row_count:
+                        page_success = True
+                        break
+                    
+                    # Otherwise, move to next page
+                    start_index += row_count
+                    page_success = True
+                    break
+                    
+                elif response.status_code == 429:
+                    wait_time = 2 ** attempt * 5
+                    logger.warning(f"Rate limited counting closed tickets. Waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.warning(f"API error counting tickets: {response.status_code} - {response.text[:200]}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"Error counting closed tickets for {tech_email} (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+        
+        if not page_success:
+            # Failed to get this page after retries
+            logger.error(f"Failed to fetch closed tickets for {tech_email} on {target_date.strftime('%Y-%m-%d')}")
+            break
+        
+        # Check if we got results and need to continue
+        if not tickets or len(tickets) < row_count:
+            break
     
-    url = f"{SDP_API_BASE}/requests"
-    params = {'input_data': json.dumps(list_info)}
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            if response.status_code == 200:
-                tickets = response.json().get('requests', [])
-                return len(tickets)
-            elif response.status_code == 429:
-                wait_time = 2 ** attempt * 5
-                logger.warning(f"Rate limited counting closed tickets. Waiting {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-        except Exception as e:
-            logger.warning(f"Error counting closed tickets for {tech_email} (attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-                continue
-    
-    return 0
+    return total_tickets
 
 
 def calculate_performance(meetings, closed_tickets, job_title=None):
@@ -564,7 +613,7 @@ def calculate_performance(meetings, closed_tickets, job_title=None):
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
     """
     Process single technician's calendar, profile data, and closed ticket count
-    v17.1.3: CLOSED tickets (historically accurate!) with performance scoring
+    v17.1.4: CLOSED tickets (historically accurate!) with performance scoring
     """
     if isinstance(tech_info, dict):
         tech_email = tech_info['email']
@@ -598,7 +647,7 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
     # Fetch meetings
     meetings = get_meetings(tech_email, graph_token, target_date)
     
-    # Fetch CLOSED ticket count (v17.1.3 - historically accurate!)
+    # Fetch CLOSED ticket count (v17.1.4 - historically accurate!)
     closed_tickets = count_closed_tickets(tech_email, sdp_token, target_date)
     
     # Calculate performance with role-based weighting
@@ -620,13 +669,13 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
         'company_name': tech_company_name,
         'account_created': tech_account_created,
         'meetings': meetings,
-        'closed_tickets': closed_tickets,  # v17.1.3 - CLOSED tickets
+        'closed_tickets': closed_tickets,  # v17.1.4 - CLOSED tickets
         'performance': performance
     }
 
 
 def save_to_file(tech_data, date):
-    """Save metrics to JSON file - v17.1.3 with closed ticket count and performance"""
+    """Save metrics to JSON file - v17.1.4 with closed ticket count and performance"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     
     output = {}
@@ -652,7 +701,7 @@ def save_to_file(tech_data, date):
                 'count': data['meetings']['count'],
                 'hours': data['meetings']['hours']
             },
-            'closed_tickets': data.get('closed_tickets', 0),  # v17.1.3
+            'closed_tickets': data.get('closed_tickets', 0),  # v17.1.4
             'performance': data['performance']
         }
     
@@ -663,7 +712,7 @@ def save_to_file(tech_data, date):
 
 
 def upload_to_dust(tech_data, date):
-    """Upload metrics to Dust - v17.1.3 with closed ticket count and performance scoring"""
+    """Upload metrics to Dust - v17.1.4 with closed ticket count and performance scoring"""
     if not DUST_API_KEY or not DUST_WORKSPACE_ID:
         return 0
     
@@ -679,7 +728,7 @@ def upload_to_dust(tech_data, date):
     for tech_name, data in tech_data.items():
         m = data['meetings']
         p = data['performance']
-        closed_tickets = data.get('closed_tickets', 0)  # v17.1.3
+        closed_tickets = data.get('closed_tickets', 0)  # v17.1.4
         
         # Build location string
         location_parts = []
@@ -718,7 +767,7 @@ def upload_to_dust(tech_data, date):
         # Add performance rating tags
         tags.append(f"performance:{p['performance_rating'].lower().replace(' ', '-')}")
         
-        # Add productivity tags based on closed tickets (v17.1.3)
+        # Add productivity tags based on closed tickets (v17.1.4)
         if closed_tickets >= 10:
             tags.append("high-productivity")
         elif closed_tickets >= 5:
@@ -787,9 +836,9 @@ def upload_to_dust(tech_data, date):
 - Meeting impact penalties vary by role (directors less impacted than specialists)
 - For detailed ticket information (complexity, SLA, priority, conversations), query the ServiceDesk Intelligence data source
 - This file tracks meeting load, availability, tickets CLOSED, and performance scoring
-- Meeting
 - Meeting tracking: Full 24-hour day (not just business hours)
 - Closed tickets show throughput and resolution velocity
+- v17.1.4: Fixed to use completed_time for accurate closure tracking
 """,
             "structured_data": {
                 "technician_name": tech_name,
@@ -812,7 +861,7 @@ def upload_to_dust(tech_data, date):
                 "meeting_hours": m['hours'],
                 "meeting_percentage": p['meeting_percentage'],
                 "available_hours": p['available_hours'],
-                "closed_tickets": closed_tickets,  # v17.1.3
+                "closed_tickets": closed_tickets,  # v17.1.4
                 "role_multiplier": p['role_multiplier'],
                 "role": p['role'],
                 "expected_tickets": p['expected_tickets'],
@@ -854,7 +903,7 @@ def save_progress(progress):
 
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for a single date - v17.1.3 with closed ticket tracking and performance scoring"""
+    """Process all technicians for a single date - v17.1.4 with closed ticket tracking and performance scoring"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
     
     try:
@@ -903,13 +952,13 @@ def process_single_date(target_date, technicians):
                     'account_enabled': result['account_enabled'],
                     'account_created': result['account_created'],
                     'meetings': result['meetings'],
-                    'closed_tickets': result.get('closed_tickets', 0),  # v17.1.3
+                    'closed_tickets': result.get('closed_tickets', 0),  # v17.1.4
                     'performance': result['performance']
                 }
             except Exception as e:
                 logger.error(f"Failed to process {tech_name}: {e}")
     
-    # Display results - v17.1.3 with closed ticket counts and performance scores
+    # Display results - v17.1.4 with closed ticket counts and performance scores
     print()
     print("="*130)
     print(f"{target_date.strftime('%B %d, %Y')}")
@@ -936,16 +985,25 @@ def process_single_date(target_date, technicians):
 
 
 def main():
-    """Main backfill execution - v17.1.3 meetings, profile, closed tickets & performance scoring"""
+    """Main backfill execution - v17.1.4 meetings, profile, closed tickets & performance scoring"""
     parser = argparse.ArgumentParser(description='Backfill meeting, profile, closed tickets, and performance data for date range')
     parser.add_argument('--days', type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
+    parser.add_argument('--force', action='store_true', help='Force re-process all dates (ignore progress file)')
     args = parser.parse_args()
     
     print("="*130)
-    print("PERFORMANCE DATA BACKFILL v17.1.3 (Meetings, Profile, Closed Tickets & Performance Scoring)")
+    print("PERFORMANCE DATA BACKFILL v17.1.4 (Meetings, Profile, Closed Tickets & Performance Scoring)")
     print("="*130)
+    print()
+    print("v17.1.4 FIXES & ENHANCEMENTS:")
+    print("  ✓ FIXED: Changed resolved_time to completed_time (accurate closure dates)")
+    print("  ✓ FIXED: Added pagination to handle >100 tickets/day")
+    print("  ✓ FIXED: Added status.name='Closed' filter")
+    print("  ✓ FIXED: Better error handling and logging")
+    print("  ✓ NEW: --force flag to re-process all dates")
+    print("  ✓ NEW: Process dates NEWEST to OLDEST (recent data first)")
     print()
     print("Note: Detailed ticket data (complexity, SLA, conversations) is handled by the ServiceDesk Intelligence script")
     print("      This script tracks meeting load, enhanced Azure AD profile, CLOSED tickets, and performance scoring")
@@ -958,13 +1016,13 @@ def main():
     print("  ✓ Account Status (enabled/disabled)")
     print("  ✓ Account Created (tenure tracking)")
     print()
-    print("Closed Ticket Tracking (v17.1.3):")
+    print("Closed Ticket Tracking (v17.1.4 - FIXED):")
     print("  ✓ Historically accurate for ANY date (past, present, future)")
     print("  ✓ Shows productivity/throughput metrics")
     print("  ✓ Tracks resolution velocity")
     print("  ✓ Can backfill unlimited historical data")
     print()
-    print("Performance Scoring (v17.1.3):")
+    print("Performance Scoring (v17.1.4):")
     print("  ✓ Role-based ticket expectations (Directors: 3/day, Engineers: 10/day, etc.)")
     print("  ✓ Meeting impact penalties (varies by role)")
     print("  ✓ Weighted scoring for fair comparison across roles")
@@ -993,6 +1051,10 @@ def main():
         else:
             print("Invalid choice. Exiting.")
             sys.exit(1)
+        
+        force_input = input("Force re-process all dates? (yes/no, default: no): ").strip().lower()
+        if force_input in ['yes', 'y']:
+            args.force = True
         
         print()
     
@@ -1039,27 +1101,40 @@ def main():
             logger.error("--end-date required when using --start-date")
             sys.exit(1)
         
+        # Build date list from END to START (newest first)
         dates = []
-        current = start_date
-        while current <= end_date:
+        current = end_date
+        while current >= start_date:
             dates.append(current)
-            current += timedelta(days=1)
+            current -= timedelta(days=1)
     else:
         days = args.days if args.days else 30
+        # Already processes newest first (most recent N days)
         dates = [(datetime.now() - timedelta(days=i)) for i in range(1, days + 1)]
-        dates.reverse()
     
     progress = load_progress()
     completed_dates = set(progress['completed'])
-    dates_to_process = [d for d in dates if d.strftime('%Y-%m-%d') not in completed_dates]
+    
+    # Force mode: Re-process all dates regardless of progress
+    if args.force:
+        logger.info("🔥 FORCE MODE: Re-processing all dates (ignoring progress file)")
+        dates_to_process = dates
+    else:
+        dates_to_process = [d for d in dates if d.strftime('%Y-%m-%d') not in completed_dates]
     
     if not dates_to_process:
         logger.info("All dates already processed!")
         return
     
-    logger.info(f"Processing {len(dates_to_process)} dates (meetings + profiles + closed tickets + performance)")
-    if completed_dates:
+    logger.info(f"Processing {len(dates_to_process)} dates (NEWEST → OLDEST)")
+    if args.force:
+        logger.info(f"(Force mode: Re-processing ALL dates, including {len(completed_dates)} previously completed)")
+    elif completed_dates:
         logger.info(f"(Skipping {len(completed_dates)} already completed dates)")
+    
+    # Show date range being processed
+    if dates_to_process:
+        logger.info(f"Date range: {dates_to_process[0].strftime('%Y-%m-%d')} (newest) → {dates_to_process[-1].strftime('%Y-%m-%d')} (oldest)")
     
     if len(dates_to_process) > 5:
         if sys.stdin.isatty():
@@ -1099,7 +1174,7 @@ def main():
     total_time = time.time() - start_time
     print()
     print("="*130)
-    print("BACKFILL COMPLETE - v17.1.3")
+    print("BACKFILL COMPLETE - v17.1.4")
     print("="*130)
     print(f"Total time: {total_time/60:.1f} minutes")
     print(f"Avg time per date: {total_time/len(dates_to_process):.1f} seconds")
@@ -1109,7 +1184,11 @@ def main():
     else:
         print("Failed: 0 dates")
     print()
-    print("v17.1.3 Features:")
+    print("v17.1.4 Features & Fixes:")
+    print("  ✓ FIXED: Accurate closed ticket counts (completed_time not resolved_time)")
+    print("  ✓ FIXED: Pagination for high-volume technicians")
+    print("  ✓ NEW: --force flag to re-process dates")
+    print("  ✓ NEW: Processes NEWEST to OLDEST")
     print("  ✓ Meeting load tracking (count, hours, percentage)")
     print("  ✓ Full 24-hour meeting tracking (not just business hours)")
     print("  ✓ Job title and department from Azure AD")
