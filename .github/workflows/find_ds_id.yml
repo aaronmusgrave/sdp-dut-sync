@@ -1,10 +1,16 @@
-name: Find Dust DS ID
+name: Create Dust Table
 on: workflow_dispatch
 jobs:
-  find:
+  create:
     runs-on: ubuntu-latest
     steps:
-      - name: List data sources
+      - name: Create tech_performance table
         run: |
-          curl -s "https://dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources" \
-            -H "Authorization: Bearer ${{ secrets.DUST_API_KEY }}"
+          curl -s -X POST "https://dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources/dts_07TSt7D7aW0pD/tables" \
+            -H "Authorization: Bearer ${{ secrets.DUST_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "table_id": "tech_performance",
+              "name": "tech_performance",
+              "description": "One row per closed SDP ticket per technician per day."
+            }'
