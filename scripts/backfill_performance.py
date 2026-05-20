@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v18.0.0 - COMPREHENSIVE PERFORMANCE FILE
-Tracks meeting load, Azure AD profile, closed ticket DETAILS (number, SLA, priority),
-and role-weighted performance scoring.
+Performance Data Backfill Script v19.0.0 - DUST TABLE OUTPUT
+Replaces per-document Dust uploads with a single Dust native table (tech_performance).
+One row per closed ticket per technician per day.
 
-v18.0.0 Changes (from v17.1.4):
-- MAJOR: count_closed_tickets() replaced with get_closed_tickets_detail()
-  - Returns full ticket objects (not just a count)
-  - Each ticket includes: ID/number, subject, priority, category, SLA name,
-    SLA violated flag, created_time, completed_time, resolution duration (mins),
-    due_by_time, first_response_due_by_time
-- MAJOR: Dust document now includes per-ticket table with SLA breakdown
-- MAJOR: structured_data includes tickets[] array for downstream querying
-- MAJOR: SLA summary stats added (total violated, met, avg resolution time)
-- Preserved all v17.1.4 fixes: completed_time, pagination, --force flag,
-  newest-to-oldest processing, status.name='Closed' filter
+v19.0.0 Changes (from v18.0.0):
+- MAJOR: upload_to_dust() replaced with _build_table_rows() + upsert_to_dust_table()
+- Dust output now targets tables API: spaces/{DUST_SPACE_ID}/data_sources/{DUST_DS_ID}/tables/{DUST_TABLE_ID}/rows
+- Zero-ticket days produce one summary row (no data lost)
+- All v18.0.0 logic preserved: SDP pull, Azure AD, meetings, performance scoring, progress tracking
+- New env vars: DUST_SPACE_ID, DUST_DS_ID, DUST_TABLE_ID
 """
 
 import os
@@ -33,8 +28,9 @@ WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
 EMAIL_DOMAIN = 'motorad.com'
 PROGRESS_FILE = 'backfill_progress.json'
+DUST_UPSERT_BATCH = 500
 
-# Token cache (to avoid rate limiting)
+# Token cache
 TOKEN_CACHE = {
     'graph_token': None,
     'graph_expires': None,
@@ -55,7 +51,6 @@ def clean_credential(value):
 
 
 def clean_date_string(date_str):
-    """Clean and validate date string"""
     if not date_str:
         return date_str
     date_str = date_str.replace('\\', '').strip()
@@ -81,6 +76,9 @@ SDP_REFRESH_TOKEN = clean_credential(os.environ.get('SDP_REFRESH_TOKEN'))
 
 DUST_API_KEY      = clean_credential(os.environ.get('DUST_API_KEY'))
 DUST_WORKSPACE_ID = clean_credential(os.environ.get('DUST_WORKSPACE_ID'))
+DUST_SPACE_ID     = clean_credential(os.environ.get('DUST_SPACE_ID'))
+DUST_DS_ID        = clean_credential(os.environ.get('DUST_DS_ID'))
+DUST_TABLE_ID     = clean_credential(os.environ.get('DUST_TABLE_ID', 'tech_performance'))
 
 SDP_API_BASE   = f"https://{SDP_DOMAIN}/api/v3"
 ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
@@ -94,7 +92,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 def get_graph_token():
-    """Get Microsoft Graph token with caching and rate-limit handling"""
     if TOKEN_CACHE['graph_token'] and TOKEN_CACHE['graph_expires']:
         if datetime.now() < TOKEN_CACHE['graph_expires']:
             return TOKEN_CACHE['graph_token']
@@ -131,7 +128,6 @@ def get_graph_token():
 
 
 def get_sdp_token():
-    """Get ServiceDesk token with caching and rate-limit handling"""
     if TOKEN_CACHE['sdp_token'] and TOKEN_CACHE['sdp_expires']:
         if datetime.now() < TOKEN_CACHE['sdp_expires']:
             return TOKEN_CACHE['sdp_token']
@@ -171,7 +167,6 @@ def get_sdp_token():
 # ─────────────────────────────────────────────
 
 def get_azure_profile(email, graph_token):
-    """Fetch enhanced Azure AD profile including manager"""
     if not email:
         return None
 
@@ -228,7 +223,6 @@ def get_azure_profile(email, graph_token):
 # ─────────────────────────────────────────────
 
 def discover_technicians(sdp_token, graph_token):
-    """Find active technicians from open tickets and enrich with Azure AD profiles"""
     headers = {
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
@@ -281,13 +275,11 @@ def discover_technicians(sdp_token, graph_token):
 # ─────────────────────────────────────────────
 
 def fix_datetime_str(dt_str):
-    """Normalise Microsoft Graph datetime strings for fromisoformat()"""
     dt_str = dt_str.replace('Z', '+00:00')
     return re.sub(r'\.(\d{6})\d+', r'.\1', dt_str)
 
 
 def get_meetings(email, graph_token, date):
-    """Return meeting count and total hours for the full 24-hour day"""
     if not email:
         return {'count': 0, 'hours': 0}
 
@@ -330,11 +322,10 @@ def get_meetings(email, graph_token, date):
 
 
 # ─────────────────────────────────────────────
-# Closed ticket DETAIL retrieval  (v18.0.0 core change)
+# Closed ticket detail retrieval
 # ─────────────────────────────────────────────
 
 def _epoch_ms_to_iso(ms):
-    """Convert ServiceDesk epoch-milliseconds to ISO-8601 string (or None)"""
     if not ms:
         return None
     try:
@@ -344,7 +335,6 @@ def _epoch_ms_to_iso(ms):
 
 
 def _resolution_minutes(created_ms, completed_ms):
-    """Return resolution duration in whole minutes, or None"""
     if not created_ms or not completed_ms:
         return None
     try:
@@ -354,25 +344,6 @@ def _resolution_minutes(created_ms, completed_ms):
 
 
 def get_closed_tickets_detail(tech_email, sdp_token, target_date):
-    """
-    Return a list of ticket detail dicts for every ticket CLOSED on target_date
-    by the given technician.
-
-    Each dict contains:
-        ticket_id              - SDP request ID (e.g. "1042")
-        subject                - ticket title
-        priority               - e.g. "High"
-        category               - e.g. "Hardware"
-        sla_name               - SLA policy name (e.g. "Standard SLA")
-        sla_violated           - bool: True if SLA was breached
-        created_time_iso       - ISO-8601 creation timestamp
-        completed_time_iso     - ISO-8601 closure timestamp
-        due_by_time_iso        - ISO-8601 SLA due timestamp (may be None)
-        first_response_due_iso - ISO-8601 first-response SLA due (may be None)
-        resolution_minutes     - integer minutes from creation to closure (or None)
-
-    v18.0.0: Full pagination; uses completed_time + status.name='Closed' filter.
-    """
     if not tech_email:
         return []
 
@@ -434,34 +405,34 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                     break
                 elif resp.status_code == 429:
                     wait = 2 ** attempt * 5
-                    logger.warning(f"Rate-limited fetching ticket details. Waiting {wait}s...")
+                    logger.warning(f"Rate-limited. Waiting {wait}s...")
                     time.sleep(wait)
                 else:
-                    logger.warning(f"API error {resp.status_code} fetching ticket details: {resp.text[:200]}")
+                    logger.warning(f"API error {resp.status_code}: {resp.text[:200]}")
                     if attempt < 2:
                         time.sleep(2)
             except Exception as ex:
-                logger.warning(f"Exception fetching ticket detail page (attempt {attempt+1}): {ex}")
+                logger.warning(f"Exception (attempt {attempt+1}): {ex}")
                 if attempt < 2:
                     time.sleep(2)
 
         if not success:
-            logger.error(f"Failed to fetch ticket detail page for {tech_email} starting at index {start_index}")
+            logger.error(f"Failed to fetch ticket detail page for {tech_email} at index {start_index}")
             break
 
-        # Parse each ticket on this page into a clean dict
         for t in page_tickets:
+            # Skip "Converted to Project"
+            if (t.get('status') or {}).get('name') == 'Converted to Project':
+                continue
+
             ticket_id   = str(t.get('id', ''))
             subject     = t.get('subject', 'N/A')
             priority    = (t.get('priority') or {}).get('name') or 'N/A'
             category    = (t.get('category') or {}).get('name') or 'N/A'
-
-            # SLA fields
-            sla_obj      = t.get('sla') or {}
-            sla_name     = sla_obj.get('name') or 'N/A'
+            sla_obj     = t.get('sla') or {}
+            sla_name    = sla_obj.get('name') or 'N/A'
             sla_violated = bool(t.get('is_overdue', False))
 
-            # Timestamps (epoch ms in SDP)
             created_ms        = (t.get('created_time')               or {}).get('value')
             completed_ms      = (t.get('completed_time')             or {}).get('value')
             due_by_ms         = (t.get('due_by_time')                or {}).get('value')
@@ -490,9 +461,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
 
 
 def build_sla_summary(tickets):
-    """
-    Aggregate SLA statistics across a list of ticket detail dicts.
-    """
     if not tickets:
         return {
             'total': 0, 'sla_met': 0, 'sla_violated': 0,
@@ -527,7 +495,6 @@ def build_sla_summary(tickets):
 # ─────────────────────────────────────────────
 
 def calculate_performance(meetings, closed_ticket_count, job_title=None):
-    """Role-weighted performance scoring."""
     meeting_hours   = meetings['hours']
     available_hours = max(0.5, WORK_HOURS_PER_DAY - meeting_hours)
 
@@ -602,7 +569,6 @@ def calculate_performance(meetings, closed_ticket_count, job_title=None):
 # ─────────────────────────────────────────────
 
 def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date):
-    """Fetch meetings, closed ticket details, and performance score for one technician"""
     if isinstance(tech_info, dict):
         tech_email         = tech_info.get('email')
         tech_job_title     = tech_info.get('job_title')
@@ -652,11 +618,10 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
 
 
 # ─────────────────────────────────────────────
-# File output
+# File output (unchanged)
 # ─────────────────────────────────────────────
 
 def save_to_file(tech_data, date):
-    """Save full metrics (including ticket detail) to JSON file"""
     filename = f"tech_performance_{date.strftime('%Y%m%d')}.json"
     output = {}
     for tech_name, data in tech_data.items():
@@ -688,223 +653,156 @@ def save_to_file(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust upload
+# Dust Table upsert  (replaces upload_to_dust)
 # ─────────────────────────────────────────────
 
 def _fmt_mins(minutes):
-    """Format minutes as Xh Ym string"""
     if minutes is None:
         return 'N/A'
     h, m = divmod(int(minutes), 60)
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
-def upload_to_dust(tech_data, date):
-    """Upload comprehensive performance document per technician to Dust"""
-    if not DUST_API_KEY or not DUST_WORKSPACE_ID:
+def _build_table_rows(tech_data, date):
+    """
+    Convert one day's tech_data into flat Dust table row dicts.
+    One row per closed ticket. Zero-ticket days produce one summary row.
+    """
+    date_str  = date.strftime('%Y-%m-%d')
+    month_str = date.strftime('%Y-%m')
+    rows = []
+
+    for tech_name, data in tech_data.items():
+        tech_slug = tech_name.lower().replace(' ', '-')
+        p   = data['performance']
+        m   = data['meetings']
+        sla = data['sla_summary']
+
+        tech_ctx = {
+            "technician":                   tech_name,
+            "tech_slug":                    tech_slug,
+            "email":                        data.get('email')           or '',
+            "display_name":                 data.get('display_name')   or '',
+            "job_title":                    data.get('job_title')      or '',
+            "department":                   data.get('department')     or '',
+            "office_location":              data.get('office_location') or '',
+            "city":                         data.get('city')           or '',
+            "state":                        data.get('state')          or '',
+            "country":                      data.get('country')        or '',
+            "manager_name":                 data.get('manager_name')   or '',
+            "manager_email":                data.get('manager_email')  or '',
+            "company_name":                 data.get('company_name')   or '',
+            "date":                         date_str,
+            "month":                        month_str,
+            "meeting_count":                m['count'],
+            "meeting_hours":                m['hours'],
+            "meeting_percentage":           p['meeting_percentage'],
+            "available_hours":              p['available_hours'],
+            "daily_sla_met_pct":            sla['sla_met_pct'],
+            "daily_avg_resolution_minutes": sla['avg_resolution_minutes'],
+            "role":                         p['role'],
+            "expected_tickets":             p['expected_tickets'],
+            "daily_closed_count":           len(data['tickets']),
+            "weighted_score":               p['weighted_score'],
+            "performance_rating":           p['performance_rating'],
+        }
+
+        if data['tickets']:
+            for t in data['tickets']:
+                rows.append({
+                    "row_id": f"{tech_slug}-{t['ticket_id']}",
+                    "value": {
+                        **tech_ctx,
+                        "ticket_id":              t['ticket_id'],
+                        "subject":                t['subject'],
+                        "priority":               t['priority'],
+                        "category":               t['category'],
+                        "sla_name":               t['sla_name'],
+                        "sla_violated":           t['sla_violated'],
+                        "created_time_iso":       t['created_time_iso']       or '',
+                        "completed_time_iso":     t['completed_time_iso']     or '',
+                        "due_by_time_iso":        t['due_by_time_iso']        or '',
+                        "first_response_due_iso": t['first_response_due_iso'] or '',
+                        "resolution_minutes":     t['resolution_minutes'],
+                    }
+                })
+        else:
+            # Zero-ticket day — preserve daily metrics
+            rows.append({
+                "row_id": f"{tech_slug}-{date_str}-no-tickets",
+                "value": {
+                    **tech_ctx,
+                    "ticket_id":              '',
+                    "subject":                '',
+                    "priority":               '',
+                    "category":               '',
+                    "sla_name":               '',
+                    "sla_violated":           False,
+                    "created_time_iso":       '',
+                    "completed_time_iso":     '',
+                    "due_by_time_iso":        '',
+                    "first_response_due_iso": '',
+                    "resolution_minutes":     None,
+                }
+            })
+
+    return rows
+
+
+def upsert_to_dust_table(rows):
+    """Upsert rows to Dust native table in batches. Returns count upserted."""
+    if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
+        logger.warning("Dust table env vars incomplete — skipping upsert.")
         return 0
 
-    base_url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/servicedesk/documents"
-    headers  = {
+    if not rows:
+        return 0
+
+    url = (
+        f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
+        f"/spaces/{DUST_SPACE_ID}"
+        f"/data_sources/{DUST_DS_ID}"
+        f"/tables/{DUST_TABLE_ID}/rows"
+    )
+    headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
         'Content-Type':  'application/json'
     }
-    date_str = date.strftime('%Y-%m-%d')
-    uploaded = 0
 
-    for tech_name, data in tech_data.items():
-        m       = data['meetings']
-        p       = data['performance']
-        sla     = data['sla_summary']
-        tickets = data['tickets']
+    total_upserted = 0
+    batches = [rows[i:i + DUST_UPSERT_BATCH] for i in range(0, len(rows), DUST_UPSERT_BATCH)]
 
-        loc_parts = [x for x in [data.get('city'), data.get('state'), data.get('country')] if x]
-        location_string = ', '.join(loc_parts) if loc_parts else (data.get('office_location') or 'N/A')
-
-        # Tags
-        tags = [
-            "performance-metrics",
-            "meeting-load",
-            f"technician:{tech_name.lower().replace(' ', '-')}",
-            f"date:{date_str}",
-            f"role:{p['role']}",
-            f"performance:{p['performance_rating'].lower().replace(' ', '-')}",
-        ]
-        if data.get('job_title'):
-            tags.append(f"job-title:{data['job_title'].lower().replace(' ', '-')}")
-        if data.get('department'):
-            tags.append(f"department:{data['department'].lower().replace(' ', '-')}")
-        if data.get('manager_name'):
-            tags.append(f"manager:{data['manager_name'].lower().replace(' ', '-')}")
-        if data.get('city'):
-            tags.append(f"city:{data['city'].lower().replace(' ', '-')}")
-        if data.get('account_enabled') == False:
-            tags.append("account-disabled")
-        if sla['total'] > 0:
-            if sla['sla_met_pct'] == 100:
-                tags.append("sla:all-met")
-            elif sla['sla_met_pct'] >= 80:
-                tags.append("sla:mostly-met")
-            else:
-                tags.append("sla:breaches-detected")
-        n = len(tickets)
-        if   n >= 10: tags.append("high-productivity")
-        elif n >= 5:  tags.append("moderate-productivity")
-        elif n >  0:  tags.append("active-productivity")
-        else:         tags.append("no-closures")
-
-        # Ticket table
-        if tickets:
-            ticket_rows = []
-            for t in tickets:
-                sla_flag = "VIOLATED" if t['sla_violated'] else "Met"
-                res_str  = _fmt_mins(t['resolution_minutes'])
-                ticket_rows.append(
-                    f"| {t['ticket_id']:>8} | {t['subject'][:55]:<55} | {t['priority']:<8} "
-                    f"| {t['category']:<20} | {t['sla_name']:<20} | {sla_flag:<10} "
-                    f"| {res_str:<10} | {t['completed_time_iso'] or 'N/A'} |"
+    for i, batch in enumerate(batches, 1):
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    json={"rows": batch, "truncate": False},
+                    timeout=60
                 )
-            ticket_header = (
-                "| Ticket # | Subject                                                 | Priority "
-                "| Category             | SLA Policy           | SLA Status "
-                "| Resolution | Closed At           |\n"
-                "|----------|----------------------------------------------------------|----------"
-                "|----------------------|----------------------|------------"
-                "|------------|---------------------|"
-            )
-            ticket_table = ticket_header + "\n" + "\n".join(ticket_rows)
-        else:
-            ticket_table = "_No tickets closed on this date._"
+                if resp.status_code in [200, 201]:
+                    total_upserted += len(batch)
+                    if len(batches) > 1:
+                        logger.info(f"  Batch {i}/{len(batches)} → {len(batch)} rows ✓")
+                    break
+                elif resp.status_code == 429:
+                    wait = 2 ** attempt * 10
+                    logger.warning(f"  Dust rate-limited. Waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    logger.warning(f"  Dust upsert failed: {resp.status_code} {resp.text[:200]}")
+                    if attempt < 2:
+                        time.sleep(2)
+            except Exception as ex:
+                logger.warning(f"  Dust upsert exception (attempt {attempt+1}): {ex}")
+                if attempt < 2:
+                    time.sleep(2)
 
-        # Document text
-        doc_text = f"""# {tech_name} - {date.strftime('%B %d, %Y')}
+        if i < len(batches):
+            time.sleep(0.5)
 
-## Profile
-- **Name:** {data.get('display_name') or tech_name}
-- **Job Title:** {data.get('job_title') or 'N/A'}
-- **Role Category:** {p['role'].title()}
-- **Department:** {data.get('department') or 'N/A'}
-- **Location:** {location_string}
-- **Company:** {data.get('company_name') or 'N/A'}
-- **Email:** {data.get('email') or 'N/A'}
-
-## Organizational Structure
-- **Reports To:** {data.get('manager_name') or 'N/A'}
-- **Manager Email:** {data.get('manager_email') or 'N/A'}
-
-## Calendar & Availability
-- **Meetings:** {m['count']} meetings
-- **Meeting Time:** {m['hours']} hours ({p['meeting_percentage']}% of workday)
-- **Available Hours:** {p['available_hours']} hours
-- **Meeting Impact Penalty:** -{p['meeting_impact_penalty']}%
-
-## Closed Tickets — {date_str}
-
-{ticket_table}
-
-## SLA Summary
-- **Total Tickets Closed:** {sla['total']}
-- **SLA Met:** {sla['sla_met']} ({sla['sla_met_pct']}%)
-- **SLA Violated:** {sla['sla_violated']}
-- **Avg Resolution Time:** {_fmt_mins(sla['avg_resolution_minutes'])}
-- **Fastest Resolution:** {_fmt_mins(sla['min_resolution_minutes'])}
-- **Slowest Resolution:** {_fmt_mins(sla['max_resolution_minutes'])}
-
-## Performance Score
-- **Tickets Closed:** {len(tickets)} vs {p['expected_tickets']} expected for {p['role']} role
-- **Ticket Ratio:** {p['ticket_ratio']}
-- **Base Ticket Score:** {p['ticket_score']}/100
-- **Meeting Impact Penalty:** -{p['meeting_impact_penalty']}%
-- **Role Multiplier:** {p['role_multiplier']}x
-- **Weighted Score:** {p['weighted_score']}
-- **Performance Rating:** {p['performance_rating']}
-
-## Account Status
-- **Account Enabled:** {'Yes' if data.get('account_enabled') else 'No' if data.get('account_enabled') == False else 'Unknown'}
-- **Account Created:** {data.get('account_created') or 'N/A'}
-
-## Notes
-- Ticket details sourced from ServiceDesk Plus (completed_time filter + status=Closed)
-- SLA violated flag reflects is_overdue at time of closure
-- Performance scoring weighted by role; directors penalised less for high meeting load
-- Meeting tracking: full 24-hour day, excludes only cancelled events
-- v18.0.0: Full ticket detail (number, SLA, priority, resolution time) per technician per day
-"""
-
-        # Structured data
-        structured = {
-            "technician_name":        tech_name,
-            "display_name":           data.get('display_name'),
-            "job_title":              data.get('job_title'),
-            "department":             data.get('department'),
-            "office_location":        data.get('office_location'),
-            "city":                   data.get('city'),
-            "state":                  data.get('state'),
-            "country":                data.get('country'),
-            "location_string":        location_string,
-            "manager_name":           data.get('manager_name'),
-            "manager_email":          data.get('manager_email'),
-            "company_name":           data.get('company_name'),
-            "account_enabled":        data.get('account_enabled'),
-            "account_created":        data.get('account_created'),
-            "email":                  data.get('email'),
-            "date":                   date_str,
-            "meeting_count":          m['count'],
-            "meeting_hours":          m['hours'],
-            "meeting_percentage":     p['meeting_percentage'],
-            "available_hours":        p['available_hours'],
-            "closed_ticket_count":    len(tickets),
-            "sla_met":                sla['sla_met'],
-            "sla_violated":           sla['sla_violated'],
-            "sla_met_pct":            sla['sla_met_pct'],
-            "avg_resolution_minutes": sla['avg_resolution_minutes'],
-            "min_resolution_minutes": sla['min_resolution_minutes'],
-            "max_resolution_minutes": sla['max_resolution_minutes'],
-            "tickets": [
-                {
-                    "ticket_id":              t['ticket_id'],
-                    "subject":                t['subject'],
-                    "priority":               t['priority'],
-                    "category":               t['category'],
-                    "sla_name":               t['sla_name'],
-                    "sla_violated":           t['sla_violated'],
-                    "created_time_iso":       t['created_time_iso'],
-                    "completed_time_iso":     t['completed_time_iso'],
-                    "due_by_time_iso":        t['due_by_time_iso'],
-                    "first_response_due_iso": t['first_response_due_iso'],
-                    "resolution_minutes":     t['resolution_minutes'],
-                }
-                for t in tickets
-            ],
-            "role_multiplier":        p['role_multiplier'],
-            "role":                   p['role'],
-            "expected_tickets":       p['expected_tickets'],
-            "ticket_ratio":           p['ticket_ratio'],
-            "ticket_score":           p['ticket_score'],
-            "meeting_impact_penalty": p['meeting_impact_penalty'],
-            "weighted_score":         p['weighted_score'],
-            "performance_rating":     p['performance_rating'],
-        }
-
-        document = {
-            "document_id":     f"perf-{tech_name.lower().replace(' ', '-')}-{date_str}",
-            "timestamp":       int(date.timestamp() * 1000),
-            "tags":            tags,
-            "text":            doc_text,
-            "structured_data": structured,
-        }
-
-        url = f"{base_url}/{document['document_id']}"
-        try:
-            resp = requests.post(url, headers=headers, json=document, timeout=30)
-            if resp.status_code in [200, 201]:
-                uploaded += 1
-            else:
-                logger.warning(f"Dust upload failed for {tech_name}: {resp.status_code} {resp.text[:150]}")
-        except Exception as ex:
-            logger.warning(f"Dust upload exception for {tech_name}: {ex}")
-
-    return uploaded
+    return total_upserted
 
 
 # ─────────────────────────────────────────────
@@ -931,7 +829,6 @@ def save_progress(progress):
 # ─────────────────────────────────────────────
 
 def process_single_date(target_date, technicians):
-    """Process all technicians for one date - parallel"""
     logger.info(f"Processing: {target_date.strftime('%Y-%m-%d')}")
 
     graph_token = get_graph_token()
@@ -996,9 +893,16 @@ def process_single_date(target_date, technicians):
 
     print()
 
-    filename = save_to_file(tech_data, target_date)
-    uploaded = upload_to_dust(tech_data, target_date)
-    logger.info(f"✓ Saved: {filename}  |  Uploaded to Dust: {uploaded}/{len(tech_data)}")
+    # Save JSON + upsert to Dust table
+    filename    = save_to_file(tech_data, target_date)
+    rows        = _build_table_rows(tech_data, target_date)
+    upserted    = upsert_to_dust_table(rows)
+    ticket_rows = sum(1 for r in rows if r['value'].get('ticket_id'))
+    logger.info(
+        f"✓ Saved: {filename}  |  "
+        f"Table rows upserted: {upserted} "
+        f"({ticket_rows} tickets + {len(rows) - ticket_rows} zero-days)"
+    )
     return filename
 
 
@@ -1008,17 +912,17 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Comprehensive performance backfill v18.0.0 — meetings, profile, ticket detail, SLA'
+        description='Performance backfill v19.0.0 — Dust table output'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date',   type=str, help='End date (YYYY-MM-DD)')
-    parser.add_argument('--force',      action='store_true', help='Re-process all dates (ignore progress file)')
+    parser.add_argument('--force',      action='store_true', help='Re-process all dates')
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v18.0.0")
-    print("  Meetings · Azure AD Profile · Ticket Detail · SLA Breakdown · Performance Scoring")
+    print("  PERFORMANCE DATA BACKFILL v19.0.0")
+    print("  Meetings · Azure AD Profile · Ticket Detail · SLA · Dust Table Output")
     print("=" * 130)
 
     if not args.days and not args.start_date:
@@ -1035,7 +939,6 @@ def main():
         if input("  Force re-process all dates? [no]: ").strip().lower() in ('y', 'yes'):
             args.force = True
 
-    # Tokens
     logger.info("Obtaining tokens...")
     try:
         graph_token = get_graph_token()
@@ -1045,8 +948,7 @@ def main():
         sys.exit(1)
     logger.info("✓ Tokens obtained")
 
-    # Technicians
-    logger.info("Discovering technicians + Azure AD profiles (manager lookup included)...")
+    logger.info("Discovering technicians...")
     try:
         technicians = discover_technicians(sdp_token, graph_token)
     except Exception as e:
@@ -1061,7 +963,6 @@ def main():
     with_loc = sum(1 for t in technicians.values() if t.get('city'))
     logger.info(f"✓ {len(technicians)} technicians | {with_mgr} with managers | {with_loc} with location data")
 
-    # Date list (newest to oldest)
     if args.start_date:
         start_date = datetime.strptime(clean_date_string(args.start_date), '%Y-%m-%d')
         end_date   = datetime.strptime(clean_date_string(args.end_date),   '%Y-%m-%d')
