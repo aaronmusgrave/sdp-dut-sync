@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.0.0 - DUST TABLE OUTPUT
-Replaces per-document Dust uploads with a single Dust native table (tech_performance).
-One row per closed ticket per technician per day.
+Performance Data Backfill Script v19.1.0 - ARCHIVED TICKET FIX
+Adds is_archive=True query to get_closed_tickets_detail() so older
+closed tickets that have been archived in SDP are included.
 
-v19.0.0 Changes (from v18.0.0):
-- MAJOR: upload_to_dust() replaced with _build_table_rows() + upsert_to_dust_table()
-- Dust output now targets tables API: spaces/{DUST_SPACE_ID}/data_sources/{DUST_DS_ID}/tables/{DUST_TABLE_ID}/rows
-- Zero-ticket days produce one summary row (no data lost)
-- All v18.0.0 logic preserved: SDP pull, Azure AD, meetings, performance scoring, progress tracking
-- New env vars: DUST_SPACE_ID, DUST_DS_ID, DUST_TABLE_ID
+v19.1.0 Changes (from v19.0.0):
+- FIX: get_closed_tickets_detail() now queries both active AND archived tickets
+- Deduplication by ticket ID prevents any overlap between the two result sets
+- All v19.0.0 logic preserved: Dust table upsert, Azure AD, meetings, scoring
 """
 
 import os
@@ -322,7 +320,7 @@ def get_meetings(email, graph_token, date):
 
 
 # ─────────────────────────────────────────────
-# Closed ticket detail retrieval
+# Closed ticket detail retrieval  (v19.1.0 — archive fix)
 # ─────────────────────────────────────────────
 
 def _epoch_ms_to_iso(ms):
@@ -344,6 +342,11 @@ def _resolution_minutes(created_ms, completed_ms):
 
 
 def get_closed_tickets_detail(tech_email, sdp_token, target_date):
+    """
+    Return closed ticket details for a technician on a given date.
+    Queries BOTH active and archived tickets to ensure older records are included.
+    Results are deduplicated by ticket ID.
+    """
     if not tech_email:
         return []
 
@@ -357,105 +360,125 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
 
-    all_tickets  = []
-    start_index  = 1
-    row_count    = 100
+    def fetch_pages(is_archive=False):
+        """Paginate through all results for active or archived tickets."""
+        results     = []
+        start_index = 1
+        row_count   = 100
 
-    while True:
-        list_info = {
-            "list_info": {
-                "row_count":    row_count,
-                "start_index":  start_index,
-                "search_criteria": [
-                    {
-                        "field":     "technician.email_id",
-                        "condition": "is",
-                        "values":    [tech_email]
-                    },
-                    {
-                        "field":            "completed_time",
-                        "condition":        "between",
-                        "logical_operator": "AND",
-                        "values":           [start_ms, end_ms]
-                    },
-                    {
-                        "field":            "status.name",
-                        "condition":        "is",
-                        "logical_operator": "AND",
-                        "values":           ["Closed"]
-                    }
-                ]
+        while True:
+            list_info = {
+                "list_info": {
+                    "row_count":   row_count,
+                    "start_index": start_index,
+                    "is_archive":  is_archive,
+                    "search_criteria": [
+                        {
+                            "field":     "technician.email_id",
+                            "condition": "is",
+                            "values":    [tech_email]
+                        },
+                        {
+                            "field":            "completed_time",
+                            "condition":        "between",
+                            "logical_operator": "AND",
+                            "values":           [start_ms, end_ms]
+                        },
+                        {
+                            "field":            "status.name",
+                            "condition":        "is",
+                            "logical_operator": "AND",
+                            "values":           ["Closed"]
+                        }
+                    ]
+                }
             }
-        }
 
-        page_tickets = []
-        success      = False
+            page_tickets = []
+            success      = False
 
-        for attempt in range(3):
-            try:
-                resp = requests.get(
-                    f"{SDP_API_BASE}/requests",
-                    headers=headers,
-                    params={'input_data': json.dumps(list_info)},
-                    timeout=30
-                )
-                if resp.status_code == 200:
-                    page_tickets = resp.json().get('requests', [])
-                    success = True
-                    break
-                elif resp.status_code == 429:
-                    wait = 2 ** attempt * 5
-                    logger.warning(f"Rate-limited. Waiting {wait}s...")
-                    time.sleep(wait)
-                else:
-                    logger.warning(f"API error {resp.status_code}: {resp.text[:200]}")
+            for attempt in range(3):
+                try:
+                    resp = requests.get(
+                        f"{SDP_API_BASE}/requests",
+                        headers=headers,
+                        params={'input_data': json.dumps(list_info)},
+                        timeout=30
+                    )
+                    if resp.status_code == 200:
+                        page_tickets = resp.json().get('requests', [])
+                        success = True
+                        break
+                    elif resp.status_code == 429:
+                        wait = 2 ** attempt * 5
+                        logger.warning(f"Rate-limited. Waiting {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        logger.warning(f"API error {resp.status_code} (archive={is_archive}): {resp.text[:200]}")
+                        if attempt < 2:
+                            time.sleep(2)
+                except Exception as ex:
+                    logger.warning(f"Exception (attempt {attempt+1}, archive={is_archive}): {ex}")
                     if attempt < 2:
                         time.sleep(2)
-            except Exception as ex:
-                logger.warning(f"Exception (attempt {attempt+1}): {ex}")
-                if attempt < 2:
-                    time.sleep(2)
 
-        if not success:
-            logger.error(f"Failed to fetch ticket detail page for {tech_email} at index {start_index}")
-            break
+            if not success:
+                logger.error(f"Failed page fetch for {tech_email} at index {start_index} (archive={is_archive})")
+                break
 
-        for t in page_tickets:
-            # Skip "Converted to Project"
-            if (t.get('status') or {}).get('name') == 'Converted to Project':
-                continue
+            results.extend(page_tickets)
 
-            ticket_id   = str(t.get('id', ''))
-            subject     = t.get('subject', 'N/A')
-            priority    = (t.get('priority') or {}).get('name') or 'N/A'
-            category    = (t.get('category') or {}).get('name') or 'N/A'
-            sla_obj     = t.get('sla') or {}
-            sla_name    = sla_obj.get('name') or 'N/A'
-            sla_violated = bool(t.get('is_overdue', False))
+            if len(page_tickets) < row_count:
+                break
 
-            created_ms        = (t.get('created_time')               or {}).get('value')
-            completed_ms      = (t.get('completed_time')             or {}).get('value')
-            due_by_ms         = (t.get('due_by_time')                or {}).get('value')
-            first_response_ms = (t.get('first_response_due_by_time') or {}).get('value')
+            start_index += row_count
 
-            all_tickets.append({
-                'ticket_id':              ticket_id,
-                'subject':                subject,
-                'priority':               priority,
-                'category':               category,
-                'sla_name':               sla_name,
-                'sla_violated':           sla_violated,
-                'created_time_iso':       _epoch_ms_to_iso(created_ms),
-                'completed_time_iso':     _epoch_ms_to_iso(completed_ms),
-                'due_by_time_iso':        _epoch_ms_to_iso(due_by_ms),
-                'first_response_due_iso': _epoch_ms_to_iso(first_response_ms),
-                'resolution_minutes':     _resolution_minutes(created_ms, completed_ms)
-            })
+        return results
 
-        if len(page_tickets) < row_count:
-            break
+    # Query both active and archived, then merge + deduplicate
+    active_tickets   = fetch_pages(is_archive=False)
+    archived_tickets = fetch_pages(is_archive=True)
 
-        start_index += row_count
+    if archived_tickets:
+        logger.debug(f"  {tech_email}: {len(active_tickets)} active + {len(archived_tickets)} archived tickets")
+
+    seen_ids    = set()
+    all_tickets = []
+
+    for t in active_tickets + archived_tickets:
+        tid = str(t.get('id', ''))
+        if not tid or tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+
+        # Skip "Converted to Project"
+        if (t.get('status') or {}).get('name') == 'Converted to Project':
+            continue
+
+        priority     = (t.get('priority') or {}).get('name') or 'N/A'
+        category     = (t.get('category') or {}).get('name') or 'N/A'
+        sla_obj      = t.get('sla') or {}
+        sla_name     = sla_obj.get('name') or 'N/A'
+        sla_violated = bool(t.get('is_overdue', False))
+
+        created_ms        = (t.get('created_time')               or {}).get('value')
+        completed_ms      = (t.get('completed_time')             or {}).get('value')
+        due_by_ms         = (t.get('due_by_time')                or {}).get('value')
+        first_response_ms = (t.get('first_response_due_by_time') or {}).get('value')
+
+        all_tickets.append({
+            'ticket_id':              tid,
+            'subject':                t.get('subject', 'N/A'),
+            'priority':               priority,
+            'category':               category,
+            'sla_name':               sla_name,
+            'sla_violated':           sla_violated,
+            'created_time_iso':       _epoch_ms_to_iso(created_ms),
+            'completed_time_iso':     _epoch_ms_to_iso(completed_ms),
+            'due_by_time_iso':        _epoch_ms_to_iso(due_by_ms),
+            'first_response_due_iso': _epoch_ms_to_iso(first_response_ms),
+            'resolution_minutes':     _resolution_minutes(created_ms, completed_ms)
+        })
 
     return all_tickets
 
@@ -618,7 +641,7 @@ def process_technician(tech_name, tech_info, graph_token, sdp_token, target_date
 
 
 # ─────────────────────────────────────────────
-# File output (unchanged)
+# File output
 # ─────────────────────────────────────────────
 
 def save_to_file(tech_data, date):
@@ -653,7 +676,7 @@ def save_to_file(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust Table upsert  (replaces upload_to_dust)
+# Dust Table upsert
 # ─────────────────────────────────────────────
 
 def _fmt_mins(minutes):
@@ -664,10 +687,6 @@ def _fmt_mins(minutes):
 
 
 def _build_table_rows(tech_data, date):
-    """
-    Convert one day's tech_data into flat Dust table row dicts.
-    One row per closed ticket. Zero-ticket days produce one summary row.
-    """
     date_str  = date.strftime('%Y-%m-%d')
     month_str = date.strftime('%Y-%m')
     rows = []
@@ -727,7 +746,6 @@ def _build_table_rows(tech_data, date):
                     }
                 })
         else:
-            # Zero-ticket day — preserve daily metrics
             rows.append({
                 "row_id": f"{tech_slug}-{date_str}-no-tickets",
                 "value": {
@@ -750,7 +768,6 @@ def _build_table_rows(tech_data, date):
 
 
 def upsert_to_dust_table(rows):
-    """Upsert rows to Dust native table in batches. Returns count upserted."""
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust table env vars incomplete — skipping upsert.")
         return 0
@@ -893,7 +910,6 @@ def process_single_date(target_date, technicians):
 
     print()
 
-    # Save JSON + upsert to Dust table
     filename    = save_to_file(tech_data, target_date)
     rows        = _build_table_rows(tech_data, target_date)
     upserted    = upsert_to_dust_table(rows)
@@ -912,7 +928,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.0.0 — Dust table output'
+        description='Performance backfill v19.1.0 — archive fix + Dust table output'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -921,8 +937,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.0.0")
-    print("  Meetings · Azure AD Profile · Ticket Detail · SLA · Dust Table Output")
+    print("  PERFORMANCE DATA BACKFILL v19.1.0")
+    print("  Meetings · Azure AD Profile · Ticket Detail · Archive Fix · Dust Table Output")
     print("=" * 130)
 
     if not args.days and not args.start_date:
