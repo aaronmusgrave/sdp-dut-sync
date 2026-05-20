@@ -1,17 +1,28 @@
-name: Create Dust Table
+# .github/workflows/test_dust_upsert.yml
+
+name: Test Dust Table Upsert
 on: workflow_dispatch
+
 jobs:
-  create:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Create tech_performance table
+      - name: Test single row upsert
         run: |
-          curl -s -X POST "https://dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources/dts_07TSt7D7aW0pD/tables" \
+          curl -s -X POST \
+            "https://dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources/dts_07TSt7D7aW0pD/tables/tech_performance/rows" \
             -H "Authorization: Bearer ${{ secrets.DUST_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "table_id": "tech_performance",
-              "name": "tech_performance",
-              "title": "tech_performance",
-              "description": "One row per closed SDP ticket per technician per day."
+              "rows": [{
+                "row_id": "test-row-001",
+                "value": {
+                  "technician": "Test Tech",
+                  "date": "2026-03-01",
+                  "month": "2026-03",
+                  "ticket_id": "99999",
+                  "subject": "Test ticket"
+                }
+              }],
+              "truncate": false
             }'
