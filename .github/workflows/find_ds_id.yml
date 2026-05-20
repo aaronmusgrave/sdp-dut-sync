@@ -6,5 +6,5 @@ jobs:
     steps:
       - name: List data sources
         run: |
-          curl -s "https://app.dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources" \
+          curl -s "https://dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources" \
             -H "Authorization: Bearer ${{ secrets.DUST_API_KEY }}"
