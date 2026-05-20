@@ -12,5 +12,6 @@ jobs:
             -d '{
               "table_id": "tech_performance",
               "name": "tech_performance",
+              "title": "tech_performance",
               "description": "One row per closed SDP ticket per technician per day."
             }'
