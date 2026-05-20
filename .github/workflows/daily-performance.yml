@@ -8,30 +8,33 @@ on:
 jobs:
   collect-performance-snapshot:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
-      
+
       - name: Run performance data collection
         env:
-          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
-          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
+          AZURE_TENANT_ID:      ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID:      ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET:  ${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN:           ${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID:        ${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET:    ${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN:    ${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY:         ${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID:    ${{ secrets.DUST_WORKSPACE_ID }}
+          DUST_SPACE_ID:        ${{ secrets.DUST_SPACE_ID }}
+          DUST_DS_ID:           ${{ secrets.DUST_DS_ID }}
+          DUST_TABLE_ID:        ${{ secrets.DUST_TABLE_ID }}
         run: python scripts/backfill_performance.py --start-date $(date -d yesterday +%Y-%m-%d) --end-date $(date -d yesterday +%Y-%m-%d)
