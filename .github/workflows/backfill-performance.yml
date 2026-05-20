@@ -1,4 +1,4 @@
-name: Backfill Performance Data v16.0.0
+name: Backfill Performance Data v19.0.0
 
 on:
   workflow_dispatch:
@@ -20,35 +20,37 @@ on:
 jobs:
   backfill:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      
+
       - name: Install dependencies
         run: pip install requests
-      
+
       - name: Delete progress file if force mode
-        if: \${{ inputs.force == true }}
+        if: ${{ inputs.force == true }}
         run: rm -f backfill_progress.json
-      
+
       - name: Run backfill
         env:
-          AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: \${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
-          SDP_DOMAIN: \${{ secrets.SDP_DOMAIN }}
-          SDP_CLIENT_ID: \${{ secrets.SDP_CLIENT_ID }}
-          SDP_CLIENT_SECRET: \${{ secrets.SDP_CLIENT_SECRET }}
-          SDP_REFRESH_TOKEN: \${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY: \${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: \${{ secrets.DUST_WORKSPACE_ID }}
-        run: python scripts/backfill_performance.py --start-date "\${{ inputs.start_date }}" --end-date "\${{ inputs.end_date }}"
-      
+          AZURE_TENANT_ID:      ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID:      ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET:  ${{ secrets.AZURE_CLIENT_SECRET }}
+          SDP_DOMAIN:           ${{ secrets.SDP_DOMAIN }}
+          SDP_CLIENT_ID:        ${{ secrets.SDP_CLIENT_ID }}
+          SDP_CLIENT_SECRET:    ${{ secrets.SDP_CLIENT_SECRET }}
+          SDP_REFRESH_TOKEN:    ${{ secrets.SDP_REFRESH_TOKEN }}
+          DUST_API_KEY:         ${{ secrets.DUST_API_KEY }}
+          DUST_WORKSPACE_ID:    ${{ secrets.DUST_WORKSPACE_ID }}
+          DUST_SPACE_ID:        ${{ secrets.DUST_SPACE_ID }}
+          DUST_DS_ID:           ${{ secrets.DUST_DS_ID }}
+          DUST_TABLE_ID:        ${{ secrets.DUST_TABLE_ID }}
+        run: python scripts/backfill_performance.py --start-date "${{ inputs.start_date }}" --end-date "${{ inputs.end_date }}"
+
       - name: Upload performance data
         if: always()
         uses: actions/upload-artifact@v4
