@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.1.0 - ARCHIVED TICKET FIX
-Adds is_archive=True query to get_closed_tickets_detail() so older
-closed tickets that have been archived in SDP are included.
+Performance Data Backfill Script v19.2.0 - CORRECT ARCHIVE ENDPOINT
+Uses /api/v3/archive_requests (separate endpoint) instead of invalid is_archive flag.
+Queries both active and archived tickets, merges and deduplicates results.
 
-v19.1.0 Changes (from v19.0.0):
-- FIX: get_closed_tickets_detail() now queries both active AND archived tickets
-- Deduplication by ticket ID prevents any overlap between the two result sets
+v19.2.0 Changes (from v19.1.0):
+- FIX: Replaced is_archive flag (rejected by SDP) with correct /api/v3/archive_requests endpoint
+- fetch_pages() now accepts endpoint URL as parameter
+- 404 on archive endpoint handled gracefully (skips silently)
 - All v19.0.0 logic preserved: Dust table upsert, Azure AD, meetings, scoring
 """
 
@@ -320,7 +321,7 @@ def get_meetings(email, graph_token, date):
 
 
 # ─────────────────────────────────────────────
-# Closed ticket detail retrieval  (v19.1.0 — archive fix)
+# Closed ticket detail retrieval  (v19.2.0 — correct archive endpoint)
 # ─────────────────────────────────────────────
 
 def _epoch_ms_to_iso(ms):
@@ -344,8 +345,8 @@ def _resolution_minutes(created_ms, completed_ms):
 def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     """
     Return closed ticket details for a technician on a given date.
-    Queries BOTH active and archived tickets to ensure older records are included.
-    Results are deduplicated by ticket ID.
+    Queries both /api/v3/requests (active) and /api/v3/archive_requests (archived).
+    Results are merged and deduplicated by ticket ID.
     """
     if not tech_email:
         return []
@@ -360,8 +361,8 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
 
-    def fetch_pages(is_archive=False):
-        """Paginate through all results for active or archived tickets."""
+    def fetch_pages(endpoint):
+        """Paginate through all results for a given SDP endpoint URL."""
         results     = []
         start_index = 1
         row_count   = 100
@@ -371,7 +372,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                 "list_info": {
                     "row_count":   row_count,
                     "start_index": start_index,
-                    "is_archive":  is_archive,
                     "search_criteria": [
                         {
                             "field":     "technician.email_id",
@@ -400,7 +400,7 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
             for attempt in range(3):
                 try:
                     resp = requests.get(
-                        f"{SDP_API_BASE}/requests",
+                        endpoint,
                         headers=headers,
                         params={'input_data': json.dumps(list_info)},
                         timeout=30
@@ -409,21 +409,24 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                         page_tickets = resp.json().get('requests', [])
                         success = True
                         break
+                    elif resp.status_code == 404:
+                        # Archive endpoint not available on this instance — skip silently
+                        logger.debug(f"Archive endpoint not available: {endpoint}")
+                        return results
                     elif resp.status_code == 429:
                         wait = 2 ** attempt * 5
                         logger.warning(f"Rate-limited. Waiting {wait}s...")
                         time.sleep(wait)
                     else:
-                        logger.warning(f"API error {resp.status_code} (archive={is_archive}): {resp.text[:200]}")
+                        logger.warning(f"API error {resp.status_code} [{endpoint.split('/')[-1]}]: {resp.text[:200]}")
                         if attempt < 2:
                             time.sleep(2)
                 except Exception as ex:
-                    logger.warning(f"Exception (attempt {attempt+1}, archive={is_archive}): {ex}")
+                    logger.warning(f"Exception (attempt {attempt+1}): {ex}")
                     if attempt < 2:
                         time.sleep(2)
 
             if not success:
-                logger.error(f"Failed page fetch for {tech_email} at index {start_index} (archive={is_archive})")
                 break
 
             results.extend(page_tickets)
@@ -435,13 +438,14 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
 
         return results
 
-    # Query both active and archived, then merge + deduplicate
-    active_tickets   = fetch_pages(is_archive=False)
-    archived_tickets = fetch_pages(is_archive=True)
+    # Query active tickets then archived tickets (separate endpoint)
+    active_tickets   = fetch_pages(f"{SDP_API_BASE}/requests")
+    archived_tickets = fetch_pages(f"{SDP_API_BASE}/archive_requests")
 
     if archived_tickets:
-        logger.debug(f"  {tech_email}: {len(active_tickets)} active + {len(archived_tickets)} archived tickets")
+        logger.info(f"  {tech_email}: {len(active_tickets)} active + {len(archived_tickets)} archived")
 
+    # Merge + deduplicate by ticket ID
     seen_ids    = set()
     all_tickets = []
 
@@ -451,7 +455,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
             continue
         seen_ids.add(tid)
 
-        # Skip "Converted to Project"
         if (t.get('status') or {}).get('name') == 'Converted to Project':
             continue
 
@@ -928,7 +931,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.1.0 — archive fix + Dust table output'
+        description='Performance backfill v19.2.0 — correct archive endpoint + Dust table output'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -937,7 +940,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.1.0")
+    print("  PERFORMANCE DATA BACKFILL v19.2.0")
     print("  Meetings · Azure AD Profile · Ticket Detail · Archive Fix · Dust Table Output")
     print("=" * 130)
 
