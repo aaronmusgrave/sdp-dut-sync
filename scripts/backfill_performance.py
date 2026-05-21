@@ -1206,3 +1206,46 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+import csv
+import json
+import requests
+import os
+
+# --- Dust config ---
+DUST_API_KEY    = os.environ["DUST_API_KEY"]
+WORKSPACE_ID    = os.environ["DUST_SPACE_ID"]
+DATASOURCE_ID   = "d0841994649dceadff76647c3440d3f234e6b834c13b5f62f028bdd0be3e3ba3"
+TABLE_ID        = "tech_performance"
+
+UPSERT_URL = (
+    f"https://dust.tt/api/v1/w/{WORKSPACE_ID}"
+    f"/data_sources/{DATASOURCE_ID}/tables/{TABLE_ID}/rows/upsert"
+)
+HEADERS = {
+    "Authorization": f"Bearer {DUST_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+def upsert_csv_to_dust(csv_path: str, batch_size: int = 100):
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # Build Dust row objects — row_id is already in your CSV
+    dust_rows = [{"row_id": r["row_id"], "value": r} for r in rows]
+
+    # Send in batches
+    for i in range(0, len(dust_rows), batch_size):
+        batch = dust_rows[i : i + batch_size]
+        resp = requests.post(
+            UPSERT_URL,
+            headers=HEADERS,
+            json={"rows": batch},
+        )
+        resp.raise_for_status()
+        print(f"Upserted rows {i+1}–{i+len(batch)} ✓")
+
+    print(f"Done — {len(dust_rows)} rows synced to Dust.")
+
+# Call it right after you write the CSV
+upsert_csv_to_dust("tech_performance.csv")
