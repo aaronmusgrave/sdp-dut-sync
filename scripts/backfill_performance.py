@@ -903,22 +903,35 @@ def upload_csv_document(row_dict):
 
     logger.info(f"Uploading CSV as table: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB")
 
-    url = (
-        "https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
-        "/spaces/" + DUST_SPACE_ID +
-        "/data_sources/" + DUST_DS_ID +
-        "/tables/" + DUST_TABLE_ID
-    )
-    headers = {
+    base_url   = ("https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
+                  "/spaces/" + DUST_SPACE_ID +
+                  "/data_sources/" + DUST_DS_ID)
+    table_url  = base_url + "/tables/" + DUST_TABLE_ID
+    tables_url = base_url + "/tables"
+
+    auth_headers = {
         'Authorization': 'Bearer ' + DUST_API_KEY,
         'Content-Type':  'application/json'
     }
 
+    # Step 1: Delete existing table
+    try:
+        del_resp = requests.delete(table_url, headers=auth_headers, timeout=30)
+        if del_resp.status_code in [200, 204]:
+            logger.info("Existing table deleted.")
+        elif del_resp.status_code == 404:
+            logger.info("No existing table found — creating fresh.")
+        else:
+            logger.warning(f"Table delete returned {del_resp.status_code}: {del_resp.text[:200]}")
+    except Exception as ex:
+        logger.warning(f"Table delete exception: {ex}")
+
+    # Step 2: Recreate table with full merged CSV
     for attempt in range(3):
         try:
-            resp = requests.patch(
-                url,
-                headers=headers,
+            resp = requests.post(
+                tables_url,
+                headers=auth_headers,
                 json={
                     "tableId":     DUST_TABLE_ID,
                     "name":        DUST_TABLE_ID,
@@ -945,8 +958,6 @@ def upload_csv_document(row_dict):
                 time.sleep(5)
 
     logger.error("CSV upload failed after all retries.")
-
-
 # ─────────────────────────────────────────────
 # Progress tracking
 # ─────────────────────────────────────────────
