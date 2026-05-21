@@ -824,6 +824,7 @@ def load_existing_csv():
         logger.warning(f"Error loading existing rows: {e}")
         return {}
 
+
 def upload_csv_document(row_dict):
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
@@ -857,8 +858,8 @@ def upload_csv_document(row_dict):
         'Content-Type':  'application/json'
     }
 
-    # ── Step 1: Find existing table ID by name ──
-    resolved_table_id = DUST_TABLE_ID
+    # ── Step 1: Find any existing tech_performance table ──
+    existing_id = None
     try:
         list_resp = requests.get(
             base_url + "/tables",
@@ -866,27 +867,39 @@ def upload_csv_document(row_dict):
             timeout=30
         )
         if list_resp.status_code == 200:
-            tables = list_resp.json().get('tables', [])
-            for t in tables:
-                if t.get('name') == 'tech_performance' or t.get('title') == 'tech_performance':
-                    resolved_table_id = t.get('table_id') or t.get('tableId') or DUST_TABLE_ID
-                    logger.info(f"Found existing table: name=tech_performance, table_id={resolved_table_id}")
+            for t in list_resp.json().get('tables', []):
+                if t.get('name') == 'tech_performance':
+                    existing_id = t.get('table_id') or t.get('tableId')
+                    logger.info(f"Found existing table: table_id={existing_id}")
                     break
-        else:
-            logger.warning(f"Could not list tables: {list_resp.status_code} — using DUST_TABLE_ID")
     except Exception as ex:
-        logger.warning(f"Table list exception: {ex} — using DUST_TABLE_ID")
+        logger.warning(f"Table list exception: {ex}")
 
-    logger.info(f"Uploading CSV: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB | table_id={resolved_table_id}")
+    # ── Step 2: Delete existing table if it conflicts with DUST_TABLE_ID ──
+    if existing_id and existing_id != DUST_TABLE_ID:
+        try:
+            del_resp = requests.delete(
+                base_url + "/tables/" + existing_id,
+                headers={'Authorization': 'Bearer ' + DUST_API_KEY},
+                timeout=30
+            )
+            if del_resp.status_code in [200, 204]:
+                logger.info(f"Deleted conflicting table (id={existing_id})")
+            else:
+                logger.warning(f"Delete returned {del_resp.status_code}: {del_resp.text[:200]}")
+        except Exception as ex:
+            logger.warning(f"Delete exception: {ex}")
 
-    # ── Step 2: Upsert with resolved table_id ──
+    # ── Step 3: Upsert with correct DUST_TABLE_ID ──
+    logger.info(f"Uploading CSV: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB | table_id={DUST_TABLE_ID}")
+
     for attempt in range(3):
         try:
             resp = requests.post(
                 base_url + "/tables",
                 headers=auth_headers,
                 json={
-                    "table_id":    resolved_table_id,
+                    "table_id":    DUST_TABLE_ID,
                     "name":        "tech_performance",
                     "title":       "tech_performance",
                     "description": "Technician performance data — daily closed tickets, SLA compliance, resolution times, and meeting load per technician.",
@@ -896,10 +909,7 @@ def upload_csv_document(row_dict):
                 timeout=120
             )
             if resp.status_code in [200, 201]:
-                logger.info(f"✓ Table upserted in Dust — {len(rows)} total rows (table_id={resolved_table_id})")
-                # Update DUST_TABLE_ID for next run awareness
-                if resolved_table_id != DUST_TABLE_ID:
-                    logger.warning(f"NOTE: Update DUST_TABLE_ID secret to '{resolved_table_id}' to avoid future lookups.")
+                logger.info(f"✓ Table upserted in Dust — {len(rows)} total rows (table_id={DUST_TABLE_ID})")
                 return
             elif resp.status_code == 429:
                 wait = 2 ** attempt * 15
@@ -915,8 +925,6 @@ def upload_csv_document(row_dict):
                 time.sleep(5)
 
     logger.error("Upload failed after all retries.")
-
-
 
 # ─────────────────────────────────────────────
 # Progress tracking
