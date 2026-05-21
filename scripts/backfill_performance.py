@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.4.0 - TABLE CSV UPLOAD FIX
-Fixes upload_csv_document() to post to the /tables endpoint (multipart/form-data)
-instead of /documents, ensuring the CSV lands in GCS and becomes SQL-queryable.
+Performance Data Backfill Script v19.4.1 - DIAGNOSTIC
+Adds diagnostic logging to csv_row_dict accumulation to identify
+why upload is being silently skipped.
 
-v19.4.0 Changes (from v19.3.0):
-- FIXED: upload_csv_document() now posts to /tables endpoint via multipart/form-data
-- This writes the CSV to GCS, making it queryable via the Dust SQL query engine
+v19.4.1 Changes (from v19.4.0):
+- Added --skip-csv warning log
+- Added csv_row_dict size diagnostic before upload check
+- Added empty csv_row_dict warning when upload is skipped
 """
 
 import os
@@ -818,7 +819,7 @@ def upsert_to_dust_table(rows):
 
 
 # ─────────────────────────────────────────────
-# CSV document upload  (v19.4.0 — fixed)
+# CSV table upload  (v19.4.0 — fixed endpoint)
 # ─────────────────────────────────────────────
 
 CSV_FIELDNAMES = [
@@ -836,9 +837,9 @@ CSV_FIELDNAMES = [
 
 def load_existing_csv():
     """
-    Download and parse the existing CSV document from Dust.
+    Download and parse the existing CSV from the Dust table endpoint.
     Returns a dict keyed by row_id so new rows can be merged in.
-    Returns empty dict if no CSV exists yet.
+    Returns empty dict if no table exists yet.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         return {}
@@ -1057,7 +1058,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.4.0 — CSV table upload fix'
+        description='Performance backfill v19.4.1 — diagnostic logging'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1067,9 +1068,17 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.4.0")
-    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload (fixed)")
+    print("  PERFORMANCE DATA BACKFILL v19.4.1")
+    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload (diagnostic)")
     print("=" * 130)
+
+    # ── Diagnostic: dump Dust env var presence ────
+    logger.info(f"Dust env check — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
+                f"WORKSPACE_ID: {'SET' if DUST_WORKSPACE_ID else 'MISSING'} | "
+                f"SPACE_ID: {'SET' if DUST_SPACE_ID else 'MISSING'} | "
+                f"DS_ID: {'SET' if DUST_DS_ID else 'MISSING'} | "
+                f"TABLE_ID: {DUST_TABLE_ID}")
+    logger.info(f"skip_csv flag: {args.skip_csv}")
 
     if not args.days and not args.start_date:
         choice = input("\nBackfill mode — (1) Last N days  (2) Date range: ").strip()
@@ -1140,7 +1149,9 @@ def main():
     if not args.skip_csv:
         logger.info("Loading existing CSV from Dust...")
         csv_row_dict = load_existing_csv()
+        logger.info(f"Existing CSV rows loaded: {len(csv_row_dict)}")
     else:
+        logger.warning("--skip-csv flag is set — skipping CSV upload.")
         csv_row_dict = {}
 
     start_wall = time.time()
@@ -1176,9 +1187,14 @@ def main():
     total_time = time.time() - start_wall
 
     # ── Upload merged CSV to Dust as queryable table ──
+    logger.info(f"csv_row_dict size before upload: {len(csv_row_dict)} rows")
     if not args.skip_csv and csv_row_dict:
         logger.info(f"Uploading merged CSV ({len(csv_row_dict)} total rows)...")
         upload_csv_document(csv_row_dict)
+    elif args.skip_csv:
+        logger.warning("CSV upload skipped — --skip-csv flag is set.")
+    elif not csv_row_dict:
+        logger.warning("csv_row_dict is empty — skipping upload. Check for silent exceptions in the processing loop.")
 
     print()
     print("=" * 130)
