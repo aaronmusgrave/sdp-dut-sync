@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.4.1 - DIAGNOSTIC
-Adds diagnostic logging to csv_row_dict accumulation to identify
-why upload is being silently skipped.
+Performance Data Backfill Script v19.4.2 - JSON TABLE UPLOAD
+Fixes upload_csv_document() to use JSON body instead of multipart/form-data.
+Resolves "Expected object, received string" 400 error from Dust /tables endpoint.
 
-v19.4.1 Changes (from v19.4.0):
-- Added --skip-csv warning log
-- Added csv_row_dict size diagnostic before upload check
-- Added empty csv_row_dict warning when upload is skipped
+v19.4.2 Changes (from v19.4.1):
+- FIXED: upload_csv_document() now sends JSON body with csv as string field
+- Removed multipart files= / data= approach
 """
 
 import os
@@ -819,7 +818,7 @@ def upsert_to_dust_table(rows):
 
 
 # ─────────────────────────────────────────────
-# CSV table upload  (v19.4.0 — fixed endpoint)
+# CSV table upload  (v19.4.2 — JSON body fix)
 # ─────────────────────────────────────────────
 
 CSV_FIELDNAMES = [
@@ -881,9 +880,9 @@ def load_existing_csv():
 
 def upload_csv_document(row_dict):
     """
-    Build a CSV from the merged row dict and upload it to the Dust
-    /tables endpoint via multipart/form-data. This writes the file to
-    GCS making it SQL-queryable via the Dust query engine.
+    Build a CSV from the merged row dict and POST it to the Dust /tables
+    endpoint as a JSON body with the CSV content as a string field.
+    This writes the file to GCS making it SQL-queryable.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
@@ -915,20 +914,21 @@ def upload_csv_document(row_dict):
         f"/data_sources/{DUST_DS_ID}"
         f"/tables"
     )
-    headers = {'Authorization': f'Bearer {DUST_API_KEY}'}
+    headers = {
+        'Authorization': f'Bearer {DUST_API_KEY}',
+        'Content-Type':  'application/json'
+    }
 
     for attempt in range(3):
         try:
             resp = requests.post(
                 url,
                 headers=headers,
-                files={
-                    'file': ('tech_performance.csv', csv_content.encode('utf-8'), 'text/csv')
-                },
-                data={
-                    'tableId':     DUST_TABLE_ID,
-                    'name':        DUST_TABLE_ID,
-                    'description': 'Technician performance data'
+                json={
+                    "tableId":     DUST_TABLE_ID,
+                    "name":        DUST_TABLE_ID,
+                    "description": "Technician performance data",
+                    "csv":         csv_content
                 },
                 timeout=120
             )
@@ -1058,7 +1058,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.4.1 — diagnostic logging'
+        description='Performance backfill v19.4.2 — JSON table upload fix'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1068,8 +1068,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.4.1")
-    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload (diagnostic)")
+    print("  PERFORMANCE DATA BACKFILL v19.4.2")
+    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload (JSON fix)")
     print("=" * 130)
 
     # ── Diagnostic: dump Dust env var presence ────
@@ -1194,7 +1194,7 @@ def main():
     elif args.skip_csv:
         logger.warning("CSV upload skipped — --skip-csv flag is set.")
     elif not csv_row_dict:
-        logger.warning("csv_row_dict is empty — skipping upload. Check for silent exceptions in the processing loop.")
+        logger.warning("csv_row_dict is empty — skipping upload.")
 
     print()
     print("=" * 130)
