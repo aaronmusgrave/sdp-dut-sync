@@ -927,6 +927,7 @@ def upload_csv_document(row_dict):
                 json={
                     "tableId":     DUST_TABLE_ID,
                     "name":        DUST_TABLE_ID,
+                    "title":       DUST_TABLE_ID,
                     "description": "Technician performance data",
                     "csv":         csv_content
                 },
