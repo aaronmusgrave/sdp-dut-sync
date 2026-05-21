@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.3.0 - CSV DOCUMENT UPLOAD
-Adds CSV document upload to Dust data source alongside the Rows API upsert.
-Downloads existing CSV at start, merges new rows, re-uploads complete file.
-This populates the GCS CSV file that the SQL query layer reads.
+Performance Data Backfill Script v19.4.0 - TABLE CSV UPLOAD FIX
+Fixes upload_csv_document() to post to the /tables endpoint (multipart/form-data)
+instead of /documents, ensuring the CSV lands in GCS and becomes SQL-queryable.
 
-v19.3.0 Changes (from v19.2.0):
-- NEW: load_existing_csv() downloads current CSV from Dust at start of run
-- NEW: upload_csv_document() builds and uploads full CSV to Dust data source
-- process_single_date() now returns rows for CSV accumulation
-- main() merges new rows into existing CSV dict and uploads at end
-- Both daily runs and backfills maintain complete CSV history
+v19.4.0 Changes (from v19.3.0):
+- FIXED: upload_csv_document() now posts to /tables endpoint via multipart/form-data
+- This writes the CSV to GCS, making it queryable via the Dust SQL query engine
 """
 
 import os
@@ -822,10 +818,9 @@ def upsert_to_dust_table(rows):
 
 
 # ─────────────────────────────────────────────
-# CSV document upload  (v19.3.0 — new)
+# CSV document upload  (v19.4.0 — fixed)
 # ─────────────────────────────────────────────
 
-# Column order for CSV output
 CSV_FIELDNAMES = [
     'row_id', 'technician', 'tech_slug', 'email', 'display_name',
     'job_title', 'department', 'office_location', 'city', 'state', 'country',
@@ -852,7 +847,7 @@ def load_existing_csv():
         f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
         f"/spaces/{DUST_SPACE_ID}"
         f"/data_sources/{DUST_DS_ID}"
-        f"/documents/{CSV_DOCUMENT_ID}"
+        f"/tables/{DUST_TABLE_ID}"
     )
     headers = {'Authorization': f'Bearer {DUST_API_KEY}'}
 
@@ -865,7 +860,7 @@ def load_existing_csv():
             logger.warning(f"Could not load existing CSV: {resp.status_code}")
             return {}
 
-        text = resp.json().get('document', {}).get('text', '')
+        text = resp.json().get('table', {}).get('text', '')
         if not text.strip():
             return {}
 
@@ -885,9 +880,9 @@ def load_existing_csv():
 
 def upload_csv_document(row_dict):
     """
-    Build a CSV from the merged row dict and upload it as a document
-    to the Dust data source. This writes tech_performance.csv to GCS
-    making it queryable via SQL.
+    Build a CSV from the merged row dict and upload it to the Dust
+    /tables endpoint via multipart/form-data. This writes the file to
+    GCS making it SQL-queryable via the Dust query engine.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
@@ -899,7 +894,6 @@ def upload_csv_document(row_dict):
 
     rows = list(row_dict.values())
 
-    # Build CSV in memory
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
@@ -912,29 +906,33 @@ def upload_csv_document(row_dict):
     csv_content = output.getvalue()
     csv_bytes   = len(csv_content.encode('utf-8'))
 
-    logger.info(f"Uploading CSV: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB")
+    logger.info(f"Uploading CSV as table: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB")
 
     url = (
         f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
         f"/spaces/{DUST_SPACE_ID}"
         f"/data_sources/{DUST_DS_ID}"
-        f"/documents/{CSV_DOCUMENT_ID}"
+        f"/tables"
     )
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type':  'application/json'
-    }
-    payload = {
-        "document_id": CSV_DOCUMENT_ID,
-        "text":        csv_content,
-        "timestamp":   int(time.time() * 1000),
-    }
+    headers = {'Authorization': f'Bearer {DUST_API_KEY}'}
 
     for attempt in range(3):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            resp = requests.post(
+                url,
+                headers=headers,
+                files={
+                    'file': ('tech_performance.csv', csv_content.encode('utf-8'), 'text/csv')
+                },
+                data={
+                    'tableId':     DUST_TABLE_ID,
+                    'name':        DUST_TABLE_ID,
+                    'description': 'Technician performance data'
+                },
+                timeout=120
+            )
             if resp.status_code in [200, 201]:
-                logger.info(f"✓ CSV uploaded to Dust data source — {len(rows)} total rows")
+                logger.info(f"✓ Table CSV uploaded to Dust — {len(rows)} total rows")
                 return
             elif resp.status_code == 429:
                 wait = 2 ** attempt * 15
@@ -1050,7 +1048,6 @@ def process_single_date(target_date, technicians):
         f"({ticket_rows} tickets + {len(rows) - ticket_rows} zero-days)"
     )
 
-    # Return rows for CSV accumulation in main()
     return rows
 
 
@@ -1060,7 +1057,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.3.0 — CSV document upload + Dust table output'
+        description='Performance backfill v19.4.0 — CSV table upload fix'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1070,8 +1067,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.3.0")
-    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload")
+    print("  PERFORMANCE DATA BACKFILL v19.4.0")
+    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload (fixed)")
     print("=" * 130)
 
     if not args.days and not args.start_date:
@@ -1142,7 +1139,7 @@ def main():
     # ── Load existing CSV for merge ───────────────
     if not args.skip_csv:
         logger.info("Loading existing CSV from Dust...")
-        csv_row_dict = load_existing_csv()  # dict: row_id → flat row dict
+        csv_row_dict = load_existing_csv()
     else:
         csv_row_dict = {}
 
@@ -1152,7 +1149,6 @@ def main():
         try:
             new_rows = process_single_date(date, technicians)
 
-            # Merge new rows into CSV dict (upsert by row_id)
             if not args.skip_csv:
                 for row in new_rows:
                     csv_row_dict[row['row_id']] = {
@@ -1179,7 +1175,7 @@ def main():
 
     total_time = time.time() - start_wall
 
-    # ── Upload merged CSV to Dust ─────────────────
+    # ── Upload merged CSV to Dust as queryable table ──
     if not args.skip_csv and csv_row_dict:
         logger.info(f"Uploading merged CSV ({len(csv_row_dict)} total rows)...")
         upload_csv_document(csv_row_dict)
@@ -1206,4 +1202,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
