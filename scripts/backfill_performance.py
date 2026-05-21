@@ -879,11 +879,6 @@ def load_existing_csv():
 
 
 def upload_csv_document(row_dict):
-    """
-    Build a CSV from the merged row dict and POST it to the Dust /tables
-    endpoint as a JSON body with the CSV content as a string field.
-    This writes the file to GCS making it SQL-queryable.
-    """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
         return
@@ -909,13 +904,13 @@ def upload_csv_document(row_dict):
     logger.info(f"Uploading CSV as table: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB")
 
     url = (
-        f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
-        f"/spaces/{DUST_SPACE_ID}"
-        f"/data_sources/{DUST_DS_ID}"
-        f"/tables/{DUST_TABLE_ID"
+        "https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
+        "/spaces/" + DUST_SPACE_ID +
+        "/data_sources/" + DUST_DS_ID +
+        "/tables/" + DUST_TABLE_ID
     )
     headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
+        'Authorization': 'Bearer ' + DUST_API_KEY,
         'Content-Type':  'application/json'
     }
 
