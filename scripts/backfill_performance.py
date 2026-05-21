@@ -912,7 +912,7 @@ def upload_csv_document(row_dict):
         f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
         f"/spaces/{DUST_SPACE_ID}"
         f"/data_sources/{DUST_DS_ID}"
-        f"/tables"
+        f"/tables/{DUST_TABLE_ID"
     )
     headers = {
         'Authorization': f'Bearer {DUST_API_KEY}',
@@ -921,7 +921,7 @@ def upload_csv_document(row_dict):
 
     for attempt in range(3):
         try:
-            resp = requests.post(
+            resp = requests.patch(
                 url,
                 headers=headers,
                 json={
