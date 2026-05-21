@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.4.2 - JSON TABLE UPLOAD
-Fixes upload_csv_document() to use JSON body instead of multipart/form-data.
-Resolves "Expected object, received string" 400 error from Dust /tables endpoint.
+Performance Data Backfill Script v19.5.0 - TABLE_ID FIX
+Fixes the critical bug where "tableId" was used instead of "table_id" in the
+POST /tables body, causing Dust to auto-generate a random ID instead of using
+the correct internal table ID (e.g. E1uOW56OqI) that the query engine expects.
 
-v19.4.2 Changes (from v19.4.1):
-- FIXED: upload_csv_document() now sends JSON body with csv as string field
-- Removed multipart files= / data= approach
+Also removes the DELETE step (POST /tables is a true upsert) and removes the
+Rows API upsert calls which conflict with CSV-backed tables.
+
+v19.5.0 Changes (from v19.4.2):
+- FIXED: POST /tables body now uses "table_id" (correct field name)
+- REMOVED: DELETE step before upload — POST upsert handles it natively
+- REMOVED: upsert_to_dust_table() — conflicts with CSV-backed table approach
+- DUST_TABLE_ID should be set to the internal Dust table ID (e.g. E1uOW56OqI)
 """
 
 import os
@@ -27,7 +33,6 @@ WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
 EMAIL_DOMAIN = 'motorad.com'
 PROGRESS_FILE = 'backfill_progress.json'
-DUST_UPSERT_BATCH = 500
 CSV_DOCUMENT_ID = 'tech_performance.csv'
 
 # Token cache
@@ -671,7 +676,7 @@ def save_to_file(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust Table upsert
+# Table row builder
 # ─────────────────────────────────────────────
 
 def _fmt_mins(minutes):
@@ -762,63 +767,8 @@ def _build_table_rows(tech_data, date):
     return rows
 
 
-def upsert_to_dust_table(rows):
-    if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
-        logger.warning("Dust table env vars incomplete — skipping upsert.")
-        return 0
-
-    if not rows:
-        return 0
-
-    url = (
-        f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
-        f"/spaces/{DUST_SPACE_ID}"
-        f"/data_sources/{DUST_DS_ID}"
-        f"/tables/{DUST_TABLE_ID}/rows"
-    )
-    headers = {
-        'Authorization': f'Bearer {DUST_API_KEY}',
-        'Content-Type':  'application/json'
-    }
-
-    total_upserted = 0
-    batches = [rows[i:i + DUST_UPSERT_BATCH] for i in range(0, len(rows), DUST_UPSERT_BATCH)]
-
-    for i, batch in enumerate(batches, 1):
-        for attempt in range(3):
-            try:
-                resp = requests.post(
-                    url,
-                    headers=headers,
-                    json={"rows": batch, "truncate": False},
-                    timeout=60
-                )
-                if resp.status_code in [200, 201]:
-                    total_upserted += len(batch)
-                    if len(batches) > 1:
-                        logger.info(f"  Batch {i}/{len(batches)} → {len(batch)} rows ✓")
-                    break
-                elif resp.status_code == 429:
-                    wait = 2 ** attempt * 10
-                    logger.warning(f"  Dust rate-limited. Waiting {wait}s...")
-                    time.sleep(wait)
-                else:
-                    logger.warning(f"  Dust upsert failed: {resp.status_code} {resp.text[:200]}")
-                    if attempt < 2:
-                        time.sleep(2)
-            except Exception as ex:
-                logger.warning(f"  Dust upsert exception (attempt {attempt+1}): {ex}")
-                if attempt < 2:
-                    time.sleep(2)
-
-        if i < len(batches):
-            time.sleep(0.5)
-
-    return total_upserted
-
-
 # ─────────────────────────────────────────────
-# CSV table upload  (v19.4.2 — JSON body fix)
+# CSV upload  (v19.5.0 — table_id fix, no DELETE)
 # ─────────────────────────────────────────────
 
 CSV_FIELDNAMES = [
@@ -836,55 +786,57 @@ CSV_FIELDNAMES = [
 
 def load_existing_csv():
     """
-    Download and parse the existing CSV from the Dust table endpoint.
-    Returns a dict keyed by row_id so new rows can be merged in.
-    Returns empty dict if no table exists yet.
+    Download existing rows from Dust table via the List Rows API.
+    Returns a dict keyed by row_id for merging.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         return {}
 
     url = (
-        f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}"
-        f"/spaces/{DUST_SPACE_ID}"
-        f"/data_sources/{DUST_DS_ID}"
-        f"/tables/{DUST_TABLE_ID}"
+        "https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
+        "/spaces/" + DUST_SPACE_ID +
+        "/data_sources/" + DUST_DS_ID +
+        "/tables/" + DUST_TABLE_ID +
+        "/rows?limit=1000"
     )
-    headers = {'Authorization': f'Bearer {DUST_API_KEY}'}
+    headers = {'Authorization': 'Bearer ' + DUST_API_KEY}
 
     try:
         resp = requests.get(url, headers=headers, timeout=60)
         if resp.status_code == 404:
-            logger.info("No existing CSV found — will create fresh.")
+            logger.info("No existing table found — will create fresh.")
             return {}
         if resp.status_code != 200:
-            logger.warning(f"Could not load existing CSV: {resp.status_code}")
+            logger.warning(f"Could not load existing rows: {resp.status_code}")
             return {}
 
-        text = resp.json().get('table', {}).get('text', '')
-        if not text.strip():
-            return {}
-
-        reader = csv.DictReader(io.StringIO(text))
+        rows = resp.json().get('rows', [])
         existing = {}
-        for row in reader:
+        for row in rows:
             rid = row.get('row_id', '')
             if rid:
-                existing[rid] = row
-        logger.info(f"Loaded {len(existing)} existing rows from CSV.")
+                existing[rid] = row.get('value', {})
+                existing[rid]['row_id'] = rid
+        logger.info(f"Loaded {len(existing)} existing rows.")
         return existing
 
     except Exception as e:
-        logger.warning(f"Error loading existing CSV: {e}")
+        logger.warning(f"Error loading existing rows: {e}")
         return {}
 
 
 def upload_csv_document(row_dict):
+    """
+    Build a CSV and upsert the table via POST /tables with the correct
+    "table_id" field (not "tableId"). No DELETE — POST is a true upsert.
+    DUST_TABLE_ID must be the internal Dust table ID (e.g. E1uOW56OqI).
+    """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
         return
 
     if not row_dict:
-        logger.warning("No rows to upload as CSV.")
+        logger.warning("No rows to upload.")
         return
 
     rows = list(row_dict.values())
@@ -901,63 +853,54 @@ def upload_csv_document(row_dict):
     csv_content = output.getvalue()
     csv_bytes   = len(csv_content.encode('utf-8'))
 
-    logger.info(f"Uploading CSV as table: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB")
+    logger.info(f"Uploading CSV: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB")
+    logger.info(f"  table_id = {DUST_TABLE_ID}")
 
-    base_url   = ("https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
-                  "/spaces/" + DUST_SPACE_ID +
-                  "/data_sources/" + DUST_DS_ID)
-    table_url  = base_url + "/tables/" + DUST_TABLE_ID
-    tables_url = base_url + "/tables"
-
-    auth_headers = {
+    url = (
+        "https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
+        "/spaces/" + DUST_SPACE_ID +
+        "/data_sources/" + DUST_DS_ID +
+        "/tables"
+    )
+    headers = {
         'Authorization': 'Bearer ' + DUST_API_KEY,
         'Content-Type':  'application/json'
     }
 
-    # Step 1: Delete existing table
-    try:
-        del_resp = requests.delete(table_url, headers=auth_headers, timeout=30)
-        if del_resp.status_code in [200, 204]:
-            logger.info("Existing table deleted.")
-        elif del_resp.status_code == 404:
-            logger.info("No existing table found — creating fresh.")
-        else:
-            logger.warning(f"Table delete returned {del_resp.status_code}: {del_resp.text[:200]}")
-    except Exception as ex:
-        logger.warning(f"Table delete exception: {ex}")
-
-    # Step 2: Recreate table with full merged CSV
     for attempt in range(3):
         try:
             resp = requests.post(
-                tables_url,
-                headers=auth_headers,
+                url,
+                headers=headers,
                 json={
-                    "tableId":     DUST_TABLE_ID,
-                    "name":        DUST_TABLE_ID,
-                    "title":       DUST_TABLE_ID,
-                    "description": "Technician performance data",
+                    "table_id":    DUST_TABLE_ID,
+                    "name":        "tech_performance",
+                    "title":       "tech_performance",
+                    "description": "Technician performance data — daily closed tickets, SLA compliance, resolution times, and meeting load per technician.",
+                    "timestamp":   int(time.time() * 1000),
                     "csv":         csv_content
                 },
                 timeout=120
             )
             if resp.status_code in [200, 201]:
-                logger.info(f"✓ Table CSV uploaded to Dust — {len(rows)} total rows")
+                logger.info(f"✓ Table upserted in Dust — {len(rows)} total rows")
                 return
             elif resp.status_code == 429:
                 wait = 2 ** attempt * 15
-                logger.warning(f"CSV upload rate-limited. Waiting {wait}s...")
+                logger.warning(f"Rate-limited. Waiting {wait}s...")
                 time.sleep(wait)
             else:
-                logger.warning(f"CSV upload failed: {resp.status_code} {resp.text[:300]}")
+                logger.warning(f"Upload failed: {resp.status_code} {resp.text[:300]}")
                 if attempt < 2:
                     time.sleep(5)
         except Exception as ex:
-            logger.warning(f"CSV upload exception (attempt {attempt+1}): {ex}")
+            logger.warning(f"Upload exception (attempt {attempt+1}): {ex}")
             if attempt < 2:
                 time.sleep(5)
 
-    logger.error("CSV upload failed after all retries.")
+    logger.error("Upload failed after all retries.")
+
+
 # ─────────────────────────────────────────────
 # Progress tracking
 # ─────────────────────────────────────────────
@@ -1047,12 +990,11 @@ def process_single_date(target_date, technicians):
 
     filename = save_to_file(tech_data, target_date)
     rows     = _build_table_rows(tech_data, target_date)
-    upserted = upsert_to_dust_table(rows)
 
     ticket_rows = sum(1 for r in rows if r['value'].get('ticket_id'))
     logger.info(
         f"✓ Saved: {filename}  |  "
-        f"Table rows upserted: {upserted} "
+        f"Rows built: {len(rows)} "
         f"({ticket_rows} tickets + {len(rows) - ticket_rows} zero-days)"
     )
 
@@ -1065,7 +1007,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.4.2 — JSON table upload fix'
+        description='Performance backfill v19.5.0 — table_id fix, no DELETE'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1075,12 +1017,11 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.4.2")
-    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table + CSV Upload (JSON fix)")
+    print("  PERFORMANCE DATA BACKFILL v19.5.0")
+    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (table_id fix)")
     print("=" * 130)
 
-    # ── Diagnostic: dump Dust env var presence ────
-    logger.info(f"Dust env check — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
+    logger.info(f"Dust env — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
                 f"WORKSPACE_ID: {'SET' if DUST_WORKSPACE_ID else 'MISSING'} | "
                 f"SPACE_ID: {'SET' if DUST_SPACE_ID else 'MISSING'} | "
                 f"DS_ID: {'SET' if DUST_DS_ID else 'MISSING'} | "
@@ -1154,9 +1095,9 @@ def main():
 
     # ── Load existing CSV for merge ───────────────
     if not args.skip_csv:
-        logger.info("Loading existing CSV from Dust...")
+        logger.info("Loading existing rows from Dust...")
         csv_row_dict = load_existing_csv()
-        logger.info(f"Existing CSV rows loaded: {len(csv_row_dict)}")
+        logger.info(f"Existing rows loaded: {len(csv_row_dict)}")
     else:
         logger.warning("--skip-csv flag is set — skipping CSV upload.")
         csv_row_dict = {}
@@ -1193,7 +1134,7 @@ def main():
 
     total_time = time.time() - start_wall
 
-    # ── Upload merged CSV to Dust as queryable table ──
+    # ── Upload merged CSV to Dust ─────────────────
     logger.info(f"csv_row_dict size before upload: {len(csv_row_dict)} rows")
     if not args.skip_csv and csv_row_dict:
         logger.info(f"Uploading merged CSV ({len(csv_row_dict)} total rows)...")
