@@ -458,7 +458,7 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
 
-    def fetch_pages(endpoint):
+def fetch_pages(endpoint):
         results     = []
         start_index = 1
         row_count   = 100
@@ -468,33 +468,36 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                 "list_info": {
                     "row_count":   row_count,
                     "start_index": start_index,
-                    # Explicitly request timestamp fields — SDP v3 omits them
-                    # from bulk list responses unless asked.
                     "fields_required": [
-                        "id",
-                        "display_id",
-                        "subject",
-                        "status",
-                        "priority",
-                        "category",
-                        "technician",
-                        "sla",
-                        "created_time",
-                        "completed_time",
-                        "due_by_time",
-                        "first_response_due_by_time",
-                        "is_overdue"
+                        "id", "display_id", "subject", "status",
+                        "priority", "category", "technician", "sla",
+                        "created_time", "completed_time", "due_by_time",
+                        "first_response_due_by_time", "is_overdue"
                     ],
                     "search_criteria": [
-                        {"field": "technician.email_id", "condition": "is", "values": [tech_email]},
-                        {"field": "completed_time", "condition": "between", "logical_operator": "AND", "values": [start_ms, end_ms]},
-                        {"field": "status.name", "condition": "is", "logical_operator": "AND", "values": ["Closed"]}
+                        {
+                            "field": "technician.email_id",
+                            "condition": "is",
+                            "values": [tech_email]
+                        },
+                        {
+                            "field": "completed_time",
+                            "condition": "between",
+                            "logical_operator": "AND",
+                            "values": [start_ms, end_ms]
+                        },
+                        {
+                            "field": "status.name",
+                            "condition": "is",
+                            "logical_operator": "AND",
+                            "values": ["Closed"]
+                        }
                     ]
                 }
             }
 
             page_tickets = []
-            success      = False
+            success = False
 
             for attempt in range(3):
                 try:
@@ -504,7 +507,7 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                         params={'input_data': json.dumps(list_info)},
                         timeout=30
                     )
-                   if resp.status_code == 200:
+                    if resp.status_code == 200:
                         data = resp.json()
                         page_tickets = data.get('requests', data.get('archive_requests', []))
                         success = True
@@ -517,7 +520,10 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                         logger.warning(f"Rate-limited. Waiting {wait}s...")
                         time.sleep(wait)
                     else:
-                        logger.warning(f"API error {resp.status_code} [{endpoint.split('/')[-1]}]: {resp.text[:200]}")
+                        logger.warning(
+                            f"API error {resp.status_code} "
+                            f"[{endpoint.split('/')[-1]}]: {resp.text[:200]}"
+                        )
                         if attempt < 2:
                             time.sleep(2)
                 except Exception as ex:
