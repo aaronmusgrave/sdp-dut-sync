@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.3 - INCREMENTAL ROW UPSERT
+Performance Data Backfill Script v19.5.4 - TABLE ID CACHE + TIMEOUT FIX
 Upserts only new/changed rows using the Dust rows endpoint.
 Historical data is never re-uploaded — scale stays constant regardless of history size.
 
-v19.5.3 Changes (from v19.5.2):
-- REPLACED: upload_csv_document() + load_existing_csv() removed entirely
-- NEW: upsert_rows() — uses POST /tables/{id}/rows for incremental upsert
-- NEW: ensure_table_exists() — creates table metadata on first run, no-op after
-- FIXED: discover_technicians() falls back to request scan on 401 (no admin scope needed)
-- FIXED: Dust API requires json= body with 'title' field (not multipart)
-- Main loop now upserts per-date immediately after processing
+v19.5.4 Changes (from v19.5.3):
+- FIX: _get_existing_table_id() now caches result in _TABLE_ID_CACHE module variable
+  Eliminates redundant API calls (was 2x per date, now 1x per full run)
+- FIX: Request scan timeout increased from 30s to 60s in discover_technicians()
+  Prevents timeout on large Closed/Resolved ticket queries during technician discovery
 """
 
 import os
@@ -322,7 +320,7 @@ def discover_technicians(sdp_token, graph_token):
                     f"{SDP_API_BASE}/requests",
                     headers=headers,
                     params={'input_data': json.dumps(list_info)},
-                    timeout=30
+                    timeout=60  # FIX v19.5.4: increased from 30s to handle large result sets
                 )
             except Exception as e:
                 logger.warning(f"Request scan failed ({status_filter}): {e}")
@@ -830,10 +828,18 @@ def _build_table_rows(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust table helpers (v19.5.3)
+# Dust table helpers (v19.5.4)
 # ─────────────────────────────────────────────
 
+# FIX v19.5.4: Module-level cache — table ID resolved once per run
+_TABLE_ID_CACHE = None
+
+
 def _get_existing_table_id():
+    global _TABLE_ID_CACHE
+    if _TABLE_ID_CACHE:
+        return _TABLE_ID_CACHE
+
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         return DUST_TABLE_ID
 
@@ -854,14 +860,16 @@ def _get_existing_table_id():
                     tid = t.get('table_id') or t.get('tableId')
                     if tid:
                         logger.info(f"Discovered table: name=tech_performance, table_id={tid}")
-                        return tid
+                        _TABLE_ID_CACHE = tid
+                        return _TABLE_ID_CACHE
         else:
             logger.warning(f"Could not list tables: {resp.status_code} {resp.text[:200]}")
     except Exception as ex:
         logger.warning(f"Table discovery exception: {ex}")
 
     logger.info(f"No existing table found — using fallback DUST_TABLE_ID={DUST_TABLE_ID}")
-    return DUST_TABLE_ID
+    _TABLE_ID_CACHE = DUST_TABLE_ID
+    return _TABLE_ID_CACHE
 
 
 def ensure_table_exists():
@@ -1075,7 +1083,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.3 — incremental row upsert'
+        description='Performance backfill v19.5.4 — incremental row upsert + table ID cache + timeout fix'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1085,7 +1093,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.3")
+    print("  PERFORMANCE DATA BACKFILL v19.5.4")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental row upsert)")
     print("=" * 130)
 
