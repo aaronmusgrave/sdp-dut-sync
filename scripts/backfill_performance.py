@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.9
+Performance Data Backfill Script v19.5.10
 Upserts only new/changed rows using the Dust rows endpoint.
-Historical data is never re-uploaded.
 
-v19.5.9 fixes:
-- SyntaxError / IndentationError in fetch_pages() now resolved
-- Archive response key: data.get('requests', data.get('archive_requests', []))
-- fields_required forces SDP to return timestamp fields (fixes AvgRes N/A)
-- SLA calc from completed_time > due_by_time (not is_overdue)
+v19.5.10 fixes:
+- FIX: Archive response nested structure — /archive_requests can return
+  {"archive_requests": {"requests": [...], "total_count": N}} (nested dict)
+  OR {"archive_requests": [...]} (flat list). Both now handled correctly.
+  Fixes: 'str' object has no attribute 'get' on archived ticket processing.
 """
 
 import os
@@ -369,6 +368,21 @@ def _resolution_minutes(created_ms, completed_ms):
         return None
 
 
+def _parse_ticket_list(data):
+    """
+    FIX v19.5.10: Parse ticket list from SDP response, handling all formats:
+      Active:  {"requests": [...]}
+      Archive: {"archive_requests": [...]}          (flat list)
+      Archive: {"archive_requests": {"requests": [...], "total_count": N}}  (nested dict)
+    """
+    raw = data.get('requests') or data.get('archive_requests') or []
+    if isinstance(raw, dict):
+        return raw.get('requests', [])
+    if isinstance(raw, list):
+        return raw
+    return []
+
+
 def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     if not tech_email:
         return []
@@ -437,17 +451,9 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                         timeout=30
                     )
                     if resp.status_code == 200:
-    data = resp.json()
-    # Active endpoint:  {"requests": [...]}
-    # Archive endpoint: {"archive_requests": [...]}
-    #                OR {"archive_requests": {"requests": [...], "total_count": N}}
-    raw = data.get('requests') or data.get('archive_requests') or []
-    if isinstance(raw, dict):
-        page_tickets = raw.get('requests', [])
-    else:
-        page_tickets = raw if isinstance(raw, list) else []
-    success = True
-    break
+                        page_tickets = _parse_ticket_list(resp.json())
+                        success = True
+                        break
                     elif resp.status_code == 404:
                         logger.debug(f"Archive endpoint not available: {endpoint}")
                         return results
@@ -478,6 +484,9 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     seen_ids = set()
     all_tickets = []
     for t in active_tickets + archived_tickets:
+        if not isinstance(t, dict):
+            logger.warning(f"Skipping non-dict ticket entry: {type(t)} {str(t)[:80]}")
+            continue
         internal_id = str(t.get('id', ''))
         display_id  = str(t.get('display_id', '') or t.get('displayId', '') or internal_id)
         if not internal_id or internal_id in seen_ids:
@@ -957,7 +966,7 @@ def process_single_date(target_date, technicians):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Performance backfill v19.5.9')
+    parser = argparse.ArgumentParser(description='Performance backfill v19.5.10')
     parser.add_argument('--days',       type=int,            help='Number of days to backfill')
     parser.add_argument('--start-date', type=str,            help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date',   type=str,            help='End date (YYYY-MM-DD)')
@@ -966,7 +975,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.9")
+    print("  PERFORMANCE DATA BACKFILL v19.5.10")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental upsert)")
     print("=" * 130)
 
