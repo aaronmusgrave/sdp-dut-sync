@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.2 - MULTIPART UPLOAD + FULL PAGINATION
-Discovers the existing tech_performance table by name on each run,
-then upserts in place using the actual ID. No DELETE step — safe for
-UI-created GCS-backed tables. DUST_TABLE_ID is just a first-run fallback.
+Performance Data Backfill Script v19.5.3 - INCREMENTAL ROW UPSERT
+Upserts only new/changed rows using the Dust rows endpoint.
+Historical data is never re-uploaded — scale stays constant regardless of history size.
 
-v19.5.2 Changes (from v19.5.1):
-- FIX: upload_csv_document() now uses multipart/form-data (not JSON body)
-  Previous JSON embed of 'csv' field was silently rejected by Dust API
-- FIX: load_existing_csv() now fully paginates (offset loop, limit=500/page)
-  Previous hard cap of 1000 rows caused data loss on large tables
-- FIX: discover_technicians() now queries /technicians endpoint directly
-  instead of deriving from open tickets — prevents missing techs with clear queues
-- IMPROVED: upload failure now logs full response body for easier diagnosis
-- IMPROVED: load_existing_csv() returns partial results on mid-pagination error
-  instead of returning empty dict and losing all loaded rows
+v19.5.3 Changes (from v19.5.2):
+- REPLACED: upload_csv_document() + load_existing_csv() removed entirely
+- NEW: upsert_rows() — uses POST /tables/{id}/rows for incremental upsert
+- NEW: ensure_table_exists() — creates table metadata on first run, no-op after
+- FIXED: discover_technicians() falls back to request scan on 401 (no admin scope needed)
+- FIXED: Dust API requires json= body with 'title' field (not multipart)
+- Main loop now upserts per-date immediately after processing
 """
 
 import os
@@ -35,7 +31,6 @@ WORK_HOURS_PER_DAY = 8
 PARALLEL_TECHNICIANS = 8
 EMAIL_DOMAIN = 'motorad.com'
 PROGRESS_FILE = 'backfill_progress.json'
-CSV_DOCUMENT_ID = 'tech_performance.csv'
 
 # Token cache
 TOKEN_CACHE = {
@@ -226,9 +221,29 @@ def get_azure_profile(email, graph_token):
 
 
 # ─────────────────────────────────────────────
+# Technician helpers
+# ─────────────────────────────────────────────
+
+def _build_tech_profile(email, az):
+    return {
+        'email':           email,
+        'job_title':       az.get('job_title')       if az else None,
+        'department':      az.get('department')      if az else None,
+        'office_location': az.get('office_location') if az else None,
+        'city':            az.get('city')            if az else None,
+        'state':           az.get('state')           if az else None,
+        'country':         az.get('country')         if az else None,
+        'manager_name':    az.get('manager_name')    if az else None,
+        'manager_email':   az.get('manager_email')   if az else None,
+        'account_enabled': az.get('account_enabled') if az else None,
+        'display_name':    az.get('display_name')    if az else None,
+        'company_name':    az.get('company_name')    if az else None,
+        'account_created': az.get('account_created') if az else None,
+    }
+
+
+# ─────────────────────────────────────────────
 # Technician discovery
-# FIX v19.5.2: Query /technicians endpoint directly instead of deriving
-# from open tickets. Prevents missing techs who have cleared their queue.
 # ─────────────────────────────────────────────
 
 def discover_technicians(sdp_token, graph_token):
@@ -239,19 +254,14 @@ def discover_technicians(sdp_token, graph_token):
 
     technicians = {}
 
-    # ── Attempt 1: /technicians endpoint (requires admin scope) ──
+    # Attempt 1: /technicians endpoint (requires admin scope)
     logger.info("Attempting technician discovery via /technicians endpoint...")
     tech_endpoint_ok = False
     start_index = 1
     row_count   = 100
 
     while True:
-        list_info = {
-            "list_info": {
-                "row_count":   row_count,
-                "start_index": start_index
-            }
-        }
+        list_info = {"list_info": {"row_count": row_count, "start_index": start_index}}
         try:
             resp = requests.get(
                 f"{SDP_API_BASE}/technicians",
@@ -293,22 +303,13 @@ def discover_technicians(sdp_token, graph_token):
         logger.info(f"✓ Discovered {len(technicians)} technicians via /technicians endpoint")
         return technicians
 
-    # ── Attempt 2: Scan /requests for all statuses ──────────────
+    # Attempt 2: Scan /requests for all statuses
     logger.info("Falling back to request scan for technician discovery...")
 
-    scan_statuses = [
-        None,          # no status filter = all open/active
-        "Closed",
-        "Resolved",
-    ]
-
-    for status_filter in scan_statuses:
+    for status_filter in [None, "Closed", "Resolved"]:
         start_index = 1
         while True:
-            criteria = []
-            if status_filter:
-                criteria = [{"field": "status.name", "condition": "is", "values": [status_filter]}]
-
+            criteria = [{"field": "status.name", "condition": "is", "values": [status_filter]}] if status_filter else []
             list_info = {
                 "list_info": {
                     "row_count":   100,
@@ -348,25 +349,6 @@ def discover_technicians(sdp_token, graph_token):
 
     logger.info(f"✓ Discovered {len(technicians)} technicians via request scan")
     return technicians
-
-
-def _build_tech_profile(email, az):
-    """Helper — build a technician profile dict from an Azure AD result."""
-    return {
-        'email':           email,
-        'job_title':       az.get('job_title')       if az else None,
-        'department':      az.get('department')      if az else None,
-        'office_location': az.get('office_location') if az else None,
-        'city':            az.get('city')            if az else None,
-        'state':           az.get('state')           if az else None,
-        'country':         az.get('country')         if az else None,
-        'manager_name':    az.get('manager_name')    if az else None,
-        'manager_email':   az.get('manager_email')   if az else None,
-        'account_enabled': az.get('account_enabled') if az else None,
-        'display_name':    az.get('display_name')    if az else None,
-        'company_name':    az.get('company_name')    if az else None,
-        'account_created': az.get('account_created') if az else None,
-    }
 
 
 # ─────────────────────────────────────────────
@@ -467,23 +449,9 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                     "row_count":   row_count,
                     "start_index": start_index,
                     "search_criteria": [
-                        {
-                            "field":     "technician.email_id",
-                            "condition": "is",
-                            "values":    [tech_email]
-                        },
-                        {
-                            "field":            "completed_time",
-                            "condition":        "between",
-                            "logical_operator": "AND",
-                            "values":           [start_ms, end_ms]
-                        },
-                        {
-                            "field":            "status.name",
-                            "condition":        "is",
-                            "logical_operator": "AND",
-                            "values":           ["Closed"]
-                        }
+                        {"field": "technician.email_id", "condition": "is", "values": [tech_email]},
+                        {"field": "completed_time", "condition": "between", "logical_operator": "AND", "values": [start_ms, end_ms]},
+                        {"field": "status.name", "condition": "is", "logical_operator": "AND", "values": ["Closed"]}
                     ]
                 }
             }
@@ -862,27 +830,10 @@ def _build_table_rows(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust table helpers  (v19.5.2)
+# Dust table helpers (v19.5.3)
 # ─────────────────────────────────────────────
 
-CSV_FIELDNAMES = [
-    'row_id', 'technician', 'tech_slug', 'email', 'display_name',
-    'job_title', 'department', 'office_location', 'city', 'state', 'country',
-    'manager_name', 'manager_email', 'company_name',
-    'date', 'month', 'meeting_count', 'meeting_hours', 'meeting_percentage',
-    'available_hours', 'daily_sla_met_pct', 'daily_avg_resolution_minutes',
-    'role', 'expected_tickets', 'daily_closed_count', 'weighted_score',
-    'performance_rating', 'ticket_id', 'subject', 'priority', 'category',
-    'sla_name', 'sla_violated', 'created_time_iso', 'completed_time_iso',
-    'due_by_time_iso', 'first_response_due_iso', 'resolution_minutes'
-]
-
-
 def _get_existing_table_id():
-    """
-    Look up the current tech_performance table ID by name.
-    Returns the discovered table_id, or DUST_TABLE_ID as fallback.
-    """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         return DUST_TABLE_ID
 
@@ -913,14 +864,13 @@ def _get_existing_table_id():
     return DUST_TABLE_ID
 
 
-def load_existing_csv():
+def ensure_table_exists():
     """
-    FIX v19.5.2: Load ALL existing rows from the discovered table (fully paginated).
-    Previous version hard-capped at 1000 rows, causing data loss on large tables.
-    Returns a dict keyed by row_id for merging.
+    Create the tech_performance table metadata if it doesn't exist yet.
+    Safe to call every run — no-ops if already present.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
-        return {}
+        return
 
     table_id = _get_existing_table_id()
     base_url = (
@@ -928,142 +878,95 @@ def load_existing_csv():
         "/spaces/" + DUST_SPACE_ID +
         "/data_sources/" + DUST_DS_ID
     )
+    try:
+        resp = requests.post(
+            base_url + "/tables",
+            headers={'Authorization': 'Bearer ' + DUST_API_KEY},
+            json={
+                "table_id":    table_id,
+                "name":        "tech_performance",
+                "title":       "tech_performance",
+                "description": (
+                    "Technician performance data — daily closed tickets, "
+                    "SLA compliance, resolution times, and meeting load per technician."
+                ),
+                "timestamp":   int(time.time() * 1000),
+            },
+            timeout=30
+        )
+        if resp.status_code in [200, 201]:
+            logger.info(f"✓ Table ready (table_id={table_id})")
+        else:
+            logger.warning(f"Table ensure failed: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"ensure_table_exists exception: {e}")
 
-    existing = {}
-    offset   = 0
-    limit    = 500
 
-    while True:
-        try:
-            resp = requests.get(
-                base_url + f"/tables/{table_id}/rows?limit={limit}&offset={offset}",
-                headers={'Authorization': 'Bearer ' + DUST_API_KEY},
-                timeout=60
-            )
-
-            if resp.status_code == 404:
-                logger.info("No existing table found — starting fresh.")
-                return {}
-
-            if resp.status_code != 200:
-                logger.warning(
-                    f"Could not load existing rows (offset={offset}): "
-                    f"{resp.status_code} {resp.text[:200]}"
-                )
-                return existing
-
-            rows = resp.json().get('rows', [])
-
-            for row in rows:
-                rid = row.get('row_id', '')
-                if rid:
-                    existing[rid] = row.get('value', {})
-                    existing[rid]['row_id'] = rid
-
-            logger.info(f"  Loaded rows {offset + 1}–{offset + len(rows)} (table_id={table_id})")
-
-            if len(rows) < limit:
-                break
-
-            offset += limit
-
-        except Exception as e:
-            logger.warning(f"Error loading existing rows at offset {offset}: {e}")
-            break
-
-    logger.info(f"✓ Total existing rows loaded: {len(existing)} (table_id={table_id})")
-    return existing
-
-def upload_csv_document(row_dict):
+def upsert_rows(rows):
     """
-    v19.5.3: Reverted to JSON body. Dust API requires application/json with
-    'csv' as a string field. Multipart caused 400 "Expected object, received string".
-
-    Changes from v19.5.2:
-    - Removed files= / data= (multipart). Back to json= parameter.
-    - Removed manual Content-Type header (requests sets it automatically via json=).
-    - Removed unsupported 'title' field.
-    - Added 'truncate': False explicitly.
+    Incrementally upsert rows into the Dust table using the rows endpoint.
+    Only the provided rows are affected — all other historical rows untouched.
+    Batches at 500 rows per request.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
-        logger.warning("Dust env vars incomplete — skipping CSV upload.")
-        return
+        logger.warning("Dust env vars incomplete — skipping row upsert.")
+        return False
 
-    if not row_dict:
-        logger.warning("No rows to upload.")
-        return
+    if not rows:
+        logger.warning("No rows to upsert.")
+        return True
 
-    rows = list(row_dict.values())
-
-    output = io.StringIO()
-    writer = csv.DictWriter(
-        output,
-        fieldnames=CSV_FIELDNAMES,
-        extrasaction='ignore',
-        lineterminator='\n'
-    )
-    writer.writeheader()
-    writer.writerows(rows)
-    csv_content = output.getvalue()
-    csv_bytes   = len(csv_content.encode('utf-8'))
-    resolved_id = _get_existing_table_id()
-
-    logger.info(
-        f"Uploading CSV: {len(rows)} rows, "
-        f"{csv_bytes / 1024 / 1024:.2f} MB | table_id={resolved_id}"
-    )
-
-    base_url = (
+    table_id = _get_existing_table_id()
+    url = (
         "https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
         "/spaces/" + DUST_SPACE_ID +
-        "/data_sources/" + DUST_DS_ID
+        "/data_sources/" + DUST_DS_ID +
+        "/tables/" + table_id + "/rows"
     )
 
-    for attempt in range(3):
-        try:
-            resp = requests.post(
-                base_url + "/tables",
-                headers={'Authorization': 'Bearer ' + DUST_API_KEY},
-                json={
-                    "table_id":    resolved_id,
-                    "name":        "tech_performance",
-                    "title":        "tecj_performance",
-                    "description": (
-                        "Technician performance data — daily closed tickets, "
-                        "SLA compliance, resolution times, and meeting load per technician."
-                    ),
-                    "timestamp":   int(time.time() * 1000),
-                    "truncate":    False,
-                    "csv":         csv_content
-                },
-                timeout=120
-            )
+    api_rows      = [{"row_id": r["row_id"], "value": r["value"]} for r in rows]
+    batch_size    = 500
+    total_batches = (len(api_rows) + batch_size - 1) // batch_size
 
-            if resp.status_code in [200, 201]:
-                logger.info(
-                    f"✓ Table upserted in Dust — {len(rows)} total rows "
-                    f"(table_id={resolved_id})"
+    for batch_num, i in enumerate(range(0, len(api_rows), batch_size), 1):
+        batch = api_rows[i:i + batch_size]
+
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    url,
+                    headers={'Authorization': 'Bearer ' + DUST_API_KEY},
+                    json={"rows": batch, "truncate": False},
+                    timeout=120
                 )
-                return
-            elif resp.status_code == 429:
-                wait = 2 ** attempt * 15
-                logger.warning(f"Rate-limited. Waiting {wait}s... (attempt {attempt + 1}/3)")
-                time.sleep(wait)
-            else:
-                logger.warning(
-                    f"Upload failed (attempt {attempt + 1}/3): "
-                    f"{resp.status_code} — {resp.text[:400]}"
-                )
+                if resp.status_code in [200, 201]:
+                    logger.info(
+                        f"✓ Upserted batch {batch_num}/{total_batches} "
+                        f"({len(batch)} rows) → table_id={table_id}"
+                    )
+                    break
+                elif resp.status_code == 429:
+                    wait = 2 ** attempt * 15
+                    logger.warning(f"Rate-limited. Waiting {wait}s... (attempt {attempt + 1}/3)")
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        f"Upsert failed batch {batch_num} (attempt {attempt + 1}/3): "
+                        f"{resp.status_code} — {resp.text[:400]}"
+                    )
+                    if attempt < 2:
+                        time.sleep(5)
+                    else:
+                        return False
+            except Exception as ex:
+                logger.warning(f"Upsert exception batch {batch_num} (attempt {attempt + 1}/3): {ex}")
                 if attempt < 2:
                     time.sleep(5)
+                else:
+                    return False
 
-        except Exception as ex:
-            logger.warning(f"Upload exception (attempt {attempt + 1}/3): {ex}")
-            if attempt < 2:
-                time.sleep(5)
-
-    logger.error("Upload failed after all retries. Table was NOT updated.")
-
+    logger.info(f"✓ Total upserted: {len(api_rows)} rows (table_id={table_id})")
+    return True
 
 
 # ─────────────────────────────────────────────
@@ -1172,18 +1075,18 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.2 — multipart upload + full pagination'
+        description='Performance backfill v19.5.3 — incremental row upsert'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date',   type=str, help='End date (YYYY-MM-DD)')
     parser.add_argument('--force',      action='store_true', help='Re-process all dates')
-    parser.add_argument('--skip-csv',   action='store_true', help='Skip CSV upload (for testing)')
+    parser.add_argument('--skip-csv',   action='store_true', help='Skip Dust upload (for testing)')
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.2")
-    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (multipart upload + full pagination)")
+    print("  PERFORMANCE DATA BACKFILL v19.5.3")
+    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental row upsert)")
     print("=" * 130)
 
     logger.info(f"Dust env — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
@@ -1258,13 +1161,9 @@ def main():
             print("Cancelled.")
             return
 
+    # Ensure table exists before upserting rows
     if not args.skip_csv:
-        logger.info("Loading existing rows from Dust...")
-        csv_row_dict = load_existing_csv()
-        logger.info(f"Existing rows loaded: {len(csv_row_dict)}")
-    else:
-        logger.warning("--skip-csv flag is set — skipping CSV upload.")
-        csv_row_dict = {}
+        ensure_table_exists()
 
     start_wall = time.time()
 
@@ -1273,11 +1172,12 @@ def main():
             new_rows = process_single_date(date, technicians)
 
             if not args.skip_csv:
-                for row in new_rows:
-                    csv_row_dict[row['row_id']] = {
-                        'row_id': row['row_id'],
-                        **row['value']
-                    }
+                success = upsert_rows(new_rows)
+                if not success:
+                    logger.error(f"Row upsert failed for {date.strftime('%Y-%m-%d')} — marking as failed")
+                    progress['failed'].append(date.strftime('%Y-%m-%d'))
+                    save_progress(progress)
+                    continue
 
             progress['completed'].append(date.strftime('%Y-%m-%d'))
             save_progress(progress)
@@ -1297,15 +1197,6 @@ def main():
             time.sleep(2)
 
     total_time = time.time() - start_wall
-
-    logger.info(f"csv_row_dict size before upload: {len(csv_row_dict)} rows")
-    if not args.skip_csv and csv_row_dict:
-        logger.info(f"Uploading merged CSV ({len(csv_row_dict)} total rows)...")
-        upload_csv_document(csv_row_dict)
-    elif args.skip_csv:
-        logger.warning("CSV upload skipped — --skip-csv flag is set.")
-    elif not csv_row_dict:
-        logger.warning("csv_row_dict is empty — skipping upload.")
 
     print()
     print("=" * 130)
