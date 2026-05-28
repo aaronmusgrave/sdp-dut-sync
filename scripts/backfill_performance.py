@@ -437,10 +437,17 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                         timeout=30
                     )
                     if resp.status_code == 200:
-                        data = resp.json()
-                        page_tickets = data.get('requests', data.get('archive_requests', []))
-                        success = True
-                        break
+    data = resp.json()
+    # Active endpoint:  {"requests": [...]}
+    # Archive endpoint: {"archive_requests": [...]}
+    #                OR {"archive_requests": {"requests": [...], "total_count": N}}
+    raw = data.get('requests') or data.get('archive_requests') or []
+    if isinstance(raw, dict):
+        page_tickets = raw.get('requests', [])
+    else:
+        page_tickets = raw if isinstance(raw, list) else []
+    success = True
+    break
                     elif resp.status_code == 404:
                         logger.debug(f"Archive endpoint not available: {endpoint}")
                         return results
