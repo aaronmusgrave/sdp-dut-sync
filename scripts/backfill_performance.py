@@ -504,9 +504,9 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                         params={'input_data': json.dumps(list_info)},
                         timeout=30
                     )
-                    if resp.status_code == 200:
-                      data = resp.json()  
-                      page_tickets = data.get('requests', data.get('archive_requests',[]))
+                   if resp.status_code == 200:
+                        data = resp.json()
+                        page_tickets = data.get('requests', data.get('archive_requests', []))
                         success = True
                         break
                     elif resp.status_code == 404:
