@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.1 - SMART TABLE ID DISCOVERY
+Performance Data Backfill Script v19.5.2 - MULTIPART UPLOAD + FULL PAGINATION
 Discovers the existing tech_performance table by name on each run,
 then upserts in place using the actual ID. No DELETE step — safe for
 UI-created GCS-backed tables. DUST_TABLE_ID is just a first-run fallback.
 
-v19.5.1 Changes (from v19.5.0):
-- NEW: _get_existing_table_id() discovers real table ID by name lookup
-- UPDATED: load_existing_csv() uses discovered ID
-- UPDATED: upload_csv_document() uses discovered ID, no DELETE
-- DUST_TABLE_ID = fallback only (doesn't need to be the exact internal ID)
+v19.5.2 Changes (from v19.5.1):
+- FIX: upload_csv_document() now uses multipart/form-data (not JSON body)
+  Previous JSON embed of 'csv' field was silently rejected by Dust API
+- FIX: load_existing_csv() now fully paginates (offset loop, limit=500/page)
+  Previous hard cap of 1000 rows caused data loss on large tables
+- FIX: discover_technicians() now queries /technicians endpoint directly
+  instead of deriving from open tickets — prevents missing techs with clear queues
+- IMPROVED: upload failure now logs full response body for easier diagnosis
+- IMPROVED: load_existing_csv() returns partial results on mid-pagination error
+  instead of returning empty dict and losing all loaded rows
 """
 
 import os
@@ -222,6 +227,8 @@ def get_azure_profile(email, graph_token):
 
 # ─────────────────────────────────────────────
 # Technician discovery
+# FIX v19.5.2: Query /technicians endpoint directly instead of deriving
+# from open tickets. Prevents missing techs who have cleared their queue.
 # ─────────────────────────────────────────────
 
 def discover_technicians(sdp_token, graph_token):
@@ -229,46 +236,66 @@ def discover_technicians(sdp_token, graph_token):
         'Authorization': f'Zoho-oauthtoken {sdp_token}',
         'Accept': 'application/vnd.manageengine.sdp.v3+json'
     }
-    list_info = {
-        "list_info": {
-            "row_count": 100,
-            "start_index": 1,
-            "search_criteria": [
-                {"field": "status.name", "condition": "is not", "values": ["Closed", "Cancelled"]}
-            ]
-        }
-    }
 
     technicians = {}
-    resp = requests.get(
-        f"{SDP_API_BASE}/requests",
-        headers=headers,
-        params={'input_data': json.dumps(list_info)},
-        timeout=30
-    )
-    if resp.status_code == 200:
-        for ticket in resp.json().get('requests', []):
-            tech = ticket.get('technician')
-            if tech and isinstance(tech, dict):
-                name  = tech.get('name')
-                email = tech.get('email_id')
-                if name and name != 'Unassigned' and name not in technicians:
-                    az = get_azure_profile(email, graph_token)
-                    technicians[name] = {
-                        'email':           email,
-                        'job_title':       az.get('job_title')       if az else None,
-                        'department':      az.get('department')      if az else None,
-                        'office_location': az.get('office_location') if az else None,
-                        'city':            az.get('city')            if az else None,
-                        'state':           az.get('state')           if az else None,
-                        'country':         az.get('country')         if az else None,
-                        'manager_name':    az.get('manager_name')    if az else None,
-                        'manager_email':   az.get('manager_email')   if az else None,
-                        'account_enabled': az.get('account_enabled') if az else None,
-                        'display_name':    az.get('display_name')    if az else None,
-                        'company_name':    az.get('company_name')    if az else None,
-                        'account_created': az.get('account_created') if az else None,
-                    }
+    start_index = 1
+    row_count   = 100
+
+    while True:
+        list_info = {
+            "list_info": {
+                "row_count":   row_count,
+                "start_index": start_index
+            }
+        }
+
+        try:
+            resp = requests.get(
+                f"{SDP_API_BASE}/technicians",
+                headers=headers,
+                params={'input_data': json.dumps(list_info)},
+                timeout=30
+            )
+        except Exception as e:
+            logger.warning(f"Technician API request failed: {e}")
+            break
+
+        if resp.status_code != 200:
+            logger.warning(f"Technician list failed: {resp.status_code} {resp.text[:200]}")
+            break
+
+        page_techs = resp.json().get('technicians', [])
+
+        for tech in page_techs:
+            name  = tech.get('name')
+            email = tech.get('email_id')
+
+            if not name or name == 'Unassigned' or name in technicians:
+                continue
+
+            az = get_azure_profile(email, graph_token)
+            technicians[name] = {
+                'email':           email,
+                'job_title':       az.get('job_title')       if az else None,
+                'department':      az.get('department')      if az else None,
+                'office_location': az.get('office_location') if az else None,
+                'city':            az.get('city')            if az else None,
+                'state':           az.get('state')           if az else None,
+                'country':         az.get('country')         if az else None,
+                'manager_name':    az.get('manager_name')    if az else None,
+                'manager_email':   az.get('manager_email')   if az else None,
+                'account_enabled': az.get('account_enabled') if az else None,
+                'display_name':    az.get('display_name')    if az else None,
+                'company_name':    az.get('company_name')    if az else None,
+                'account_created': az.get('account_created') if az else None,
+            }
+
+        if len(page_techs) < row_count:
+            break
+
+        start_index += row_count
+
+    logger.info(f"Discovered {len(technicians)} technicians via /technicians endpoint")
     return technicians
 
 
@@ -765,7 +792,7 @@ def _build_table_rows(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust table helpers  (v19.5.1)
+# Dust table helpers  (v19.5.2)
 # ─────────────────────────────────────────────
 
 CSV_FIELDNAMES = [
@@ -808,7 +835,7 @@ def _get_existing_table_id():
                         logger.info(f"Discovered table: name=tech_performance, table_id={tid}")
                         return tid
         else:
-            logger.warning(f"Could not list tables: {resp.status_code}")
+            logger.warning(f"Could not list tables: {resp.status_code} {resp.text[:200]}")
     except Exception as ex:
         logger.warning(f"Table discovery exception: {ex}")
 
@@ -818,7 +845,8 @@ def _get_existing_table_id():
 
 def load_existing_csv():
     """
-    Load existing rows from the discovered table.
+    FIX v19.5.2: Load ALL existing rows from the discovered table (fully paginated).
+    Previous version hard-capped at 1000 rows, causing data loss on large tables.
     Returns a dict keyed by row_id for merging.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
@@ -830,39 +858,63 @@ def load_existing_csv():
         "/spaces/" + DUST_SPACE_ID +
         "/data_sources/" + DUST_DS_ID
     )
-    try:
-        resp = requests.get(
-            base_url + "/tables/" + table_id + "/rows?limit=1000",
-            headers={'Authorization': 'Bearer ' + DUST_API_KEY},
-            timeout=60
-        )
-        if resp.status_code == 404:
-            logger.info("No existing rows — starting fresh.")
-            return {}
-        if resp.status_code != 200:
-            logger.warning(f"Could not load existing rows: {resp.status_code}")
-            return {}
 
-        rows = resp.json().get('rows', [])
-        existing = {}
-        for row in rows:
-            rid = row.get('row_id', '')
-            if rid:
-                existing[rid] = row.get('value', {})
-                existing[rid]['row_id'] = rid
-        logger.info(f"Loaded {len(existing)} existing rows (table_id={table_id})")
-        return existing
+    existing = {}
+    offset   = 0
+    limit    = 500
 
-    except Exception as e:
-        logger.warning(f"Error loading existing rows: {e}")
-        return {}
+    while True:
+        try:
+            resp = requests.get(
+                base_url + f"/tables/{table_id}/rows?limit={limit}&offset={offset}",
+                headers={'Authorization': 'Bearer ' + DUST_API_KEY},
+                timeout=60
+            )
+
+            if resp.status_code == 404:
+                logger.info("No existing table found — starting fresh.")
+                return {}
+
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Could not load existing rows (offset={offset}): "
+                    f"{resp.status_code} {resp.text[:200]}"
+                )
+                return existing
+
+            rows = resp.json().get('rows', [])
+
+            for row in rows:
+                rid = row.get('row_id', '')
+                if rid:
+                    existing[rid] = row.get('value', {})
+                    existing[rid]['row_id'] = rid
+
+            logger.info(f"  Loaded rows {offset + 1}–{offset + len(rows)} (table_id={table_id})")
+
+            if len(rows) < limit:
+                break
+
+            offset += limit
+
+        except Exception as e:
+            logger.warning(f"Error loading existing rows at offset {offset}: {e}")
+            break
+
+    logger.info(f"✓ Total existing rows loaded: {len(existing)} (table_id={table_id})")
+    return existing
 
 
 def upload_csv_document(row_dict):
     """
-    Discover the existing tech_performance table by name and upsert
-    in place using its actual ID. No DELETE — safe for UI-created tables.
-    Falls back to DUST_TABLE_ID if no table found.
+    FIX v19.5.2: Upload CSV using multipart/form-data instead of JSON body.
+    Previous version embedded 'csv' as a JSON string field which is not
+    supported by the Dust API — this caused silent empty-table creation.
+
+    IMPORTANT: Do NOT set Content-Type header manually. The requests library
+    sets it automatically to multipart/form-data with the correct boundary
+    when the files= parameter is used. Setting it manually will break the
+    boundary and cause a 400 error.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
@@ -885,19 +937,22 @@ def upload_csv_document(row_dict):
     writer.writerows(rows)
     csv_content = output.getvalue()
     csv_bytes   = len(csv_content.encode('utf-8'))
-
     resolved_id = _get_existing_table_id()
 
-    logger.info(f"Uploading CSV: {len(rows)} rows, {csv_bytes / 1024 / 1024:.2f} MB | table_id={resolved_id}")
+    logger.info(
+        f"Uploading CSV: {len(rows)} rows, "
+        f"{csv_bytes / 1024 / 1024:.2f} MB | table_id={resolved_id}"
+    )
 
     base_url = (
         "https://dust.tt/api/v1/w/" + DUST_WORKSPACE_ID +
         "/spaces/" + DUST_SPACE_ID +
         "/data_sources/" + DUST_DS_ID
     )
+
+    # Authorization only — do NOT set Content-Type manually
     auth_headers = {
-        'Authorization': 'Bearer ' + DUST_API_KEY,
-        'Content-Type':  'application/json'
+        'Authorization': 'Bearer ' + DUST_API_KEY
     }
 
     for attempt in range(3):
@@ -905,33 +960,50 @@ def upload_csv_document(row_dict):
             resp = requests.post(
                 base_url + "/tables",
                 headers=auth_headers,
-                json={
+                data={
                     "table_id":    resolved_id,
                     "name":        "tech_performance",
                     "title":       "tech_performance",
-                    "description": "Technician performance data — daily closed tickets, SLA compliance, resolution times, and meeting load per technician.",
-                    "timestamp":   int(time.time() * 1000),
-                    "csv":         csv_content
+                    "description": (
+                        "Technician performance data — daily closed tickets, "
+                        "SLA compliance, resolution times, and meeting load per technician."
+                    ),
+                    "timestamp":   str(int(time.time() * 1000)),
+                },
+                files={
+                    "file": (
+                        "tech_performance.csv",
+                        csv_content.encode("utf-8"),
+                        "text/csv"
+                    )
                 },
                 timeout=120
             )
+
             if resp.status_code in [200, 201]:
-                logger.info(f"✓ Table upserted in Dust — {len(rows)} total rows (table_id={resolved_id})")
+                logger.info(
+                    f"✓ Table upserted in Dust — {len(rows)} total rows "
+                    f"(table_id={resolved_id})"
+                )
                 return
             elif resp.status_code == 429:
                 wait = 2 ** attempt * 15
-                logger.warning(f"Rate-limited. Waiting {wait}s...")
+                logger.warning(f"Rate-limited. Waiting {wait}s... (attempt {attempt + 1}/3)")
                 time.sleep(wait)
             else:
-                logger.warning(f"Upload failed: {resp.status_code} {resp.text[:300]}")
+                logger.warning(
+                    f"Upload failed (attempt {attempt + 1}/3): "
+                    f"{resp.status_code} — {resp.text[:400]}"
+                )
                 if attempt < 2:
                     time.sleep(5)
+
         except Exception as ex:
-            logger.warning(f"Upload exception (attempt {attempt+1}): {ex}")
+            logger.warning(f"Upload exception (attempt {attempt + 1}/3): {ex}")
             if attempt < 2:
                 time.sleep(5)
 
-    logger.error("Upload failed after all retries.")
+    logger.error("Upload failed after all retries. Table was NOT updated.")
 
 
 # ─────────────────────────────────────────────
@@ -1040,7 +1112,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.1 — smart table ID discovery'
+        description='Performance backfill v19.5.2 — multipart upload + full pagination'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1050,8 +1122,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.1")
-    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (smart ID discovery)")
+    print("  PERFORMANCE DATA BACKFILL v19.5.2")
+    print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (multipart upload + full pagination)")
     print("=" * 130)
 
     logger.info(f"Dust env — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
@@ -1126,7 +1198,6 @@ def main():
             print("Cancelled.")
             return
 
-    # ── Load existing rows for merge ─────────────
     if not args.skip_csv:
         logger.info("Loading existing rows from Dust...")
         csv_row_dict = load_existing_csv()
@@ -1167,7 +1238,6 @@ def main():
 
     total_time = time.time() - start_wall
 
-    # ── Upload merged CSV to Dust ─────────────────
     logger.info(f"csv_row_dict size before upload: {len(csv_row_dict)} rows")
     if not args.skip_csv and csv_row_dict:
         logger.info(f"Uploading merged CSV ({len(csv_row_dict)} total rows)...")
