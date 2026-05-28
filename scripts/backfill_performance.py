@@ -238,6 +238,10 @@ def discover_technicians(sdp_token, graph_token):
     }
 
     technicians = {}
+
+    # ── Attempt 1: /technicians endpoint (requires admin scope) ──
+    logger.info("Attempting technician discovery via /technicians endpoint...")
+    tech_endpoint_ok = False
     start_index = 1
     row_count   = 100
 
@@ -248,7 +252,6 @@ def discover_technicians(sdp_token, graph_token):
                 "start_index": start_index
             }
         }
-
         try:
             resp = requests.get(
                 f"{SDP_API_BASE}/technicians",
@@ -257,7 +260,14 @@ def discover_technicians(sdp_token, graph_token):
                 timeout=30
             )
         except Exception as e:
-            logger.warning(f"Technician API request failed: {e}")
+            logger.warning(f"Technician endpoint request failed: {e}")
+            break
+
+        if resp.status_code in [401, 403]:
+            logger.warning(
+                f"/technicians returned {resp.status_code} — "
+                "token lacks admin scope. Falling back to request scan."
+            )
             break
 
         if resp.status_code != 200:
@@ -265,38 +275,98 @@ def discover_technicians(sdp_token, graph_token):
             break
 
         page_techs = resp.json().get('technicians', [])
+        tech_endpoint_ok = True
 
         for tech in page_techs:
             name  = tech.get('name')
             email = tech.get('email_id')
-
             if not name or name == 'Unassigned' or name in technicians:
                 continue
-
             az = get_azure_profile(email, graph_token)
-            technicians[name] = {
-                'email':           email,
-                'job_title':       az.get('job_title')       if az else None,
-                'department':      az.get('department')      if az else None,
-                'office_location': az.get('office_location') if az else None,
-                'city':            az.get('city')            if az else None,
-                'state':           az.get('state')           if az else None,
-                'country':         az.get('country')         if az else None,
-                'manager_name':    az.get('manager_name')    if az else None,
-                'manager_email':   az.get('manager_email')   if az else None,
-                'account_enabled': az.get('account_enabled') if az else None,
-                'display_name':    az.get('display_name')    if az else None,
-                'company_name':    az.get('company_name')    if az else None,
-                'account_created': az.get('account_created') if az else None,
-            }
+            technicians[name] = _build_tech_profile(email, az)
 
         if len(page_techs) < row_count:
             break
-
         start_index += row_count
 
-    logger.info(f"Discovered {len(technicians)} technicians via /technicians endpoint")
+    if tech_endpoint_ok and technicians:
+        logger.info(f"✓ Discovered {len(technicians)} technicians via /technicians endpoint")
+        return technicians
+
+    # ── Attempt 2: Scan /requests for all statuses ──────────────
+    logger.info("Falling back to request scan for technician discovery...")
+
+    scan_statuses = [
+        None,          # no status filter = all open/active
+        "Closed",
+        "Resolved",
+    ]
+
+    for status_filter in scan_statuses:
+        start_index = 1
+        while True:
+            criteria = []
+            if status_filter:
+                criteria = [{"field": "status.name", "condition": "is", "values": [status_filter]}]
+
+            list_info = {
+                "list_info": {
+                    "row_count":   100,
+                    "start_index": start_index,
+                    **({"search_criteria": criteria} if criteria else {})
+                }
+            }
+            try:
+                resp = requests.get(
+                    f"{SDP_API_BASE}/requests",
+                    headers=headers,
+                    params={'input_data': json.dumps(list_info)},
+                    timeout=30
+                )
+            except Exception as e:
+                logger.warning(f"Request scan failed ({status_filter}): {e}")
+                break
+
+            if resp.status_code != 200:
+                logger.warning(f"Request scan error {resp.status_code} ({status_filter})")
+                break
+
+            page = resp.json().get('requests', [])
+
+            for ticket in page:
+                tech = ticket.get('technician')
+                if tech and isinstance(tech, dict):
+                    name  = tech.get('name')
+                    email = tech.get('email_id')
+                    if name and name != 'Unassigned' and name not in technicians:
+                        az = get_azure_profile(email, graph_token)
+                        technicians[name] = _build_tech_profile(email, az)
+
+            if len(page) < 100:
+                break
+            start_index += 100
+
+    logger.info(f"✓ Discovered {len(technicians)} technicians via request scan")
     return technicians
+
+
+def _build_tech_profile(email, az):
+    """Helper — build a technician profile dict from an Azure AD result."""
+    return {
+        'email':           email,
+        'job_title':       az.get('job_title')       if az else None,
+        'department':      az.get('department')      if az else None,
+        'office_location': az.get('office_location') if az else None,
+        'city':            az.get('city')            if az else None,
+        'state':           az.get('state')           if az else None,
+        'country':         az.get('country')         if az else None,
+        'manager_name':    az.get('manager_name')    if az else None,
+        'manager_email':   az.get('manager_email')   if az else None,
+        'account_enabled': az.get('account_enabled') if az else None,
+        'display_name':    az.get('display_name')    if az else None,
+        'company_name':    az.get('company_name')    if az else None,
+        'account_created': az.get('account_created') if az else None,
+    }
 
 
 # ─────────────────────────────────────────────
