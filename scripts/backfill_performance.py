@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.4 - TABLE ID CACHE + TIMEOUT FIX
+Performance Data Backfill Script v19.5.5 - DISPLAY TICKET ID
 Upserts only new/changed rows using the Dust rows endpoint.
 Historical data is never re-uploaded — scale stays constant regardless of history size.
 
-v19.5.4 Changes (from v19.5.3):
-- FIX: _get_existing_table_id() now caches result in _TABLE_ID_CACHE module variable
-  Eliminates redundant API calls (was 2x per date, now 1x per full run)
-- FIX: Request scan timeout increased from 30s to 60s in discover_technicians()
-  Prevents timeout on large Closed/Resolved ticket queries during technician discovery
+v19.5.5 Changes (from v19.5.4):
+- FIX: ticket_id now stores display_id (short ID e.g. 17819) instead of internal long ID
+  Deduplication still uses internal ID to safely handle active + archive overlap
+  Falls back to internal ID if display_id is missing
 """
 
 import os
@@ -320,7 +319,7 @@ def discover_technicians(sdp_token, graph_token):
                     f"{SDP_API_BASE}/requests",
                     headers=headers,
                     params={'input_data': json.dumps(list_info)},
-                    timeout=60  # FIX v19.5.4: increased from 30s to handle large result sets
+                    timeout=60
                 )
             except Exception as e:
                 logger.warning(f"Request scan failed ({status_filter}): {e}")
@@ -507,10 +506,13 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     all_tickets = []
 
     for t in active_tickets + archived_tickets:
-        tid = str(t.get('id', ''))
-        if not tid or tid in seen_ids:
+        # FIX v19.5.5: use internal ID for deduplication, display_id for storage
+        internal_id = str(t.get('id', ''))
+        display_id  = str(t.get('display_id', '') or t.get('displayId', '') or internal_id)
+
+        if not internal_id or internal_id in seen_ids:
             continue
-        seen_ids.add(tid)
+        seen_ids.add(internal_id)
 
         if (t.get('status') or {}).get('name') == 'Converted to Project':
             continue
@@ -527,7 +529,7 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         first_response_ms = (t.get('first_response_due_by_time') or {}).get('value')
 
         all_tickets.append({
-            'ticket_id':              tid,
+            'ticket_id':              display_id,
             'subject':                t.get('subject', 'N/A'),
             'priority':               priority,
             'category':               category,
@@ -828,10 +830,10 @@ def _build_table_rows(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust table helpers (v19.5.4)
+# Dust table helpers (v19.5.5)
 # ─────────────────────────────────────────────
 
-# FIX v19.5.4: Module-level cache — table ID resolved once per run
+# Module-level cache — table ID resolved once per run
 _TABLE_ID_CACHE = None
 
 
@@ -1083,7 +1085,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.4 — incremental row upsert + table ID cache + timeout fix'
+        description='Performance backfill v19.5.5 — display ticket ID + incremental upsert'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1093,7 +1095,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.4")
+    print("  PERFORMANCE DATA BACKFILL v19.5.5")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental row upsert)")
     print("=" * 130)
 
