@@ -543,7 +543,16 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         category     = (t.get('category') or {}).get('name') or 'N/A'
         sla_obj      = t.get('sla') or {}
         sla_name     = sla_obj.get('name') or 'N/A'
-        sla_violated = bool(t.get('is_overdue', False))
+        # Calculate SLA from timestamps — more reliable than is_overdue
+        # which is often absent from list endpoint responses
+        due_ms_val       = _extract_time_ms(t.get('due_by_time'))
+        completed_ms_val = _extract_time_ms(t.get('completed_time'))
+
+        if due_ms_val and completed_ms_val:
+            sla_violated = completed_ms_val > due_ms_val
+        else:
+            # Fallback to is_overdue if timestamps unavailable
+            sla_violated = bool(t.get('is_overdue', False))
 
         # FIX v19.5.6: use _extract_time_ms to handle all SDP timestamp formats
         created_ms        = _extract_time_ms(t.get('created_time'))
