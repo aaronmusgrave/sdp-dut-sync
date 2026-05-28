@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.7 - DEBUG + fields_required FIX
+Performance Data Backfill Script v19.5.8
 Upserts only new/changed rows using the Dust rows endpoint.
 Historical data is never re-uploaded — scale stays constant regardless of history size.
 
-v19.5.7 Changes (from v19.5.6):
-- DEBUG: One-time dump of first ticket's raw field keys + raw timestamp values
-  so we can confirm whether SDP returns created_time/completed_time in list responses.
-- FIX: Added fields_required to fetch_pages() list_info to force SDP to return
-  created_time, completed_time, due_by_time, first_response_due_by_time, is_overdue.
-  These fields are often omitted from bulk list responses unless explicitly requested.
+v19.5.8 Changes (from v19.5.7):
+- Removed debug logging (clean production version)
+- KEEPS: fields_required in list_info (fixes AvgRes N/A — forces SDP to return
+  created_time, completed_time, due_by_time, first_response_due_by_time, is_overdue)
+- KEEPS: SLA calc from timestamps (completed_time > due_by_time) instead of is_overdue
+- KEEPS: _extract_time_ms() handles all SDP timestamp formats
 """
 
 import os
 import sys
-import csv
-import io
 import requests
 import json
 import logging
 import time
 import argparse
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
@@ -86,13 +84,6 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────
-# DEBUG v19.5.7 — one-time field dump flag
-# Set to True once we've logged the first ticket's raw fields.
-# Prevents flooding logs on subsequent pages/technicians.
-# ─────────────────────────────────────────────
-_DEBUG_FIELDS_LOGGED = False
 
 
 # ─────────────────────────────────────────────
@@ -468,8 +459,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     }
 
     def fetch_pages(endpoint):
-        global _DEBUG_FIELDS_LOGGED
-
         results     = []
         start_index = 1
         row_count   = 100
@@ -479,10 +468,8 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                 "list_info": {
                     "row_count":   row_count,
                     "start_index": start_index,
-                    # ── FIX v19.5.7 ───────────────────────────────────────────
-                    # Explicitly request timestamp fields. SDP v3 often omits
-                    # created_time/completed_time from list responses unless asked.
-                    # ──────────────────────────────────────────────────────────
+                    # Explicitly request timestamp fields — SDP v3 omits them
+                    # from bulk list responses unless asked.
                     "fields_required": [
                         "id",
                         "display_id",
@@ -520,44 +507,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                     if resp.status_code == 200:
                         page_tickets = resp.json().get('requests', [])
                         success = True
-
-                        # ── DEBUG v19.5.7 ──────────────────────────────────────
-                        # One-time dump: print raw keys + timestamp field values
-                        # from the very first ticket we ever receive.
-                        # This tells us whether SDP is actually returning the
-                        # timestamp fields and in what format.
-                        # ──────────────────────────────────────────────────────
-                        if not _DEBUG_FIELDS_LOGGED and page_tickets:
-                            first = page_tickets[0]
-                            logger.info("=" * 70)
-                            logger.info("DEBUG v19.5.7 — First ticket raw field dump")
-                            logger.info(f"  All keys present: {sorted(first.keys())}")
-                            logger.info(f"  id              : {first.get('id')}")
-                            logger.info(f"  display_id      : {first.get('display_id')}")
-                            logger.info(f"  subject         : {str(first.get('subject', ''))[:60]}")
-                            logger.info(f"  created_time    : {first.get('created_time')!r}")
-                            logger.info(f"  completed_time  : {first.get('completed_time')!r}")
-                            logger.info(f"  due_by_time     : {first.get('due_by_time')!r}")
-                            logger.info(f"  first_response_due_by_time: {first.get('first_response_due_by_time')!r}")
-                            logger.info(f"  is_overdue      : {first.get('is_overdue')!r}")
-                            logger.info(f"  status          : {first.get('status')!r}")
-                            logger.info(f"  priority        : {first.get('priority')!r}")
-                            logger.info(f"  category        : {first.get('category')!r}")
-                            logger.info(f"  sla             : {first.get('sla')!r}")
-                            # Attempt extraction to confirm _extract_time_ms works
-                            c_ms  = _extract_time_ms(first.get('created_time'))
-                            cp_ms = _extract_time_ms(first.get('completed_time'))
-                            db_ms = _extract_time_ms(first.get('due_by_time'))
-                            logger.info(f"  _extract_time_ms(created_time)   = {c_ms}")
-                            logger.info(f"  _extract_time_ms(completed_time) = {cp_ms}")
-                            logger.info(f"  _extract_time_ms(due_by_time)    = {db_ms}")
-                            if c_ms and cp_ms:
-                                logger.info(f"  resolution_minutes               = {_resolution_minutes(c_ms, cp_ms)}")
-                            else:
-                                logger.info(f"  resolution_minutes               = N/A (one or both timestamps missing)")
-                            logger.info("=" * 70)
-                            _DEBUG_FIELDS_LOGGED = True
-
                         break
                     elif resp.status_code == 404:
                         logger.debug(f"Archive endpoint not available: {endpoint}")
@@ -612,14 +561,13 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         sla_obj  = t.get('sla') or {}
         sla_name = sla_obj.get('name') or 'N/A'
 
-        # Calculate SLA from timestamps — more reliable than is_overdue
+        # SLA from timestamps — more reliable than is_overdue
         due_ms_val       = _extract_time_ms(t.get('due_by_time'))
         completed_ms_val = _extract_time_ms(t.get('completed_time'))
 
         if due_ms_val and completed_ms_val:
             sla_violated = completed_ms_val > due_ms_val
         else:
-            # Fallback to is_overdue if timestamps unavailable
             sla_violated = bool(t.get('is_overdue', False))
 
         created_ms        = _extract_time_ms(t.get('created_time'))
@@ -974,10 +922,6 @@ def _get_existing_table_id():
 
 
 def ensure_table_exists():
-    """
-    Create the tech_performance table metadata if it doesn't exist yet.
-    Safe to call every run — no-ops if already present.
-    """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         return
 
@@ -1012,11 +956,6 @@ def ensure_table_exists():
 
 
 def upsert_rows(rows):
-    """
-    Incrementally upsert rows into the Dust table using the rows endpoint.
-    Only the provided rows are affected — all other historical rows untouched.
-    Batches at 500 rows per request.
-    """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping row upsert.")
         return False
@@ -1184,7 +1123,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.7 — debug field dump + fields_required fix'
+        description='Performance backfill v19.5.8'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1194,9 +1133,8 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.7 DEBUG")
+    print("  PERFORMANCE DATA BACKFILL v19.5.8")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental row upsert)")
-    print("  DEBUG: fields_required added to list_info; raw timestamp dump on first ticket")
     print("=" * 130)
 
     logger.info(f"Dust env — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
@@ -1271,7 +1209,6 @@ def main():
             print("Cancelled.")
             return
 
-    # Ensure table exists before upserting rows
     if not args.skip_csv:
         ensure_table_exists()
 
