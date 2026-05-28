@@ -1027,6 +1027,7 @@ def upload_csv_document(row_dict):
                 json={
                     "table_id":    resolved_id,
                     "name":        "tech_performance",
+                    "title":        "tecj_performance",
                     "description": (
                         "Technician performance data — daily closed tickets, "
                         "SLA compliance, resolution times, and meeting load per technician."
