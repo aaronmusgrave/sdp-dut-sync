@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.6 - TIMESTAMP FORMAT FIX
+Performance Data Backfill Script v19.5.7 - DEBUG + fields_required FIX
 Upserts only new/changed rows using the Dust rows endpoint.
 Historical data is never re-uploaded — scale stays constant regardless of history size.
 
-v19.5.6 Changes (from v19.5.5):
-- FIX: _extract_time_ms() helper handles all SDP timestamp formats
-  Fixes AvgRes showing N/A — SDP can return time fields as flat values
-  or as {"value": "..."} objects; both are now handled correctly
+v19.5.7 Changes (from v19.5.6):
+- DEBUG: One-time dump of first ticket's raw field keys + raw timestamp values
+  so we can confirm whether SDP returns created_time/completed_time in list responses.
+- FIX: Added fields_required to fetch_pages() list_info to force SDP to return
+  created_time, completed_time, due_by_time, first_response_due_by_time, is_overdue.
+  These fields are often omitted from bulk list responses unless explicitly requested.
 """
 
 import os
@@ -84,6 +86,13 @@ ZOHO_TOKEN_URL = "https://accounts.zoho.com/oauth/v2/token"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# DEBUG v19.5.7 — one-time field dump flag
+# Set to True once we've logged the first ticket's raw fields.
+# Prevents flooding logs on subsequent pages/technicians.
+# ─────────────────────────────────────────────
+_DEBUG_FIELDS_LOGGED = False
 
 
 # ─────────────────────────────────────────────
@@ -405,7 +414,7 @@ def get_meetings(email, graph_token, date):
 
 def _extract_time_ms(field_value):
     """
-    FIX v19.5.6: Extract epoch milliseconds from SDP time field.
+    Extract epoch milliseconds from SDP time field.
     Handles all formats SDP may return:
       - Object:      {"value": "1748433600000"} or {"value": 1748433600000}
       - Flat string: "1748433600000"
@@ -459,6 +468,8 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     }
 
     def fetch_pages(endpoint):
+        global _DEBUG_FIELDS_LOGGED
+
         results     = []
         start_index = 1
         row_count   = 100
@@ -468,6 +479,25 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                 "list_info": {
                     "row_count":   row_count,
                     "start_index": start_index,
+                    # ── FIX v19.5.7 ───────────────────────────────────────────
+                    # Explicitly request timestamp fields. SDP v3 often omits
+                    # created_time/completed_time from list responses unless asked.
+                    # ──────────────────────────────────────────────────────────
+                    "fields_required": [
+                        "id",
+                        "display_id",
+                        "subject",
+                        "status",
+                        "priority",
+                        "category",
+                        "technician",
+                        "sla",
+                        "created_time",
+                        "completed_time",
+                        "due_by_time",
+                        "first_response_due_by_time",
+                        "is_overdue"
+                    ],
                     "search_criteria": [
                         {"field": "technician.email_id", "condition": "is", "values": [tech_email]},
                         {"field": "completed_time", "condition": "between", "logical_operator": "AND", "values": [start_ms, end_ms]},
@@ -490,6 +520,44 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
                     if resp.status_code == 200:
                         page_tickets = resp.json().get('requests', [])
                         success = True
+
+                        # ── DEBUG v19.5.7 ──────────────────────────────────────
+                        # One-time dump: print raw keys + timestamp field values
+                        # from the very first ticket we ever receive.
+                        # This tells us whether SDP is actually returning the
+                        # timestamp fields and in what format.
+                        # ──────────────────────────────────────────────────────
+                        if not _DEBUG_FIELDS_LOGGED and page_tickets:
+                            first = page_tickets[0]
+                            logger.info("=" * 70)
+                            logger.info("DEBUG v19.5.7 — First ticket raw field dump")
+                            logger.info(f"  All keys present: {sorted(first.keys())}")
+                            logger.info(f"  id              : {first.get('id')}")
+                            logger.info(f"  display_id      : {first.get('display_id')}")
+                            logger.info(f"  subject         : {str(first.get('subject', ''))[:60]}")
+                            logger.info(f"  created_time    : {first.get('created_time')!r}")
+                            logger.info(f"  completed_time  : {first.get('completed_time')!r}")
+                            logger.info(f"  due_by_time     : {first.get('due_by_time')!r}")
+                            logger.info(f"  first_response_due_by_time: {first.get('first_response_due_by_time')!r}")
+                            logger.info(f"  is_overdue      : {first.get('is_overdue')!r}")
+                            logger.info(f"  status          : {first.get('status')!r}")
+                            logger.info(f"  priority        : {first.get('priority')!r}")
+                            logger.info(f"  category        : {first.get('category')!r}")
+                            logger.info(f"  sla             : {first.get('sla')!r}")
+                            # Attempt extraction to confirm _extract_time_ms works
+                            c_ms  = _extract_time_ms(first.get('created_time'))
+                            cp_ms = _extract_time_ms(first.get('completed_time'))
+                            db_ms = _extract_time_ms(first.get('due_by_time'))
+                            logger.info(f"  _extract_time_ms(created_time)   = {c_ms}")
+                            logger.info(f"  _extract_time_ms(completed_time) = {cp_ms}")
+                            logger.info(f"  _extract_time_ms(due_by_time)    = {db_ms}")
+                            if c_ms and cp_ms:
+                                logger.info(f"  resolution_minutes               = {_resolution_minutes(c_ms, cp_ms)}")
+                            else:
+                                logger.info(f"  resolution_minutes               = N/A (one or both timestamps missing)")
+                            logger.info("=" * 70)
+                            _DEBUG_FIELDS_LOGGED = True
+
                         break
                     elif resp.status_code == 404:
                         logger.debug(f"Archive endpoint not available: {endpoint}")
@@ -539,12 +607,12 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         if (t.get('status') or {}).get('name') == 'Converted to Project':
             continue
 
-        priority     = (t.get('priority') or {}).get('name') or 'N/A'
-        category     = (t.get('category') or {}).get('name') or 'N/A'
-        sla_obj      = t.get('sla') or {}
-        sla_name     = sla_obj.get('name') or 'N/A'
+        priority = (t.get('priority') or {}).get('name') or 'N/A'
+        category = (t.get('category') or {}).get('name') or 'N/A'
+        sla_obj  = t.get('sla') or {}
+        sla_name = sla_obj.get('name') or 'N/A'
+
         # Calculate SLA from timestamps — more reliable than is_overdue
-        # which is often absent from list endpoint responses
         due_ms_val       = _extract_time_ms(t.get('due_by_time'))
         completed_ms_val = _extract_time_ms(t.get('completed_time'))
 
@@ -554,7 +622,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
             # Fallback to is_overdue if timestamps unavailable
             sla_violated = bool(t.get('is_overdue', False))
 
-        # FIX v19.5.6: use _extract_time_ms to handle all SDP timestamp formats
         created_ms        = _extract_time_ms(t.get('created_time'))
         completed_ms      = _extract_time_ms(t.get('completed_time'))
         due_by_ms         = _extract_time_ms(t.get('due_by_time'))
@@ -862,7 +929,7 @@ def _build_table_rows(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust table helpers (v19.5.6)
+# Dust table helpers
 # ─────────────────────────────────────────────
 
 # Module-level cache — table ID resolved once per run
@@ -1117,7 +1184,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.6 — timestamp format fix + incremental upsert'
+        description='Performance backfill v19.5.7 — debug field dump + fields_required fix'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1127,8 +1194,9 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.6")
+    print("  PERFORMANCE DATA BACKFILL v19.5.7 DEBUG")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental row upsert)")
+    print("  DEBUG: fields_required added to list_info; raw timestamp dump on first ticket")
     print("=" * 130)
 
     logger.info(f"Dust env — API_KEY: {'SET' if DUST_API_KEY else 'MISSING'} | "
