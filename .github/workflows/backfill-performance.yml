@@ -17,34 +17,7 @@ on:
         type: boolean
         default: false
 
-jobs:
-  backfill:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: pip install requests
-
-      - name: Delete progress file if force mode
-        if: ${{ inputs.force == true }}
-        run: rm -f backfill_progress.json
-
-      # ── TEMPORARY: Find correct DUST_DS_ID ───────────
-      - name: Find servicedesk-perf data source ID
-        env:
-          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-        run: |
-          curl -s \
-            -H "Authorization: Bearer $DUST_API_KEY" \
-            "https://dust.tt/api/v1/w/JrxWvNq5rb/spaces/vlt_CvSgrDxDZEQV/data_sources" \
-            | python3 -m json.tool
-      # ─────────────────────────────────────────────────
 
       - name: Run backfill
         env:
