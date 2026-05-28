@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.5 - DISPLAY TICKET ID
+Performance Data Backfill Script v19.5.6 - TIMESTAMP FORMAT FIX
 Upserts only new/changed rows using the Dust rows endpoint.
 Historical data is never re-uploaded — scale stays constant regardless of history size.
 
-v19.5.5 Changes (from v19.5.4):
-- FIX: ticket_id now stores display_id (short ID e.g. 17819) instead of internal long ID
-  Deduplication still uses internal ID to safely handle active + archive overlap
-  Falls back to internal ID if display_id is missing
+v19.5.6 Changes (from v19.5.5):
+- FIX: _extract_time_ms() helper handles all SDP timestamp formats
+  Fixes AvgRes showing N/A — SDP can return time fields as flat values
+  or as {"value": "..."} objects; both are now handled correctly
 """
 
 import os
@@ -403,6 +403,29 @@ def get_meetings(email, graph_token, date):
 # Closed ticket detail retrieval
 # ─────────────────────────────────────────────
 
+def _extract_time_ms(field_value):
+    """
+    FIX v19.5.6: Extract epoch milliseconds from SDP time field.
+    Handles all formats SDP may return:
+      - Object:      {"value": "1748433600000"} or {"value": 1748433600000}
+      - Flat string: "1748433600000"
+      - Flat int:    1748433600000
+      - Missing:     None
+    """
+    if field_value is None:
+        return None
+    if isinstance(field_value, dict):
+        val = field_value.get('value')
+    else:
+        val = field_value
+    if val is None:
+        return None
+    try:
+        return int(str(val).replace(',', ''))
+    except Exception:
+        return None
+
+
 def _epoch_ms_to_iso(ms):
     if not ms:
         return None
@@ -506,7 +529,6 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     all_tickets = []
 
     for t in active_tickets + archived_tickets:
-        # FIX v19.5.5: use internal ID for deduplication, display_id for storage
         internal_id = str(t.get('id', ''))
         display_id  = str(t.get('display_id', '') or t.get('displayId', '') or internal_id)
 
@@ -523,10 +545,11 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
         sla_name     = sla_obj.get('name') or 'N/A'
         sla_violated = bool(t.get('is_overdue', False))
 
-        created_ms        = (t.get('created_time')               or {}).get('value')
-        completed_ms      = (t.get('completed_time')             or {}).get('value')
-        due_by_ms         = (t.get('due_by_time')                or {}).get('value')
-        first_response_ms = (t.get('first_response_due_by_time') or {}).get('value')
+        # FIX v19.5.6: use _extract_time_ms to handle all SDP timestamp formats
+        created_ms        = _extract_time_ms(t.get('created_time'))
+        completed_ms      = _extract_time_ms(t.get('completed_time'))
+        due_by_ms         = _extract_time_ms(t.get('due_by_time'))
+        first_response_ms = _extract_time_ms(t.get('first_response_due_by_time'))
 
         all_tickets.append({
             'ticket_id':              display_id,
@@ -830,7 +853,7 @@ def _build_table_rows(tech_data, date):
 
 
 # ─────────────────────────────────────────────
-# Dust table helpers (v19.5.5)
+# Dust table helpers (v19.5.6)
 # ─────────────────────────────────────────────
 
 # Module-level cache — table ID resolved once per run
@@ -1085,7 +1108,7 @@ def process_single_date(target_date, technicians):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Performance backfill v19.5.5 — display ticket ID + incremental upsert'
+        description='Performance backfill v19.5.6 — timestamp format fix + incremental upsert'
     )
     parser.add_argument('--days',       type=int, help='Number of days to backfill')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
@@ -1095,7 +1118,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.5")
+    print("  PERFORMANCE DATA BACKFILL v19.5.6")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental row upsert)")
     print("=" * 130)
 
