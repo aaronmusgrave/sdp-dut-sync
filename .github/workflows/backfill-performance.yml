@@ -17,7 +17,23 @@ on:
         type: boolean
         default: false
 
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Delete progress file if force mode
+        if: ${{ inputs.force == true }}
+        run: rm -f backfill_progress.json
 
       - name: Run backfill
         env:
