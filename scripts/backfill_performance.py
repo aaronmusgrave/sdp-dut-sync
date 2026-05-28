@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Performance Data Backfill Script v19.5.10
+Performance Data Backfill Script v19.5.11
 Upserts only new/changed rows using the Dust rows endpoint.
 
-v19.5.10 fixes:
-- FIX: Archive response nested structure — /archive_requests can return
-  {"archive_requests": {"requests": [...], "total_count": N}} (nested dict)
-  OR {"archive_requests": [...]} (flat list). Both now handled correctly.
+v19.5.11 fixes:
+- FIX: Archive endpoint returns flat strings for nested fields.
+  Active tickets:  {"priority": {"name": "Normal", "id": "..."}}
+  Archive tickets: {"priority": "Normal"}  <-- plain string
+  Added _get_field_name() helper to handle both dict and string formats
+  for priority, category, sla, and status fields.
   Fixes: 'str' object has no attribute 'get' on archived ticket processing.
 """
 
@@ -335,6 +337,21 @@ def get_meetings(email, graph_token, date):
     return {'count': 0, 'hours': 0}
 
 
+def _get_field_name(field_value):
+    """
+    FIX v19.5.11: SDP archive endpoint returns simplified flat strings for
+    nested fields instead of dicts.
+    Active:  {"priority": {"name": "Normal", "id": "..."}}
+    Archive: {"priority": "Normal"}
+    This helper safely extracts the name from either format.
+    """
+    if field_value is None:
+        return 'N/A'
+    if isinstance(field_value, dict):
+        return field_value.get('name') or 'N/A'
+    return str(field_value) or 'N/A'
+
+
 def _extract_time_ms(field_value):
     if field_value is None:
         return None
@@ -370,10 +387,10 @@ def _resolution_minutes(created_ms, completed_ms):
 
 def _parse_ticket_list(data):
     """
-    FIX v19.5.10: Parse ticket list from SDP response, handling all formats:
+    Parse ticket list from SDP response, handling all formats:
       Active:  {"requests": [...]}
-      Archive: {"archive_requests": [...]}          (flat list)
-      Archive: {"archive_requests": {"requests": [...], "total_count": N}}  (nested dict)
+      Archive: {"archive_requests": [...]}
+      Archive: {"archive_requests": {"requests": [...], "total_count": N}}
     """
     raw = data.get('requests') or data.get('archive_requests') or []
     if isinstance(raw, dict):
@@ -485,19 +502,18 @@ def get_closed_tickets_detail(tech_email, sdp_token, target_date):
     all_tickets = []
     for t in active_tickets + archived_tickets:
         if not isinstance(t, dict):
-            logger.warning(f"Skipping non-dict ticket entry: {type(t)} {str(t)[:80]}")
             continue
         internal_id = str(t.get('id', ''))
         display_id  = str(t.get('display_id', '') or t.get('displayId', '') or internal_id)
         if not internal_id or internal_id in seen_ids:
             continue
         seen_ids.add(internal_id)
-        if (t.get('status') or {}).get('name') == 'Converted to Project':
+        # FIX v19.5.11: use _get_field_name() — handles both dict and string
+        if _get_field_name(t.get('status')) == 'Converted to Project':
             continue
-        priority = (t.get('priority') or {}).get('name') or 'N/A'
-        category = (t.get('category') or {}).get('name') or 'N/A'
-        sla_obj  = t.get('sla') or {}
-        sla_name = sla_obj.get('name') or 'N/A'
+        priority = _get_field_name(t.get('priority'))
+        category = _get_field_name(t.get('category'))
+        sla_name = _get_field_name(t.get('sla'))
         due_ms_val       = _extract_time_ms(t.get('due_by_time'))
         completed_ms_val = _extract_time_ms(t.get('completed_time'))
         if due_ms_val and completed_ms_val:
@@ -966,7 +982,7 @@ def process_single_date(target_date, technicians):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Performance backfill v19.5.10')
+    parser = argparse.ArgumentParser(description='Performance backfill v19.5.11')
     parser.add_argument('--days',       type=int,            help='Number of days to backfill')
     parser.add_argument('--start-date', type=str,            help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date',   type=str,            help='End date (YYYY-MM-DD)')
@@ -975,7 +991,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 130)
-    print("  PERFORMANCE DATA BACKFILL v19.5.10")
+    print("  PERFORMANCE DATA BACKFILL v19.5.11")
     print("  Meetings · Azure AD · Ticket Detail · Archive Fix · Dust Table (incremental upsert)")
     print("=" * 130)
 
