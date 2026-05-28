@@ -974,17 +974,16 @@ def load_existing_csv():
     logger.info(f"✓ Total existing rows loaded: {len(existing)} (table_id={table_id})")
     return existing
 
-
 def upload_csv_document(row_dict):
     """
-    FIX v19.5.2: Upload CSV using multipart/form-data instead of JSON body.
-    Previous version embedded 'csv' as a JSON string field which is not
-    supported by the Dust API — this caused silent empty-table creation.
+    v19.5.3: Reverted to JSON body. Dust API requires application/json with
+    'csv' as a string field. Multipart caused 400 "Expected object, received string".
 
-    IMPORTANT: Do NOT set Content-Type header manually. The requests library
-    sets it automatically to multipart/form-data with the correct boundary
-    when the files= parameter is used. Setting it manually will break the
-    boundary and cause a 400 error.
+    Changes from v19.5.2:
+    - Removed files= / data= (multipart). Back to json= parameter.
+    - Removed manual Content-Type header (requests sets it automatically via json=).
+    - Removed unsupported 'title' field.
+    - Added 'truncate': False explicitly.
     """
     if not all([DUST_API_KEY, DUST_WORKSPACE_ID, DUST_SPACE_ID, DUST_DS_ID]):
         logger.warning("Dust env vars incomplete — skipping CSV upload.")
@@ -1020,32 +1019,21 @@ def upload_csv_document(row_dict):
         "/data_sources/" + DUST_DS_ID
     )
 
-    # Authorization only — do NOT set Content-Type manually
-    auth_headers = {
-        'Authorization': 'Bearer ' + DUST_API_KEY
-    }
-
     for attempt in range(3):
         try:
             resp = requests.post(
                 base_url + "/tables",
-                headers=auth_headers,
-                data={
+                headers={'Authorization': 'Bearer ' + DUST_API_KEY},
+                json={
                     "table_id":    resolved_id,
                     "name":        "tech_performance",
-                    "title":       "tech_performance",
                     "description": (
                         "Technician performance data — daily closed tickets, "
                         "SLA compliance, resolution times, and meeting load per technician."
                     ),
-                    "timestamp":   str(int(time.time() * 1000)),
-                },
-                files={
-                    "file": (
-                        "tech_performance.csv",
-                        csv_content.encode("utf-8"),
-                        "text/csv"
-                    )
+                    "timestamp":   int(time.time() * 1000),
+                    "truncate":    False,
+                    "csv":         csv_content
                 },
                 timeout=120
             )
@@ -1074,6 +1062,7 @@ def upload_csv_document(row_dict):
                 time.sleep(5)
 
     logger.error("Upload failed after all retries. Table was NOT updated.")
+
 
 
 # ─────────────────────────────────────────────
