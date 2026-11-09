@@ -48,9 +48,21 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install requests
+          set -euo pipefail
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            -r scripts/requirements.txt
+
+      - name: Validate SharePoint sync files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/sync_servicedesk_intelligence_sharepoint.py
+          test -f scripts/upload_to_sharepoint.py
+          echo "SharePoint sync files are present"
 
       - name: Run sync script
         env:
