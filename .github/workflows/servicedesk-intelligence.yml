@@ -67,7 +67,7 @@ jobs:
           python scripts/sync_servicedesk_intelligence.py
 
       - name: Commit checkpoint to repository
-        if: always()
+        if: success()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
@@ -88,10 +88,12 @@ jobs:
           echo "=================================================="
           echo "SYNC SUMMARY (Real-Time Mode)"
           echo "=================================================="
-          if [ -f sync_checkpoint.json ]; then
-            echo "✓ Checkpoint saved"
+          if [ "${{ job.status }}" = "success" ] && [ -f sync_checkpoint.json ]; then
+            echo "✓ Checkpoint saved for this run"
             echo "Next sync: In 20 minutes"
             cat sync_checkpoint.json
+          elif [ "${{ job.status }}" != "success" ]; then
+            echo "❌ Sync failed; checkpoint was not advanced"
           else
             echo "⚠ No checkpoint created"
           fi
