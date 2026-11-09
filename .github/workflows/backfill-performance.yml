@@ -44,12 +44,16 @@ jobs:
           SDP_CLIENT_ID:        ${{ secrets.SDP_CLIENT_ID }}
           SDP_CLIENT_SECRET:    ${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN:    ${{ secrets.SDP_REFRESH_TOKEN }}
-          DUST_API_KEY:         ${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID:    ${{ secrets.DUST_WORKSPACE_ID }}
-          DUST_SPACE_ID:        ${{ secrets.DUST_SPACE_ID }}
-          DUST_DS_ID:           ${{ secrets.DUST_DS_ID }}
-          DUST_TABLE_ID:        ${{ secrets.DUST_TABLE_ID }}
-        run: python scripts/backfill_performance.py --start-date "${{ inputs.start_date }}" --end-date "${{ inputs.end_date }}"
+        run: python scripts/backfill_performance.py --start-date "${{ inputs.start_date }}" --end-date "${{ inputs.end_date }}" --skip-csv
+
+      - name: Upload performance snapshots to SharePoint
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SHAREPOINT_DRIVE_ID: ${{ secrets.SHAREPOINT_DRIVE_ID }}
+          SHAREPOINT_ROOT_FOLDER_ID: ${{ secrets.SHAREPOINT_ROOT_FOLDER_ID }}
+        run: python scripts/upload_to_sharepoint.py --source-dir . --target-folder performance --glob 'tech_performance_*.json' --make-csv
 
       - name: Upload performance data
         if: always()
