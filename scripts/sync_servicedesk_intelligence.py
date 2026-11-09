@@ -26,6 +26,8 @@ SYNC STRATEGY:
 
 import os
 import sys
+import shutil
+from pathlib import Path
 import json
 import time
 import requests
@@ -53,7 +55,13 @@ def clean_secret(value: str) -> str:
 DUST_API_KEY = clean_secret(os.getenv('DUST_API_KEY', ''))
 DUST_WORKSPACE_ID = clean_secret(os.getenv('DUST_WORKSPACE_ID', ''))
 DUST_MAIN_DATA_SOURCE = 'servicedesk'
-DUST_ACTIVE_DATA_SOURCE = 'servicedesk-active'
+DUST_ACTIVE_DATA_SOURCE = 'servicedesk-active'  # retained as logical folder key
+
+SHAREPOINT_EXPORT_DIR = Path(os.getenv('SHAREPOINT_EXPORT_DIR', 'sharepoint_export'))
+SHAREPOINT_FOLDER_NAMES = {
+    DUST_MAIN_DATA_SOURCE: 'closed',
+    DUST_ACTIVE_DATA_SOURCE: 'active',
+}
 
 SDP_DOMAIN = clean_secret(os.getenv('SDP_DOMAIN', ''))
 SDP_CLIENT_ID = clean_secret(os.getenv('SDP_CLIENT_ID', ''))
@@ -518,102 +526,18 @@ def format_conversation_summary(
 # DUST API - DOCUMENT MANAGEMENT
 # ============================================================
 def fetch_all_documents_from_dust(data_source_id: str) -> List[str]:
-    """Fetch all document IDs from a Dust data source."""
-    logger.info(f"  Fetching existing documents from {data_source_id}...")
-
-    all_doc_ids = []
-    offset = 0
-    limit = 1000
-
-    while True:
-        url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents"
-        params = {"limit": limit, "offset": offset}
-        headers = {"Authorization": f"Bearer {DUST_API_KEY}"}
-
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
-            response.raise_for_status()
-            stats['api_calls'] += 1
-
-            data = response.json()
-            documents = data.get('documents', [])
-
-            if not documents:
-                break
-
-            all_doc_ids.extend([doc['document_id'] for doc in documents])
-
-            if len(all_doc_ids) % 1000 == 0:
-                logger.info(f"    {len(all_doc_ids)} documents fetched so far...")
-
-            if len(documents) < limit:
-                break
-
-            offset += limit
-
-        except Exception as e:
-            logger.error(f"Failed to fetch documents from {data_source_id}: {e}")
-            raise
-
-    logger.info(f"  ✓ Found {len(all_doc_ids)} documents in {data_source_id}")
-    return all_doc_ids
+    """Compatibility shim: SharePoint export mode does not read Dust."""
+    logger.info(f"  SharePoint export mode: no remote cleanup read for {data_source_id}")
+    return []
 
 def delete_documents_from_dust_parallel(data_source_id: str, document_ids: List[str]) -> int:
-    """Delete documents from Dust in parallel and record failures."""
-    if not document_ids:
-        logger.info(f"  No documents to delete from {data_source_id}")
-        return 0
-
-    logger.info(f"  Deleting {len(document_ids)} documents from {data_source_id} (20 workers)...")
-
-    deleted_count = 0
-    delete_lock = Lock()
-    start_time = time.time()
-
-    def delete_single(doc_id: str) -> bool:
-        nonlocal deleted_count
-        url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents/{doc_id}"
-        headers = {"Authorization": f"Bearer {DUST_API_KEY}"}
-        try:
-            response = requests.delete(url, headers=headers, timeout=30)
-            if response.status_code in [200, 204]:
-                with delete_lock:
-                    deleted_count += 1
-                    if deleted_count % 100 == 0:
-                        elapsed = time.time() - start_time
-                        rate = deleted_count / elapsed if elapsed > 0 else 0
-                        logger.info(f"    Deleted {deleted_count}/{len(document_ids)} ({rate:.1f}/sec)...")
-                return True
-
-            if response.status_code in [401, 403]:
-                logger.error(
-                    f"    ❌ Delete failed for {doc_id}: "
-                    f"HTTP {response.status_code}: {response.text[:200]}"
-                )
-        except Exception as e:
-            logger.error(f"    ❌ Delete failed for {doc_id}: {e}")
-        return False
-
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(delete_single, doc_id) for doc_id in document_ids]
-        for future in as_completed(futures):
-            future.result()
-
-    elapsed = time.time() - start_time
-    failed_count = len(document_ids) - deleted_count
-    stats['delete_failures'] += failed_count
-
-    if failed_count:
-        logger.error(
-            f"  ❌ Deleted {deleted_count}/{len(document_ids)} from {data_source_id}; "
-            f"{failed_count} deletes failed"
+    """Compatibility shim: SharePoint export mode does not delete Dust documents."""
+    if document_ids:
+        logger.warning(
+            f"  SharePoint export mode: skipping Dust deletion of "
+            f"{len(document_ids)} documents from {data_source_id}"
         )
-    else:
-        logger.info(
-            f"  ✓ Deleted {deleted_count}/{len(document_ids)} "
-            f"({elapsed:.1f}s, {deleted_count/elapsed:.1f}/sec)"
-        )
-    return deleted_count
+    return 0
 
 def upload_document_to_dust(
     data_source_id: str,
@@ -622,103 +546,73 @@ def upload_document_to_dust(
     tags: list,
     max_retries: int = 3
 ) -> Tuple[bool, Optional[str]]:
-    """Upload a single document to Dust with retry logic."""
-    url = f"https://dust.tt/api/v1/w/{DUST_WORKSPACE_ID}/data_sources/{data_source_id}/documents/{doc_id}"
-    headers = {
-        "Authorization": f"Bearer {DUST_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    """Write one ticket as a Markdown file for later SharePoint upload."""
+    del max_retries  # retained for call compatibility
 
-    text_content = f"""
-Ticket ID: {content.get('ticket_id', 'N/A')}
-Subject: {content.get('subject', 'N/A')}
-Status: {content.get('status', 'N/A')}
-Priority: {content.get('priority', 'N/A')}
-Technician (Assigned): {content.get('technician', 'Unassigned')}
-Technician (Closed By): {content.get('closed_by', 'N/A')}
-Requester: {content.get('requester', 'N/A')}
-Category: {content.get('category', 'N/A')}
-Archived: {content.get('is_archived', False)}
-Created: {content.get('created_time', 'N/A')}
-Resolved: {content.get('resolved_time', 'N/A')}
-Closed: {content.get('closed_time', 'N/A')}
+    folder_name = 'archived' if content.get('is_archived', False) else SHAREPOINT_FOLDER_NAMES.get(data_source_id, 'closed')
+    output_dir = SHAREPOINT_EXPORT_DIR / folder_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{doc_id}.md"
+    path = output_dir / filename
 
-SLA INFORMATION:
-  Policy:                {content.get('sla_policy', 'N/A')}
-  Status:                {content.get('sla_status', 'N/A')}
-  Compliance:            {content.get('sla_compliance_label', 'Unknown')}
-  Days Delta:            {content.get('sla_days_delta', 'N/A')}
-  Violated:              {content.get('sla_violated', False)}
-  First Response Due:    {content.get('first_response_due', 'N/A')}
-  First Response Late:   {content.get('first_response_overdue', False)}
-  Resolution Due:        {content.get('sla_resolution_due', 'N/A')}
+    text_content = f"""---
+ ticket_id: {content.get('ticket_id', 'N/A')}
+ status: {content.get('status', 'N/A')}
+ priority: {content.get('priority', 'N/A')}
+ technician: {content.get('technician', 'Unassigned')}
+ category: {content.get('category', 'N/A')}
+ archived: {content.get('is_archived', False)}
+ tags: {', '.join(tags or [])}
+ source_url: {content.get('source_url', '')}
+---
 
-INITIAL REQUEST:
+# {content.get('subject', 'ServiceDesk ticket')}
+
+**Ticket ID:** {content.get('ticket_id', 'N/A')}  
+**Status:** {content.get('status', 'N/A')}  
+**Priority:** {content.get('priority', 'N/A')}  
+**Technician:** {content.get('technician', 'Unassigned')}  
+**Requester:** {content.get('requester', 'N/A')}  
+**Category:** {content.get('category', 'N/A')}  
+**Created:** {content.get('created_time', 'N/A')}  
+**Resolved:** {content.get('resolved_time', 'N/A')}  
+**Closed:** {content.get('closed_time', 'N/A')}
+
+## SLA information
+
+- Policy: {content.get('sla_policy', 'N/A')}
+- Status: {content.get('sla_status', 'N/A')}
+- Compliance: {content.get('sla_compliance_label', 'Unknown')}
+- Days delta: {content.get('sla_days_delta', 'N/A')}
+- Violated: {content.get('sla_violated', False)}
+- First response due: {content.get('first_response_due', 'N/A')}
+- First response late: {content.get('first_response_overdue', False)}
+- Resolution due: {content.get('sla_resolution_due', 'N/A')}
+
+## Initial request
+
 {content.get('description', 'N/A')}
 
-CONVERSATION HISTORY ({content.get('conversation_count', 0)} exchanges):
+## Conversation history ({content.get('conversation_count', 0)} exchanges)
+
 {content.get('conversation_summary', 'No email exchanges')}
 
-INTERNAL NOTES:
+## Internal notes
+
 {content.get('internal_notes_summary', 'No internal notes')}
 
-RESOLUTION:
+## Resolution
+
 {content.get('resolution', 'Not resolved')}
 """
 
-    payload = {
-        "text": text_content,
-        "source_url": content.get('source_url'),
-        "timestamp": int(datetime.now(timezone.utc).timestamp()),
-        "tags": tags,
-        "parents": None,
-        "light_document_output": True,
-        "upsert": True
-    }
-
-    last_error = None
-
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-
-            if response.status_code in [200, 201]:
-                stats['api_calls'] += 1
-                time.sleep(UPLOAD_DELAY)
-                return True, None
-
-            elif response.status_code == 429:
-                wait_time = (2 ** attempt) * 2
-                logger.warning(f"    Rate limited on {doc_id}, waiting {wait_time}s...")
-                time.sleep(wait_time)
-                stats['rate_limited'] += 1
-                continue
-
-            else:
-                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                else:
-                    return False, last_error
-
-        except requests.exceptions.Timeout:
-            last_error = "Request timeout"
-            if attempt < max_retries - 1:
-                time.sleep(2)
-                continue
-            else:
-                return False, last_error
-
-        except Exception as e:
-            last_error = f"Exception: {str(e)}"
-            if attempt < max_retries - 1:
-                time.sleep(1)
-                continue
-            else:
-                return False, last_error
-
-    return False, last_error
+    try:
+        path.write_text(text_content, encoding='utf-8')
+        stats['api_calls'] += 1  # retain summary semantics as work completed
+        return True, None
+    except Exception as e:
+        stats['upload_failures'] += 1
+        return False, f"Local SharePoint export failed for {path}: {e}"
 
 def upload_documents_parallel(
     documents: List[Tuple[str, dict, list]],
@@ -1260,6 +1154,12 @@ def run_sync():
 
     sync_start_time = datetime.now(timezone.utc)
 
+    if SHAREPOINT_EXPORT_DIR.exists():
+        shutil.rmtree(SHAREPOINT_EXPORT_DIR)
+    for folder_name in ('active', 'closed', 'archived'):
+        (SHAREPOINT_EXPORT_DIR / folder_name).mkdir(parents=True, exist_ok=True)
+    logger.info(f"SharePoint export directory initialized: {SHAREPOINT_EXPORT_DIR}")
+
     logger.info("=" * 60)
     logger.info(f"SERVICEDESK INTELLIGENCE SUITE {VERSION}")
     logger.info("=" * 60)
@@ -1531,8 +1431,8 @@ def run_sync():
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
-    logger.info("  📦 servicedesk  = closed + archived (SLA from ticket object)")
-    logger.info("  ⚡ servicedesk-active = open tickets")
+    logger.info("  📦 closed/archived = SharePoint export folders")
+    logger.info("  ⚡ active = SharePoint export folder")
     if sync_failed:
         logger.error("SYNC FAILED - Dust data sources were not fully updated")
         sys.exit(1)
@@ -1549,7 +1449,6 @@ if __name__ == "__main__":
         logger.info("")
 
         required_vars = [
-            'DUST_API_KEY', 'DUST_WORKSPACE_ID',
             'SDP_DOMAIN', 'SDP_CLIENT_ID', 'SDP_CLIENT_SECRET', 'SDP_REFRESH_TOKEN'
         ]
 
@@ -1559,9 +1458,8 @@ if __name__ == "__main__":
             sys.exit(1)
 
         logger.info("✓ Configuration loaded")
-        logger.info(f"  Workspace:              {DUST_WORKSPACE_ID}")
-        logger.info(f"  Main Data Source:       {DUST_MAIN_DATA_SOURCE}  (closed + archived)")
-        logger.info(f"  Active Data Source:     {DUST_ACTIVE_DATA_SOURCE}  (active only)")
+        logger.info(f"  SharePoint export:      {SHAREPOINT_EXPORT_DIR}")
+        logger.info("  Output folders:         active, closed, archived")
         logger.info(f"  SDP Domain:             {SDP_DOMAIN}")
         logger.info(f"  Version:                {VERSION}")
         logger.info(f"  Batch Size:             {BATCH_SIZE}")
