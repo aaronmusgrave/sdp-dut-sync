@@ -60,9 +60,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f scripts/sync_servicedesk_intelligence_sharepoint.py
-          test -f scripts/upload_to_sharepoint.py
+
+          for file in scripts/requirements.txt scripts/upload_to_sharepoint.py; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing required file: $file"
+              echo "Contents of scripts/:"
+              ls -la scripts/
+              exit 1
+            fi
+          done
+
+          if [[ -f scripts/sync_servicedesk_intelligence_sharepoint.py ]]; then
+            SYNC_SCRIPT="scripts/sync_servicedesk_intelligence_sharepoint.py"
+            echo "SYNC_SCRIPT=$SYNC_SCRIPT" >> "$GITHUB_ENV"
+          elif [[ -f scripts/syny_servicedesk_intelligence_sharepoint.py ]]; then
+            echo "::warning::Using legacy misspelled script filename; rename it to sync_servicedesk_intelligence_sharepoint.py"
+            SYNC_SCRIPT="scripts/syny_servicedesk_intelligence_sharepoint.py"
+            echo "SYNC_SCRIPT=$SYNC_SCRIPT" >> "$GITHUB_ENV"
+          else
+            echo "::error::Missing SharePoint ServiceDesk sync script"
+            echo "Expected scripts/sync_servicedesk_intelligence_sharepoint.py"
+            echo "Contents of scripts/:"
+            ls -la scripts/
+            exit 1
+          fi
+
           echo "SharePoint sync files are present"
+          echo "Using $SYNC_SCRIPT"
 
       - name: Run sync script
         env:
@@ -75,7 +99,7 @@ jobs:
           FORCE_ARCHIVE_SYNC: ${{ github.event.inputs.force_archive_sync || 'false' }}
         run: |
           echo "Starting ServiceDesk Intelligence Sync (SharePoint Export Mode)..."
-          python scripts/sync_servicedesk_intelligence_sharepoint.py
+          python "$SYNC_SCRIPT"
 
       - name: Upload ticket exports to SharePoint
         env:
