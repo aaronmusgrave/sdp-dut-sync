@@ -116,6 +116,7 @@ stats = {
     'updated_tickets': 0,
     'conversations_fetched': 0,
     'upload_failures': 0,
+    'delete_failures': 0,
     'retries': 0,
     'rate_limited': 0,
     'api_calls': 0,
@@ -552,13 +553,13 @@ def fetch_all_documents_from_dust(data_source_id: str) -> List[str]:
 
         except Exception as e:
             logger.error(f"Failed to fetch documents from {data_source_id}: {e}")
-            break
+            raise
 
     logger.info(f"  ✓ Found {len(all_doc_ids)} documents in {data_source_id}")
     return all_doc_ids
 
 def delete_documents_from_dust_parallel(data_source_id: str, document_ids: List[str]) -> int:
-    """Delete documents from Dust in parallel."""
+    """Delete documents from Dust in parallel and record failures."""
     if not document_ids:
         logger.info(f"  No documents to delete from {data_source_id}")
         return 0
@@ -583,8 +584,14 @@ def delete_documents_from_dust_parallel(data_source_id: str, document_ids: List[
                         rate = deleted_count / elapsed if elapsed > 0 else 0
                         logger.info(f"    Deleted {deleted_count}/{len(document_ids)} ({rate:.1f}/sec)...")
                 return True
-        except:
-            pass
+
+            if response.status_code in [401, 403]:
+                logger.error(
+                    f"    ❌ Delete failed for {doc_id}: "
+                    f"HTTP {response.status_code}: {response.text[:200]}"
+                )
+        except Exception as e:
+            logger.error(f"    ❌ Delete failed for {doc_id}: {e}")
         return False
 
     with ThreadPoolExecutor(max_workers=20) as executor:
@@ -593,7 +600,19 @@ def delete_documents_from_dust_parallel(data_source_id: str, document_ids: List[
             future.result()
 
     elapsed = time.time() - start_time
-    logger.info(f"  ✓ Deleted {deleted_count}/{len(document_ids)} ({elapsed:.1f}s, {deleted_count/elapsed:.1f}/sec)")
+    failed_count = len(document_ids) - deleted_count
+    stats['delete_failures'] += failed_count
+
+    if failed_count:
+        logger.error(
+            f"  ❌ Deleted {deleted_count}/{len(document_ids)} from {data_source_id}; "
+            f"{failed_count} deletes failed"
+        )
+    else:
+        logger.info(
+            f"  ✓ Deleted {deleted_count}/{len(document_ids)} "
+            f"({elapsed:.1f}s, {deleted_count/elapsed:.1f}/sec)"
+        )
     return deleted_count
 
 def upload_document_to_dust(
@@ -699,7 +718,6 @@ RESOLUTION:
             else:
                 return False, last_error
 
-    stats['upload_failures'] += 1
     return False, last_error
 
 def upload_documents_parallel(
@@ -732,6 +750,7 @@ def upload_documents_parallel(
                 if failed <= 5:
                     logger.error(f"    ❌ Upload failed for {doc_id}: {error}")
 
+    stats['upload_failures'] += failed
     elapsed = time.time() - start_time
     return uploaded, failed, error_messages
 
@@ -1205,7 +1224,6 @@ def process_batch(
     elif is_incremental:
         logger.info(f"  ✓ {len(main_documents)} changed → servicedesk, {len(active_documents)} active → servicedesk-active")
         stats['tickets_processed'] += len(main_documents)
-        stats['tickets_skipped'] += (len(batch_tickets) - len(main_documents))
     else:
         logger.info(f"  ✓ {len(main_documents)} → servicedesk, {len(active_documents)} active → servicedesk-active")
         stats['tickets_processed'] += len(main_documents)
@@ -1346,6 +1364,7 @@ def run_sync():
 
         tickets_to_process = list(tickets_to_process_dict.values())
         tickets_skipped = len(all_tickets) - len(tickets_to_process)
+        stats['tickets_skipped'] = tickets_skipped
 
         logger.info("")
         logger.info(f"  Total in SDP:          {len(all_tickets)}")
@@ -1428,7 +1447,15 @@ def run_sync():
     # --------------------------------------------------------
     # SAVE CHECKPOINT
     # --------------------------------------------------------
-    save_checkpoint(sync_start_time, archive_timestamp=archive_sync_timestamp)
+    sync_failed = bool(stats['upload_failures'] or stats['delete_failures'])
+    if sync_failed:
+        logger.error(
+            "Dust write phase failed; checkpoint will not advance: "
+            f"{stats['upload_failures']} upload failures, "
+            f"{stats['delete_failures']} delete failures"
+        )
+    else:
+        save_checkpoint(sync_start_time, archive_timestamp=archive_sync_timestamp)
 
     # --------------------------------------------------------
     # FINAL SUMMARY
@@ -1456,7 +1483,8 @@ def run_sync():
     logger.info(f"  servicedesk (live):     {stats['main_uploaded']}")
     logger.info(f"  servicedesk (archived): {stats['archive_uploaded']}")
     logger.info(f"  servicedesk-active:     {stats['active_uploaded']}")
-    logger.info(f"  Failures:               {stats['upload_failures']}")
+    logger.info(f"  Upload Failures:        {stats['upload_failures']}")
+    logger.info(f"  Delete Failures:        {stats['delete_failures']}")
 
     logger.info("")
     logger.info("🔒 SLA:")
@@ -1505,6 +1533,9 @@ def run_sync():
     logger.info(f"✓ ServiceDesk Intelligence Suite {VERSION}")
     logger.info("  📦 servicedesk  = closed + archived (SLA from ticket object)")
     logger.info("  ⚡ servicedesk-active = open tickets")
+    if sync_failed:
+        logger.error("SYNC FAILED - Dust data sources were not fully updated")
+        sys.exit(1)
     logger.info("=" * 60)
 
 # ============================================================
