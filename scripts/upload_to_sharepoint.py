@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -23,6 +24,8 @@ CLIENT_SECRET = clean(os.getenv("AZURE_CLIENT_SECRET"))
 DRIVE_ID = clean(os.getenv("SHAREPOINT_DRIVE_ID"))
 ROOT_FOLDER_ID = clean(os.getenv("SHAREPOINT_ROOT_FOLDER_ID"))
 TOKEN = None
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_REQUEST_ATTEMPTS = 6
 
 
 def graph_token() -> str:
@@ -45,11 +48,34 @@ def graph_token() -> str:
 
 
 def request(method: str, url: str, **kwargs):
+    """Call Graph with bounded retries for throttling/transient service failures."""
     headers = kwargs.pop("headers", {})
-    headers["Authorization"] = f"Bearer {graph_token()}"
-    response = requests.request(method, url, headers=headers, timeout=90, **kwargs)
-    response.raise_for_status()
-    return response
+
+    for attempt in range(MAX_REQUEST_ATTEMPTS):
+        headers["Authorization"] = f"Bearer {graph_token()}"
+        response = requests.request(method, url, headers=headers, timeout=120, **kwargs)
+
+        if response.status_code not in RETRYABLE_STATUS_CODES:
+            response.raise_for_status()
+            return response
+
+        if attempt == MAX_REQUEST_ATTEMPTS - 1:
+            response.raise_for_status()
+
+        retry_after = response.headers.get("Retry-After")
+        try:
+            wait_seconds = float(retry_after) if retry_after else min(60, 2 ** attempt)
+        except ValueError:
+            wait_seconds = min(60, 2 ** attempt)
+
+        print(
+            f"Transient Microsoft Graph HTTP {response.status_code} "
+            f"for {method} {url}; retrying in {wait_seconds:.1f}s "
+            f"(attempt {attempt + 1}/{MAX_REQUEST_ATTEMPTS})"
+        )
+        time.sleep(wait_seconds)
+
+    raise RuntimeError("Unreachable retry state")
 
 
 def list_children(folder_id: str) -> list[dict]:
@@ -155,6 +181,7 @@ def main() -> None:
             if not path.is_file():
                 continue
             upload_text(folder_id, path.name, path.read_text(encoding="utf-8"), "application/json")
+            time.sleep(0.25)
             if args.make_csv and path.suffix.lower() == ".json":
                 upload_text(folder_id, path.with_suffix(".csv").name, flatten_performance_json(path), "text/csv")
             print(f"Uploaded {path.name} → {args.target_folder}")
@@ -171,6 +198,7 @@ def main() -> None:
             continue
         for path in sorted(local_folder.glob("*.md")):
             upload_text(folder_id, path.name, path.read_text(encoding="utf-8"), "text/markdown")
+            time.sleep(0.25)
             print(f"Uploaded {path.name} → {folder_name}")
 
     if args.reconcile_active:
