@@ -54,17 +54,25 @@ jobs:
 
       - name: Run sync script
         env:
-          DUST_API_KEY: ${{ secrets.DUST_API_KEY }}
-          DUST_WORKSPACE_ID: ${{ secrets.DUST_WORKSPACE_ID }}
           SDP_DOMAIN: ${{ secrets.SDP_DOMAIN }}
           SDP_CLIENT_ID: ${{ secrets.SDP_CLIENT_ID }}
           SDP_CLIENT_SECRET: ${{ secrets.SDP_CLIENT_SECRET }}
           SDP_REFRESH_TOKEN: ${{ secrets.SDP_REFRESH_TOKEN }}
+          SHAREPOINT_EXPORT_DIR: sharepoint_export
           FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
           FORCE_ARCHIVE_SYNC: ${{ github.event.inputs.force_archive_sync || 'false' }}
         run: |
-          echo "Starting ServiceDesk Intelligence Sync (Real-Time Mode)..."
-          python scripts/sync_servicedesk_intelligence.py
+          echo "Starting ServiceDesk Intelligence Sync (SharePoint Export Mode)..."
+          python scripts/sync_servicedesk_intelligence_sharepoint.py
+
+      - name: Upload ticket exports to SharePoint
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SHAREPOINT_DRIVE_ID: ${{ secrets.SHAREPOINT_DRIVE_ID }}
+          SHAREPOINT_ROOT_FOLDER_ID: ${{ secrets.SHAREPOINT_ROOT_FOLDER_ID }}
+        run: python scripts/upload_to_sharepoint.py --source-dir sharepoint_export --reconcile-active
 
       - name: Commit checkpoint to repository
         if: success()
@@ -93,7 +101,7 @@ jobs:
             echo "Next sync: In 20 minutes"
             cat sync_checkpoint.json
           elif [ "${{ job.status }}" != "success" ]; then
-            echo "❌ Sync failed; checkpoint was not advanced"
+            echo "❌ Sync failed; checkpoint was not committed"
           else
             echo "⚠ No checkpoint created"
           fi
